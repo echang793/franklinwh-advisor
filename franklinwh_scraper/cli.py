@@ -492,13 +492,14 @@ def _dispatch_notifications(rec, cfg: Config, notify_flag: bool, last_mode: str 
     if not rec.needs_action and not critical:
         return
 
-    # Emergency backup / critical alerts fire at most once per day (first occurrence only).
-    if (rec.mode.value == "emergency_backup" or critical) and outdir is not None:
+    # Mode-change alerts fire at most once per day per mode to stop oscillation noise.
+    if outdir is not None:
         state = _load_peak_state(outdir)
         today = datetime.now().strftime("%Y-%m-%d")
-        if state.get("emergency_backup_alerted_date") == today:
+        key   = f"alerted_{rec.mode.value}_date"
+        if state.get(key) == today:
             return
-        state["emergency_backup_alerted_date"] = today
+        state[key] = today
         _save_peak_state(outdir, state)
 
     if notify_flag:
