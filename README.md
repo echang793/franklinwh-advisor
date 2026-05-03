@@ -51,7 +51,7 @@ Every 15 minutes (7 am – 11 pm daily) it:
 ## Install
 
 ```bash
-git clone https://github.com/yourusername/franklinwh-advisor
+git clone https://github.com/echang793/franklinwh-advisor
 cd franklinwh-advisor
 bash install.sh
 ```
