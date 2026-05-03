@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "franklinwh-advisor"
+version = "1.0.0"
+description = "FranklinWH home battery advisor with smart iMessage and Telegram alerts"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.28",
+    "click>=8.0",
+    "beautifulsoup4>=4.11",
+]
+
+[project.scripts]
+franklinwh = "franklinwh_scraper.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["franklinwh_scraper*"]
