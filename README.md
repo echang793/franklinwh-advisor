@@ -150,7 +150,8 @@ Update it any time with `python3 scrape.py setup`.
 
 - **Day 1–2**: Alerts fire but predictions use rough estimates
 - **Day 3+**: Usage-pattern-based load forecasting activates
-- **3+ sunny days**: Solar generation estimates improve as the system self-calibrates — on sunny days it records your measured panel output vs. irradiance and builds a calibrated system peak kW. After 3 readings, morning previews and 12h solar forecasts use GHI forecast × calibrated peak kW for accurate estimates
+- **3+ sunny days**: Solar generation estimates improve as the system self-calibrates — on sunny days it records your measured panel output vs. irradiance and builds a calibrated system peak kW (median of all readings). Morning previews and 12h solar forecasts use GHI forecast × calibrated peak kW
+- **3+ complete days tracked**: An empirical **performance ratio** (PR) activates. Each morning the system compares yesterday's actual solar kWh (from your readings) against what it predicted the morning before, and stores the ratio. After 3 days the rolling median of those ratios is applied to all future forecasts — automatically correcting for inverter losses, temperature derating, panel tilt, and any site-specific shading. The morning message shows `PR=0.82` (or whatever your system settles to). A typical residential system lands between 0.75–0.87.
 
 ---
 
