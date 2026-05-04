@@ -131,6 +131,18 @@ class HistoryStore:
             sample_count=int(row[2]),
         )
 
+    def daily_solar_kwh(self, date_str: str, interval_hours: float = 0.25) -> float:
+        """Sum actual solar production for a calendar date.
+
+        Assumes readings are taken every `interval_hours` (default 15 min = 0.25 h).
+        Returns 0.0 if no readings exist for that date.
+        """
+        rows = self._conn.execute(
+            "SELECT solar_kw FROM readings WHERE substr(timestamp,1,10)=?",
+            (date_str,),
+        ).fetchall()
+        return round(sum(r[0] for r in rows) * interval_hours, 2)
+
     def recent_avg_load(self, hours: int = 2) -> float | None:
         """Average home load over the last N hours of recorded data."""
         cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()

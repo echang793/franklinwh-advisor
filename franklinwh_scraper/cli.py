@@ -97,12 +97,26 @@ def _save_last_mode(out: Path, mode: str) -> None:
 
 
 def _get_system_peak_kw(state: dict) -> float | None:
-    """Return calibrated system peak kW (p75 of sunny-day samples), or None if < 3 samples."""
+    """Return calibrated system peak kW (median of sunny-day samples), or None if < 3 samples."""
     samples = state.get("solar_cal_samples", [])
     if len(samples) < 3:
         return None
     s = sorted(samples)
-    return s[int(len(s) * 0.75)]
+    return s[len(s) // 2]  # median — less biased than P75
+
+
+def _get_performance_ratio(state: dict) -> float:
+    """Return empirical performance ratio (actual / predicted daily kWh).
+
+    Computed as the median of the last 30 days where we had both a stored
+    prediction and a measurable actual output (>= 3 kWh predicted).
+    Returns 1.0 until at least 3 complete days have been compared.
+    """
+    samples = state.get("perf_ratio_samples", [])
+    if len(samples) < 3:
+        return 1.0
+    s = sorted(samples)
+    return s[len(s) // 2]
 
 
 # ── Weather forecast cache (30-min TTL) ──────────────────────────────
@@ -165,7 +179,7 @@ def _save_peak_state(out: Path, state: dict) -> None:
     tmp.replace(target)  # atomic on POSIX — no partial-write corruption
 
 
-def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None) -> None:
+def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None, store=None) -> None:
     """
     Ten daily alerts for solar, battery, and grid awareness.
 
@@ -219,18 +233,30 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
     # Daily briefing: current SoC + weather-based predicted solar generation.
     in_morning_preview = (hour == 8 and minute <= 30)
     if in_morning_preview and state.get("morning_preview_date") != today:
+        # ── Update performance ratio from yesterday's actual vs predicted ──
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        pred_key  = f"predicted_kwh_{yesterday}"
+        if store is not None and pred_key in state:
+            actual_kwh    = store.daily_solar_kwh(yesterday)
+            predicted_kwh = state[pred_key]
+            if predicted_kwh >= 3.0 and actual_kwh >= 0.5:
+                ratio = round(actual_kwh / predicted_kwh, 3)
+                pr_samples = state.get("perf_ratio_samples", [])
+                pr_samples.append(ratio)
+                state["perf_ratio_samples"] = pr_samples[-30:]
+                logger.info(
+                    "Performance ratio update: actual=%.1f predicted=%.1f ratio=%.3f (median=%.3f)",
+                    actual_kwh, predicted_kwh, ratio, _get_performance_ratio(state),
+                )
+                changed = True
+
         if outlook:
-            # Use calibrated system_peak_kw if we have enough sunny-day samples.
-            # The 75th percentile captures near-peak output while ignoring
-            # occasional shading or high-temp derating in the sample set.
             cal_samples = state.get("solar_cal_samples", [])
             if len(cal_samples) >= 3:
                 sorted_samples = sorted(cal_samples)
-                p75_idx = int(len(sorted_samples) * 0.75)
-                system_peak_kw = sorted_samples[p75_idx]
+                system_peak_kw = sorted_samples[len(sorted_samples) // 2]  # median
                 cal_note = f"{len(cal_samples)} readings"
             else:
-                # Not enough calibration data yet — estimate from history profile.
                 if usage_forecast and usage_forecast.hours:
                     system_peak_kw = max(
                         (p.predicted_solar_kw for p in usage_forecast.hours),
@@ -240,7 +266,14 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
                     system_peak_kw = max(solar_kw, 1.0) * 1.2
                 cal_note = f"calibrating, {len(cal_samples)}/3 readings"
             system_peak_kw = max(system_peak_kw, 1.0)
-            gen_kwh = outlook.today_generation_kwh(system_peak_kw)
+
+            perf_ratio = _get_performance_ratio(state)
+            gen_kwh    = round(outlook.today_generation_kwh(system_peak_kw) * perf_ratio, 1)
+
+            # Store today's prediction for tomorrow's ratio update
+            state[f"predicted_kwh_{today}"] = gen_kwh
+            changed = True
+
             avg_ghi = outlook.avg_ghi(12)
             if avg_ghi >= 400:
                 sky = "Sunny"
@@ -248,7 +281,8 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
                 sky = "Partly cloudy"
             else:
                 sky = "Cloudy"
-            solar_est = f"~{gen_kwh:.1f} kWh predicted generation ({sky}, {cal_note})"
+            pr_note = f"PR={perf_ratio:.2f}" if len(state.get("perf_ratio_samples", [])) >= 3 else cal_note
+            solar_est = f"~{gen_kwh:.1f} kWh predicted ({sky}, {pr_note})"
         else:
             solar_est = "Solar forecast unavailable"
         body = (
@@ -1068,7 +1102,7 @@ def cmd_advise(
                 _print_recommendation(rec, stats, usage_forecast, cfg.location_name)
                 notify_log(rec, log_path)
                 _dispatch_notifications(rec, cfg, notify, last_mode, outdir)
-                _check_peak_alerts(stats, cfg, outdir, outlook=outlook, usage_forecast=usage_forecast)
+                _check_peak_alerts(stats, cfg, outdir, outlook=outlook, usage_forecast=usage_forecast, store=history)
 
                 last_mode = rec.mode.value
                 _save_last_mode(outdir, last_mode)
