@@ -730,6 +730,10 @@ def cmd_install_service(ctx: click.Context) -> None:
     """Install a macOS LaunchAgent so the advisor starts automatically on login."""
     import sys
 
+    if sys.platform != "darwin":
+        _err("install-service is only supported on macOS. On Linux, set up a cron job or systemd timer manually.")
+        sys.exit(1)
+
     cfg       = ctx.obj["config"]
     python    = sys.executable
     script    = (Path(__file__).parent.parent / "scrape.py").resolve()
