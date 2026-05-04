@@ -150,7 +150,7 @@ Update it any time with `python3 scrape.py setup`.
 
 - **Day 1–2**: Alerts fire but predictions use rough estimates
 - **Day 3+**: Usage-pattern-based load forecasting activates
-- **3+ sunny days**: Solar forecast switches from historical averages to weather-adjusted estimates using your measured panel output (GHI × calibrated system peak kW)
+- **3+ sunny days**: Solar generation estimates improve as the system self-calibrates — on sunny days it records your measured panel output vs. irradiance and builds a calibrated system peak kW. After 3 readings, morning previews and 12h solar forecasts use GHI forecast × calibrated peak kW for accurate estimates
 
 ---
 
