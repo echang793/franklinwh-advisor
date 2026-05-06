@@ -107,16 +107,27 @@ class SolarOutlook:
         return 0.0
 
 
-def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10) -> SolarOutlook:
+def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int = 3) -> SolarOutlook:
     """Fetch 48-hour hourly solar irradiance forecast for a location."""
-    resp = requests.get(OPEN_METEO_URL, params={
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": "direct_radiation,diffuse_radiation,cloud_cover",
-        "forecast_days": 2,
-        "timezone": "auto",
-    }, timeout=timeout)
-    resp.raise_for_status()
+    import time as _time
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            resp = requests.get(OPEN_METEO_URL, params={
+                "latitude": lat,
+                "longitude": lon,
+                "hourly": "direct_radiation,diffuse_radiation,cloud_cover",
+                "forecast_days": 2,
+                "timezone": "auto",
+            }, timeout=timeout)
+            resp.raise_for_status()
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                _time.sleep(5 * 2 ** attempt)
+    else:
+        raise last_exc  # type: ignore[misc]
     js = resp.json()
 
     hourly = js["hourly"]
