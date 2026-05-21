@@ -6,7 +6,6 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 from .account import Stats
 
@@ -14,17 +13,22 @@ DEFAULT_DB_PATH = Path("output/history.db")
 
 _CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS readings (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp     TEXT    NOT NULL,
-    day_of_week   INTEGER NOT NULL,  -- 0=Mon … 6=Sun
-    hour_of_day   INTEGER NOT NULL,  -- 0–23
-    home_load_kw  REAL    NOT NULL,
-    solar_kw      REAL    NOT NULL,
-    battery_soc   REAL    NOT NULL,
-    grid_use_kw   REAL    NOT NULL,
-    grid_status   TEXT    NOT NULL
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp        TEXT    NOT NULL,
+    day_of_week      INTEGER NOT NULL,
+    hour_of_day      INTEGER NOT NULL,
+    home_load_kw     REAL    NOT NULL,
+    solar_kw         REAL    NOT NULL,
+    battery_soc      REAL    NOT NULL,
+    grid_use_kw      REAL    NOT NULL,
+    grid_status      TEXT    NOT NULL,
+    solar_total_kwh  REAL    NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_slot ON readings(day_of_week, hour_of_day);
+"""
+
+_MIGRATE_SQL = """
+ALTER TABLE readings ADD COLUMN solar_total_kwh REAL NOT NULL DEFAULT 0;
 """
 
 
@@ -46,6 +50,10 @@ class HistoryStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path))
         self._conn.executescript(_CREATE_SQL)
+        try:
+            self._conn.executescript(_MIGRATE_SQL)
+        except sqlite3.OperationalError:
+            pass  # column already exists
         self._conn.commit()
 
     # ---------------------------------------------------------------- #
@@ -56,8 +64,9 @@ class HistoryStore:
             """
             INSERT INTO readings
               (timestamp, day_of_week, hour_of_day,
-               home_load_kw, solar_kw, battery_soc, grid_use_kw, grid_status)
-            VALUES (?,?,?,?,?,?,?,?)
+               home_load_kw, solar_kw, battery_soc, grid_use_kw, grid_status,
+               solar_total_kwh)
+            VALUES (?,?,?,?,?,?,?,?,?)
             """,
             (
                 now.isoformat(),
@@ -68,6 +77,7 @@ class HistoryStore:
                 stats.current.battery_soc_pct,
                 stats.current.grid_use_kw,
                 stats.current.grid_status,
+                stats.totals.solar_kwh,
             ),
         )
         self._conn.commit()
@@ -142,6 +152,19 @@ class HistoryStore:
             (date_str,),
         ).fetchall()
         return round(sum(r[0] for r in rows) * interval_hours, 2)
+
+    def daily_solar_kwh_api(self, date_str: str) -> float:
+        """Return actual daily solar kWh from the API's own running total.
+
+        Uses MAX(solar_total_kwh) for the date — the API counter resets at midnight
+        and peaks at end-of-day, so MAX gives the true daily production regardless
+        of how many polls were missed.  Returns 0.0 if no rows or column missing.
+        """
+        row = self._conn.execute(
+            "SELECT MAX(solar_total_kwh) FROM readings WHERE substr(timestamp,1,10)=?",
+            (date_str,),
+        ).fetchone()
+        return round(float(row[0]), 2) if row and row[0] is not None else 0.0
 
     def recent_avg_load(self, hours: int = 2) -> float | None:
         """Average home load over the last N hours of recorded data."""

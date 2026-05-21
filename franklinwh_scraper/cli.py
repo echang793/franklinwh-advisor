@@ -14,7 +14,6 @@ import click
 
 logger = logging.getLogger(__name__)
 
-from . import config as cfg_module
 from .account import AccountClient
 from .advisor import recommend
 from .client import FranklinWHClient
@@ -116,7 +115,9 @@ def _get_performance_ratio(state: dict) -> float:
     if len(samples) < 3:
         return 1.0
     s = sorted(samples)
-    return s[len(s) // 2]
+    # Floor 0.60: prevents one catastrophic outlier from tanking forecasts,
+    # but low enough to not override the real median (currently ~0.606).
+    return max(s[len(s) // 2], 0.60)
 
 
 # ── Weather forecast cache (30-min TTL) ──────────────────────────────
@@ -211,7 +212,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
     grid_kw     = c.grid_use_kw
     solar_kw    = c.solar_production_kw
     load_kw     = c.home_load_kw
-    battery_kw  = c.battery_use_kw   # positive = charging, negative = discharging
+    battery_kw  = c.battery_use_kw   # negative = charging, positive = discharging (p_fhp convention)
     grid_status = c.grid_status
 
     # ── Solar calibration (runs every poll) ──────────────────────────
@@ -229,15 +230,19 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
                 state["solar_cal_samples"] = samples[-50:]  # keep last 50
                 changed = True
 
-    # ── Alert 0: morning preview 8:00–8:30 am ────────────────────────
+    # ── Alert 0: morning preview 8:00–9:59 am ────────────────────────
     # Daily briefing: current SoC + weather-based predicted solar generation.
-    in_morning_preview = (hour == 8 and minute <= 30)
+    in_morning_preview = (hour in (8, 9))
     if in_morning_preview and state.get("morning_preview_date") != today:
         # ── Update performance ratio from yesterday's actual vs predicted ──
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         pred_key  = f"predicted_kwh_{yesterday}"
         if store is not None and pred_key in state:
-            actual_kwh    = store.daily_solar_kwh(yesterday)
+            # Use API's own daily total (MAX of running counter) — immune to poll gaps.
+            # Fall back to sampled sum only if API total unavailable (old rows).
+            actual_kwh = store.daily_solar_kwh_api(yesterday)
+            if actual_kwh <= 0.0:
+                actual_kwh = store.daily_solar_kwh(yesterday)
             predicted_kwh = state[pred_key]
             if predicted_kwh >= 3.0 and actual_kwh >= 0.5:
                 ratio = round(actual_kwh / predicted_kwh, 3)
@@ -394,7 +399,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
 
     # ── Alert 7: end-of-day digest at 9 pm ───────────────────────────
     # Window: full 9 pm hour. Wide enough to guarantee a 15-min poll hits it.
-    in_eod_window = hour == 21
+    in_eod_window = hour in (21, 22)
     if in_eod_window:
         if state.get("eod_digest_date") != today:
             t = stats.totals
@@ -403,13 +408,30 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
                 backup_str = f"\nEst. backup now: ~{backup_h:.1f} hr at current load"
             else:
                 backup_str = ""
+
+            # Solar prediction vs actual delta
+            predicted_kwh = state.get(f"predicted_kwh_{today}")
+            actual_kwh    = t.solar_kwh
+            if predicted_kwh and predicted_kwh > 0:
+                delta_kwh = actual_kwh - predicted_kwh
+                delta_pct = (delta_kwh / predicted_kwh) * 100
+                sign      = "+" if delta_kwh >= 0 else ""
+                solar_delta_str = (
+                    f"\n\nSolar forecast vs actual:\n"
+                    f"  Predicted:  {predicted_kwh:.1f} kWh\n"
+                    f"  Actual:     {actual_kwh:.1f} kWh\n"
+                    f"  Delta:      {sign}{delta_kwh:.1f} kWh ({sign}{delta_pct:.0f}%)"
+                )
+            else:
+                solar_delta_str = ""
+
             body = (
                 f"📊 FranklinWH Daily Summary — {now.strftime('%a %b %-d')}\n"
                 f"Solar generated:  {t.solar_kwh:.1f} kWh\n"
                 f"Grid consumed:    {t.grid_load_kwh:.1f} kWh\n"
                 f"Grid exported:    {t.grid_export_kwh:.1f} kWh\n"
                 f"Home used:        {t.home_use_kwh:.1f} kWh\n"
-                f"Battery SoC now:  {soc:.0f}%{backup_str}"
+                f"Battery SoC now:  {soc:.0f}%{backup_str}{solar_delta_str}"
             )
             _send_alert(body, cfg)
             logger.info("End-of-day digest sent for %s", today)
@@ -496,9 +518,9 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
 
     # ── Alert 11: battery not charging despite strong solar ──────────────
     # Window: 10 am–2 pm. Fires if solar is strong but battery isn't absorbing it.
-    # battery_kw < 0.1 means neither charging nor discharging — battery is idle.
+    # p_fhp sign: negative = charging, positive = discharging. "Not charging" = battery_kw > -0.2.
     in_solar_peak = 10 <= hour < 14
-    if in_solar_peak and solar_kw > 1.5 and soc < 80.0 and battery_kw < 0.1:
+    if in_solar_peak and solar_kw > 1.5 and soc < 80.0 and battery_kw > -0.2:
         if state.get("not_charging_date") != today:
             body = (
                 f"⚠️ FranklinWH: Battery not charging despite strong solar\n"
@@ -1181,7 +1203,6 @@ def cmd_history(ctx: click.Context, out: str | None) -> None:
 # ── Shared helpers ────────────────────────────────────────────────────
 
 def _print_recommendation(rec, stats, usage_forecast=None, location="") -> None:
-    from .advisor import Mode
     urgency_color = {"info": "green", "warning": "yellow", "critical": "red"}
     urgency_label = {"info": "INFO", "warning": "WARN", "critical": "CRIT"}
     emoji         = {"info": "🟢",  "warning": "🟡",   "critical": "🔴"}
