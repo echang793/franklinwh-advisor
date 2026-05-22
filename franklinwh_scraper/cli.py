@@ -230,9 +230,10 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
                 state["solar_cal_samples"] = samples[-50:]  # keep last 50
                 changed = True
 
-    # ── Alert 0: morning preview 8:00–9:59 am ────────────────────────
-    # Daily briefing: current SoC + weather-based predicted solar generation.
-    in_morning_preview = (hour in (8, 9))
+    # ── Alert 0: morning preview 8:00–12:59 pm ───────────────────────
+    # Wide window so Mac sleep/wake still delivers the alert. Dedup via
+    # morning_preview_date ensures it fires at most once per day.
+    in_morning_preview = (8 <= hour < 13)
     if in_morning_preview and state.get("morning_preview_date") != today:
         # ── Update performance ratio from yesterday's actual vs predicted ──
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
