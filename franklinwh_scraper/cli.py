@@ -19,6 +19,7 @@ from .advisor import recommend
 from .client import FranklinWHClient
 from .config import Config, load as load_config, save as save_config
 from .exporters import export_csv, export_json
+
 from .history import HistoryStore
 from .notifier import (notify_imessage, notify_imessage_text, notify_log,
                        notify_macos, notify_telegram, fetch_telegram_chat_id,
@@ -454,6 +455,54 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             _send_alert(body, cfg)
             logger.info("End-of-day digest sent for %s", today)
             state["eod_digest_date"] = today
+            changed = True
+
+    # ── Monthly summary: last day of month at EOD ─────────────────────
+    # Fires once on the last calendar day, comparing this month to last month.
+    if in_eod_window and store is not None:
+        import calendar as _cal
+        last_day_of_month = _cal.monthrange(now.year, now.month)[1]
+        if now.day == last_day_of_month and state.get("monthly_summary_month") != today[:7]:
+            this_ym  = now.strftime("%Y-%m")
+            first_of_this = now.replace(day=1)
+            last_ym  = (first_of_this - timedelta(days=1)).strftime("%Y-%m")
+
+            cur  = store.monthly_totals(this_ym)
+            prev = store.monthly_totals(last_ym)
+
+            def _delta(a: float, b: float) -> str:
+                if b == 0:
+                    return ""
+                d = a - b
+                pct = d / b * 100
+                sign = "+" if d >= 0 else ""
+                return f"  ({sign}{d:.1f} kWh, {sign}{pct:.0f}%)"
+
+            prev_label = (first_of_this - timedelta(days=1)).strftime("%b")
+            cur_label  = now.strftime("%b")
+            sparse_note = (
+                f"\n⚠️ Prior month only {prev.days_with_data}d data"
+                if prev.days_with_data < 20 else ""
+            )
+
+            body = (
+                f"📅 FranklinWH Monthly Summary — {cur_label} vs {prev_label}\n\n"
+                f"Solar generated:\n"
+                f"  {cur_label}: {cur.solar_kwh:.1f} kWh{_delta(cur.solar_kwh, prev.solar_kwh)}\n"
+                f"  {prev_label}: {prev.solar_kwh:.1f} kWh\n\n"
+                f"Grid imported:\n"
+                f"  {cur_label}: {cur.grid_import_kwh:.1f} kWh{_delta(cur.grid_import_kwh, prev.grid_import_kwh)}\n"
+                f"  {prev_label}: {prev.grid_import_kwh:.1f} kWh\n\n"
+                f"Grid exported:\n"
+                f"  {cur_label}: {cur.grid_export_kwh:.1f} kWh{_delta(cur.grid_export_kwh, prev.grid_export_kwh)}\n"
+                f"  {prev_label}: {prev.grid_export_kwh:.1f} kWh\n\n"
+                f"Home used:\n"
+                f"  {cur_label}: {cur.home_load_kwh:.1f} kWh{_delta(cur.home_load_kwh, prev.home_load_kwh)}\n"
+                f"  {prev_label}: {prev.home_load_kwh:.1f} kWh{sparse_note}"
+            )
+            _send_alert(body, cfg)
+            logger.info("Monthly summary sent for %s", this_ym)
+            state["monthly_summary_month"] = today[:7]
             changed = True
 
     # ── Alert 9: battery fully charged / no longer full ──────────────

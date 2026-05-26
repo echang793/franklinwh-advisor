@@ -37,6 +37,16 @@ LoadProfile = dict[tuple[int, int], float]
 
 
 @dataclass
+class MonthlyTotals:
+    year_month: str       # "2026-05"
+    solar_kwh: float      # sum of MAX(solar_total_kwh) per day (API running total)
+    grid_import_kwh: float
+    grid_export_kwh: float
+    home_load_kwh: float
+    days_with_data: int
+
+
+@dataclass
 class SlotStats:
     day_of_week: int
     hour_of_day: int
@@ -165,6 +175,46 @@ class HistoryStore:
             (date_str,),
         ).fetchone()
         return round(float(row[0]), 2) if row and row[0] is not None else 0.0
+
+    def monthly_totals(self, year_month: str, interval_hours: float = 0.25) -> MonthlyTotals:
+        """Aggregate energy totals for a calendar month (YYYY-MM).
+
+        Solar uses MAX(solar_total_kwh) per day — the API running counter peaks at
+        end-of-day, so summing daily maxima gives true monthly generation regardless
+        of poll gaps.  Grid and load are integrated from instantaneous kW readings.
+        """
+        prefix = year_month + "-"
+
+        # Solar: sum of each day's MAX API counter
+        solar_rows = self._conn.execute(
+            """
+            SELECT substr(timestamp,1,10), MAX(solar_total_kwh)
+            FROM readings
+            WHERE timestamp LIKE ?
+            GROUP BY substr(timestamp,1,10)
+            """,
+            (prefix + "%",),
+        ).fetchall()
+        solar_kwh = round(sum(r[1] for r in solar_rows if r[1] is not None), 1)
+        days_with_data = len(solar_rows)
+
+        # Grid and load: integrate instantaneous kW over poll interval
+        kw_rows = self._conn.execute(
+            "SELECT grid_use_kw, home_load_kw FROM readings WHERE timestamp LIKE ?",
+            (prefix + "%",),
+        ).fetchall()
+        grid_import_kwh = round(sum(r[0] for r in kw_rows if r[0] > 0) * interval_hours, 1)
+        grid_export_kwh = round(sum(-r[0] for r in kw_rows if r[0] < 0) * interval_hours, 1)
+        home_load_kwh   = round(sum(r[1] for r in kw_rows) * interval_hours, 1)
+
+        return MonthlyTotals(
+            year_month=year_month,
+            solar_kwh=solar_kwh,
+            grid_import_kwh=grid_import_kwh,
+            grid_export_kwh=grid_export_kwh,
+            home_load_kwh=home_load_kwh,
+            days_with_data=days_with_data,
+        )
 
     def recent_avg_load(self, hours: int = 2) -> float | None:
         """Average home load over the last N hours of recorded data."""
