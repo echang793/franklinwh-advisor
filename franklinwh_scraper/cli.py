@@ -105,20 +105,32 @@ def _get_system_peak_kw(state: dict) -> float | None:
     return s[len(s) // 2]  # median — less biased than P75
 
 
-def _get_performance_ratio(state: dict) -> float:
-    """Return empirical performance ratio (actual / predicted daily kWh).
+_GHI_CLOUDY_THRESHOLD = 300  # W/m² avg over 12h — below this = dim/cloudy day
 
-    Computed as the median of the last 30 days where we had both a stored
-    prediction and a measurable actual output (>= 3 kWh predicted).
-    Returns 1.0 until at least 3 complete days have been compared.
+
+def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
+    """Return empirical PR (actual / predicted daily kWh) for sunny or cloudy days.
+
+    Separate buckets prevent the sunny-day bias (hot panels, lower efficiency)
+    from distorting cloudy-day forecasts where panels run cooler.
+    Falls back to sunny PR × 1.10 until 3 cloudy-day samples accumulate.
     """
-    samples = state.get("perf_ratio_samples", [])
-    if len(samples) < 3:
-        return 1.0
-    s = sorted(samples)
-    # Floor 0.60: prevents one catastrophic outlier from tanking forecasts,
-    # but low enough to not override the real median (currently ~0.606).
-    return max(s[len(s) // 2], 0.60)
+    if cloudy:
+        samples = state.get("perf_ratio_cloudy_samples", [])
+        if len(samples) < 3:
+            sunny = state.get("perf_ratio_samples", [])
+            if len(sunny) >= 3:
+                s = sorted(sunny)
+                return max(s[len(s) // 2] * 1.10, 0.60)
+            return 0.85  # reasonable prior: cloudy panels run cooler
+        s = sorted(samples)
+        return max(s[len(s) // 2], 0.55)
+    else:
+        samples = state.get("perf_ratio_samples", [])
+        if len(samples) < 3:
+            return 1.0
+        s = sorted(samples)
+        return max(s[len(s) // 2], 0.60)
 
 
 # ── Weather forecast cache (30-min TTL) ──────────────────────────────
@@ -245,15 +257,20 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             actual_kwh = store.daily_solar_kwh_api(yesterday)
             if actual_kwh <= 0.0:
                 actual_kwh = store.daily_solar_kwh(yesterday)
-            predicted_kwh = state[pred_key]
-            if predicted_kwh >= 3.0 and actual_kwh >= 0.5:
+            predicted_kwh  = state[pred_key]
+            yesterday_ghi  = state.get(f"predicted_avg_ghi_{yesterday}", 400.0)
+            cloudy_day     = yesterday_ghi < _GHI_CLOUDY_THRESHOLD
+            min_predicted  = 0.5 if cloudy_day else 3.0
+            if predicted_kwh >= min_predicted and actual_kwh >= 0.3:
                 ratio = round(actual_kwh / predicted_kwh, 3)
-                pr_samples = state.get("perf_ratio_samples", [])
+                bucket = "perf_ratio_cloudy_samples" if cloudy_day else "perf_ratio_samples"
+                pr_samples = state.get(bucket, [])
                 pr_samples.append(ratio)
-                state["perf_ratio_samples"] = pr_samples[-30:]
+                state[bucket] = pr_samples[-30:]
                 logger.info(
-                    "Performance ratio update: actual=%.1f predicted=%.1f ratio=%.3f (median=%.3f)",
-                    actual_kwh, predicted_kwh, ratio, _get_performance_ratio(state),
+                    "PR update (%s): actual=%.1f predicted=%.1f ratio=%.3f ghi=%.0f",
+                    "cloudy" if cloudy_day else "sunny",
+                    actual_kwh, predicted_kwh, ratio, yesterday_ghi,
                 )
                 changed = True
 
@@ -274,21 +291,30 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
                 cal_note = f"calibrating, {len(cal_samples)}/3 readings"
             system_peak_kw = max(system_peak_kw, 1.0)
 
-            perf_ratio = _get_performance_ratio(state)
+            avg_ghi    = outlook.avg_ghi(12)
+            cloudy_day = avg_ghi < _GHI_CLOUDY_THRESHOLD
+            perf_ratio = _get_performance_ratio(state, cloudy=cloudy_day)
             gen_kwh    = round(outlook.today_generation_kwh(system_peak_kw) * perf_ratio, 1)
 
-            # Store today's prediction for tomorrow's ratio update
-            state[f"predicted_kwh_{today}"] = gen_kwh
+            # Store today's prediction + GHI for tomorrow's PR calibration
+            state[f"predicted_kwh_{today}"]  = gen_kwh
+            state[f"predicted_avg_ghi_{today}"] = round(avg_ghi, 1)
             changed = True
 
-            avg_ghi = outlook.avg_ghi(12)
             if avg_ghi >= 400:
                 sky = "Sunny"
-            elif avg_ghi >= 180:
+            elif avg_ghi >= _GHI_CLOUDY_THRESHOLD:
                 sky = "Partly cloudy"
             else:
                 sky = "Cloudy"
-            pr_note = f"PR={perf_ratio:.2f}" if len(state.get("perf_ratio_samples", [])) >= 3 else cal_note
+            cloudy_samples = state.get("perf_ratio_cloudy_samples", [])
+            sunny_samples  = state.get("perf_ratio_samples", [])
+            if cloudy_day and len(cloudy_samples) >= 3:
+                pr_note = f"cloudy PR={perf_ratio:.2f} ({len(cloudy_samples)} days)"
+            elif not cloudy_day and len(sunny_samples) >= 3:
+                pr_note = f"PR={perf_ratio:.2f} ({len(sunny_samples)} days)"
+            else:
+                pr_note = cal_note
             solar_est = f"~{gen_kwh:.1f} kWh predicted ({sky}, {pr_note})"
         else:
             solar_est = "Solar forecast unavailable"
