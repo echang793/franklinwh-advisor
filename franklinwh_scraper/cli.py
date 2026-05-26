@@ -426,13 +426,30 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             else:
                 solar_delta_str = ""
 
+            # Predict SoC at 6 am tomorrow from overnight load profile
+            bat_cap = getattr(cfg, "battery_capacity_kwh", _BATTERY_CAPACITY_KWH)
+            soc_6am_str = ""
+            if usage_forecast and usage_forecast.hours:
+                tomorrow_6am = (now + timedelta(days=1)).replace(
+                    hour=6, minute=0, second=0, microsecond=0
+                )
+                # Sum net kWh (solar−load) for each predicted hour between now and 6 am.
+                # Solar is ~0 overnight so net_kw ≈ −load_kw for each slot.
+                night_net_kwh = sum(
+                    p.net_kw
+                    for p in usage_forecast.hours
+                    if now <= p.dt < tomorrow_6am
+                )
+                predicted_soc_6am = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
+                soc_6am_str = f"\nPredicted SoC @ 6 am: ~{predicted_soc_6am:.0f}%"
+
             body = (
                 f"📊 FranklinWH Daily Summary — {now.strftime('%a %b %-d')}\n"
                 f"Solar generated:  {t.solar_kwh:.1f} kWh\n"
                 f"Grid consumed:    {t.grid_load_kwh:.1f} kWh\n"
                 f"Grid exported:    {t.grid_export_kwh:.1f} kWh\n"
                 f"Home used:        {t.home_use_kwh:.1f} kWh\n"
-                f"Battery SoC now:  {soc:.0f}%{backup_str}{solar_delta_str}"
+                f"Battery SoC now:  {soc:.0f}%{backup_str}{soc_6am_str}{solar_delta_str}"
             )
             _send_alert(body, cfg)
             logger.info("End-of-day digest sent for %s", today)
