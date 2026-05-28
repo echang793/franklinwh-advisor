@@ -35,3 +35,5 @@ CLAUDE.md
 # Secrets — should never be here but just in case
 .env
 *.json.bak
+.franklinwh.json
+.franklinwh*.json

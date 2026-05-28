@@ -1,0 +1,248 @@
+"""Claude-powered Telegram chatbot for FranklinWH energy queries."""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+import time
+from datetime import datetime, timedelta
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
+
+_MAX_TURNS = 10   # conversation turns kept per chat
+_MODEL     = "claude-haiku-4-5-20251001"
+
+_SYSTEM_PROMPT = """\
+You are an energy assistant for a home with a FranklinWH battery, solar panels, \
+and an SDG&E EV-TOU-5 electricity plan. Help the owner understand their solar \
+production, battery state, and electricity costs, and give practical advice on \
+charging schedules, mode switches, and load timing.
+
+EV-TOU-5 weekday rates:
+  12am–6am   Super Off-Peak  $0.117/kWh (winter) / $0.124 (summer)
+  6am–10am   Off-Peak        $0.473 / $0.502
+  10am–2pm   Super Off-Peak  $0.117 / $0.124  ← cheapest window
+  2pm–4pm    Off-Peak        $0.473 / $0.502
+  4pm–9pm    On-Peak         $0.529 / $0.800  ← most expensive
+  9pm–12am   Off-Peak        $0.473 / $0.502
+Weekends: Super Off-Peak until 2pm, then same as weekday.
+Summer = June–October.
+
+Battery modes:
+  Self-Consumption  – solar first, then battery, grid as backup
+  Emergency Backup  – charges battery from grid (good before on-peak)
+  Time-of-Use       – charges off-peak, discharges on-peak
+
+Be concise and practical. Use the system data block at the start of each message.
+"""
+
+
+def build_context(stats, history, outlook, cfg) -> str:
+    """Snapshot of current system state, injected as user-message context."""
+    from .tou import period_at, rate_at, on_peak_window
+
+    now   = datetime.now()
+    lines = [f"[System snapshot — {now.strftime('%-I:%M %p')}]"]
+
+    if stats:
+        c = stats.current
+        t = stats.totals
+        grid_str = (
+            f"+{c.grid_use_kw:.2f} kW (importing)" if c.grid_use_kw > 0 else
+            f"{c.grid_use_kw:.2f} kW (exporting)"  if c.grid_use_kw < 0 else
+            "0.00 kW"
+        )
+        lines += [
+            f"  Battery SoC:   {c.battery_soc_pct:.0f}%",
+            f"  Solar now:     {c.solar_production_kw:.2f} kW",
+            f"  Home load:     {c.home_load_kw:.2f} kW",
+            f"  Grid:          {grid_str}",
+            f"  Grid status:   {c.grid_status}",
+            f"  Today solar:   {t.solar_kwh:.1f} kWh",
+        ]
+
+    period     = period_at(now)
+    rate       = rate_at(now)
+    peak_start, peak_end = on_peak_window(now)
+    lines.append(f"  TOU period:    {period.value.replace('_', ' ')} (${rate:.3f}/kWh)")
+    if now < peak_start:
+        mins = int((peak_start - now).total_seconds() / 60)
+        lines.append(f"  On-peak in:    {mins // 60}h {mins % 60}m (4pm–9pm)")
+    elif peak_start <= now < peak_end:
+        mins = int((peak_end - now).total_seconds() / 60)
+        lines.append(f"  On-peak NOW — ends in {mins // 60}h {mins % 60}m")
+
+    if outlook:
+        lines.append(f"  Solar (6h avg): {outlook.avg_ghi(6):.0f} W/m²")
+
+    if history:
+        try:
+            today_str  = now.strftime("%Y-%m-%d")
+            week_start = (now.date() - timedelta(days=6)).strftime("%Y-%m-%d")
+            readings   = history.weekly_readings(week_start, today_str)
+            if readings:
+                from .tou import rate_at as _r
+                interval = 0.25
+                imp = exp = 0.0
+                for ts, grid_kw, _hk, _sk in readings:
+                    try:
+                        dt = datetime.fromisoformat(ts)
+                    except Exception:
+                        continue
+                    r = _r(dt)
+                    if grid_kw > 0:
+                        imp += grid_kw * interval * r
+                    elif grid_kw < 0:
+                        exp += abs(grid_kw) * interval * r
+                solar_7d = sum(
+                    history.daily_solar_kwh_api(
+                        (now.date() - timedelta(days=i)).strftime("%Y-%m-%d")
+                    )
+                    for i in range(7)
+                )
+                lines += [
+                    f"  7-day solar:   {solar_7d:.1f} kWh",
+                    f"  7-day import:  ${imp:.2f}",
+                    f"  7-day export:  ${exp:.2f} credit",
+                ]
+        except Exception:
+            pass
+
+    capacity = getattr(cfg, "battery_capacity_kwh", 13.6)
+    location = getattr(cfg, "location_name", "")
+    loc_str  = f", {location}" if location else ""
+    lines.append(f"  System:        FranklinWH {capacity:.0f} kWh battery{loc_str}")
+
+    return "\n".join(lines)
+
+
+class TelegramChatBot:
+    """Long-poll Telegram bot backed by Claude Haiku for energy Q&A."""
+
+    def __init__(self, cfg, api_key: str):
+        self._cfg        = cfg
+        self._api_key    = api_key
+        self._offset     = 0
+        self._convos: dict[str, list[dict]] = {}
+        self._lock       = threading.Lock()
+        self._stats      = None
+        self._hist_store = None
+        self._outlook    = None
+
+    def update_state(self, stats, history_store, outlook) -> None:
+        with self._lock:
+            self._stats      = stats
+            self._hist_store = history_store
+            self._outlook    = outlook
+
+    def run(self) -> None:
+        logger.info("Telegram chatbot started")
+        base = f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}"
+        while True:
+            try:
+                url = f"{base}/getUpdates?offset={self._offset}&timeout=30"
+                with urlopen(url, timeout=35) as resp:
+                    data = json.loads(resp.read())
+                for upd in data.get("result", []):
+                    self._offset = upd["update_id"] + 1
+                    msg  = upd.get("message") or upd.get("edited_message")
+                    if not msg:
+                        continue
+                    text    = (msg.get("text") or "").strip()
+                    chat_id = str(msg["chat"]["id"])
+                    if not text:
+                        continue
+                    if text.lower() in ("/start", "/help"):
+                        self._send(chat_id,
+                            "FranklinWH AI assistant\n\n"
+                            "Ask me anything about your solar, battery, or energy costs.\n"
+                            "Example: \"Should I charge the car now?\" or \"Why is my battery low?\"\n\n"
+                            "/clear — reset conversation history"
+                        )
+                        continue
+                    if text.lower() == "/clear":
+                        self._convos.pop(chat_id, None)
+                        self._send(chat_id, "Conversation cleared.")
+                        continue
+                    threading.Thread(
+                        target=self._handle,
+                        args=(chat_id, text),
+                        daemon=True,
+                    ).start()
+            except URLError:
+                time.sleep(5)
+            except Exception as e:
+                logger.warning("Chatbot poll error: %s", e)
+                time.sleep(5)
+
+    def _handle(self, chat_id: str, text: str) -> None:
+        try:
+            with self._lock:
+                stats   = self._stats
+                store   = self._hist_store
+                outlook = self._outlook
+            ctx    = build_context(stats, store, outlook, self._cfg)
+            backend = getattr(self._cfg, "chat_backend", "anthropic")
+            if backend == "ollama":
+                reply = self._call_ollama(chat_id, text, ctx)
+            else:
+                reply = self._call_claude(chat_id, text, ctx)
+            self._send(chat_id, reply)
+        except Exception as e:
+            logger.warning("Chatbot handle error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
+    def _call_claude(self, chat_id: str, question: str, context: str) -> str:
+        import anthropic
+        client  = anthropic.Anthropic(api_key=self._api_key)
+        history = list(self._convos.get(chat_id, []))
+
+        history.append({"role": "user", "content": f"{context}\n\nQuestion: {question}"})
+        resp = client.messages.create(
+            model=_MODEL,
+            max_tokens=512,
+            system=_SYSTEM_PROMPT,
+            messages=history,
+        )
+        reply = resp.content[0].text
+        history.append({"role": "assistant", "content": reply})
+        self._convos[chat_id] = history[-(_MAX_TURNS * 2):]
+        return reply
+
+    def _call_ollama(self, chat_id: str, question: str, context: str) -> str:
+        history = list(self._convos.get(chat_id, []))
+        history.append({"role": "user", "content": f"{context}\n\nQuestion: {question}"})
+
+        messages = [{"role": "system", "content": _SYSTEM_PROMPT}] + history
+        model    = getattr(self._cfg, "ollama_model", "llama3.1:8b")
+        base_url = getattr(self._cfg, "ollama_url", "http://localhost:11434")
+        payload  = json.dumps({
+            "model":    model,
+            "messages": messages,
+            "stream":   False,
+        }).encode()
+        req  = Request(
+            f"{base_url.rstrip('/')}/api/chat",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(req, timeout=120) as resp:
+            data  = json.loads(resp.read())
+        reply = (data.get("message") or {}).get("content") or data.get("response", "")
+        if not reply:
+            raise ValueError(f"Unexpected Ollama response: {data}")
+        history.append({"role": "assistant", "content": reply})
+        self._convos[chat_id] = history[-(_MAX_TURNS * 2):]
+        return reply
+
+    def _send(self, chat_id: str, text: str) -> None:
+        url  = f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}/sendMessage"
+        data = json.dumps({"chat_id": chat_id, "text": text}).encode()
+        req  = Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            urlopen(req, timeout=10)
+        except Exception as e:
+            logger.warning("Chatbot send error: %s", e)

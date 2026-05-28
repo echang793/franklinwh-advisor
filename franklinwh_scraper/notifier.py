@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from .advisor import Recommendation
 
@@ -42,20 +45,14 @@ def notify_macos(rec: Recommendation) -> None:
     else:
         title = f"{emoji} FranklinWH — Battery OK"
 
-    # Keep body short for the banner
     body = rec.reason[:200]
-
     script = (
         f'display notification "{_esc(body)}" '
         f'with title "{_esc(title)}" '
         f'sound name "Submarine"'
     )
     try:
-        subprocess.run(
-            ["osascript", "-e", script],
-            check=True,
-            capture_output=True,
-        )
+        subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
         logger.debug("macOS notification sent: %s", title)
     except subprocess.CalledProcessError as e:
         logger.warning("macOS notification failed: %s", e.stderr.decode().strip())
@@ -94,11 +91,7 @@ def notify_imessage_text(body: str, phone: str) -> None:
         f'end tell'
     )
     try:
-        subprocess.run(
-            ["osascript", "-e", script],
-            check=True,
-            capture_output=True,
-        )
+        subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
         logger.debug("iMessage sent to %s", phone)
     except subprocess.CalledProcessError as e:
         logger.warning("iMessage failed: %s", e.stderr.decode().strip())
@@ -108,38 +101,42 @@ def notify_imessage_text(body: str, phone: str) -> None:
 
 def notify_telegram(body: str, bot_token: str, chat_id: str) -> None:
     """Send a Telegram message via the Bot API (cross-platform, free)."""
-    import json as _json
-    from urllib.request import Request as _Req, urlopen as _open
-    from urllib.error import URLError as _URLError
-
     url  = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    data = _json.dumps({"chat_id": chat_id, "text": body}).encode()
-    req  = _Req(url, data=data, headers={"Content-Type": "application/json"})
+    data = json.dumps({"chat_id": chat_id, "text": body}).encode()
+    req  = Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
-        _open(req, timeout=10)
+        urlopen(req, timeout=10)
         logger.debug("Telegram message sent to chat %s", chat_id)
-    except _URLError as e:
+    except URLError as e:
         logger.warning("Telegram notification failed: %s", e)
     except Exception as e:
         logger.warning("Telegram notification error: %s", e)
 
 
-def fetch_telegram_chat_id(bot_token: str) -> str | None:
-    """Poll getUpdates to auto-detect the chat ID after user messages the bot."""
-    import json as _json
-    from urllib.request import urlopen as _open
-    from urllib.error import URLError as _URLError
+def fetch_telegram_chat_id(bot_token: str, retries: int = 3, wait: int = 3) -> str | None:
+    """Poll getUpdates to auto-detect the chat ID after user messages the bot.
 
-    try:
-        url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
-        with _open(url, timeout=10) as r:
-            data = _json.loads(r.read())
-        results = data.get("result", [])
-        if results:
-            msg = results[-1].get("message") or results[-1].get("channel_post", {})
-            return str(msg["chat"]["id"])
-    except (_URLError, KeyError, IndexError, Exception):
-        pass
+    Retries up to `retries` times with `wait` seconds between attempts so the
+    user has time to send a message during the setup wizard.
+    """
+    url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
+    for attempt in range(retries):
+        try:
+            with urlopen(url, timeout=10) as r:
+                data = json.loads(r.read())
+            for upd in reversed(data.get("result", [])):
+                for key in ("message", "edited_message", "channel_post"):
+                    msg = upd.get(key)
+                    if msg and "chat" in msg:
+                        return str(msg["chat"]["id"])
+                cq = upd.get("callback_query", {})
+                msg = cq.get("message") if cq else None
+                if msg and "chat" in msg:
+                    return str(msg["chat"]["id"])
+        except Exception:
+            pass
+        if attempt < retries - 1:
+            time.sleep(wait)
     return None
 
 

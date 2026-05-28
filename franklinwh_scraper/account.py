@@ -30,7 +30,7 @@ class Current:
     solar_production_kw: float    # p_sun
     generator_production_kw: float  # p_gen
     generator_enabled: bool       # genStat > 1
-    battery_use_kw: float         # p_fhp  (positive = charging, negative = discharging)
+    battery_use_kw: float         # p_fhp  (negative = charging, positive = discharging)
     grid_use_kw: float            # p_uti  (positive = import, negative = export)
     home_load_kw: float           # p_load
     battery_soc_pct: float        # soc

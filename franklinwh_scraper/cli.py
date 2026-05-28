@@ -10,12 +10,14 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+
 import click
 
 logger = logging.getLogger(__name__)
 
 from .account import AccountClient
 from .advisor import recommend
+from .chatbot import TelegramChatBot
 from .client import FranklinWHClient
 from .config import Config, load as load_config, save as save_config
 from .exporters import export_csv, export_json
@@ -25,6 +27,7 @@ from .notifier import (notify_imessage, notify_imessage_text, notify_log,
                        notify_macos, notify_telegram, fetch_telegram_chat_id,
                        rec_to_text)
 from .predictor import predict
+from .tou import TouPeriod, period_at, rate_at
 from .scrapers import FAQScraper, ProductsScraper, SupportScraper
 from .weather import fetch_solar_outlook, geocode
 
@@ -171,18 +174,29 @@ _PEAK_STATE_FILE = ".peak_alert_state.json"
 def _load_peak_state(out: Path) -> dict:
     p = out / _PEAK_STATE_FILE
     try:
-        return json.loads(p.read_text())
+        state = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
         return {}
+    # Migrate renamed key from earlier version
+    if "monthly_summary_month" in state and "monthly_summary_date" not in state:
+        state["monthly_summary_date"] = state.pop("monthly_summary_month") + "-19"
+    return state
 
 
 def _prune_old_state(state: dict) -> dict:
     """Drop date-keyed entries older than 30 days to prevent unbounded growth."""
     cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-    return {
-        k: v for k, v in state.items()
-        if not (k.endswith("_date") and isinstance(v, str) and v < cutoff)
-    }
+    pruned = {}
+    for k, v in state.items():
+        if k.endswith("_date") and isinstance(v, str) and v < cutoff:
+            continue
+        # Drop daily_pr_YYYY-MM-DD and peak_cov_YYYY-MM-DD entries older than 30 days
+        for prefix in ("daily_pr_", "peak_cov_"):
+            if k.startswith(prefix) and k[len(prefix):] < cutoff:
+                break
+        else:
+            pruned[k] = v
+    return pruned
 
 
 def _save_peak_state(out: Path, state: dict) -> None:
@@ -193,440 +207,702 @@ def _save_peak_state(out: Path, state: dict) -> None:
     tmp.replace(target)  # atomic on POSIX — no partial-write corruption
 
 
-def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None, store=None) -> None:
-    """
-    Ten daily alerts for solar, battery, and grid awareness.
+# ── Per-alert helper functions ────────────────────────────────────────
+# Each takes (state, today, now, c, ...) and returns the alert body or None.
+# State mutations happen inside each function; caller saves state once at end.
 
-    0.  Morning preview 8 am      — SoC + predicted solar kWh for the day
-    1.  Grid import 4–9 pm        — grid_kw > 0.3 during peak window
-    2.  Low SoC 1–2 pm            — SoC < 40% before peak; switch to EB
-    3.  EB 80% ready ~1:50 pm     — SoC >= 80% in 1:40–2:10 pm window
-    4.  Low solar by 10 am        — solar < 0.5 kW at 9:30–10:30 am
-    5.  Solar stopped mid-day     — solar drops to < 0.3 kW between 11 am–3 pm
-    6.  Battery not charging noon — SoC < 30% at 11:30 am–12:30 pm despite solar
-    7.  End-of-day digest 9 pm    — single summary text each evening
-    8.  Grid down                 — grid_status == "down", fires immediately (once/day)
-    9.  Battery fully charged     — SoC >= 99%, fires once per charge cycle
-    10. Battery draining fast     — > 8%/hr and SoC < 35%, fires once/day
-    11. Battery not charging      — solar > 1.5 kW, SoC < 80%, battery idle 10am–2pm
-    """
-    if not cfg.imessage_phone and not (cfg.telegram_bot_token and cfg.telegram_chat_id):
+def _calibrate_solar(state: dict, solar_kw: float, outlook) -> None:
+    if not (outlook and solar_kw >= 1.0):
         return
+    current_ghi = outlook.avg_ghi(1)
+    if current_ghi < 400:
+        return
+    sample = round(solar_kw / (current_ghi / 1000.0), 2)
+    if 0.5 <= sample <= 25.0:
+        samples = state.get("solar_cal_samples", [])
+        samples.append(sample)
+        state["solar_cal_samples"] = samples[-50:]
 
-    now       = datetime.now()
-    today     = now.strftime("%Y-%m-%d")
-    hour      = now.hour
-    minute    = now.minute
-    state     = _load_peak_state(out)
-    changed   = False
 
-    c           = stats.current
-    soc         = c.battery_soc_pct
-    grid_kw     = c.grid_use_kw
-    solar_kw    = c.solar_production_kw
-    load_kw     = c.home_load_kw
-    battery_kw  = c.battery_use_kw   # negative = charging, positive = discharging (p_fhp convention)
-    grid_status = c.grid_status
+def _alert_morning_preview(
+    state: dict, today: str, now: datetime, c,
+    outlook, usage_forecast, store,
+) -> str | None:
+    if not (8 <= now.hour < 13) or state.get("morning_preview_date") == today:
+        return None
 
-    # ── Solar calibration (runs every poll) ──────────────────────────
-    # When solar is actively generating and GHI is known, record the
-    # system's effective peak kW at standard test conditions (1000 W/m²).
-    # This converges to an accurate system_peak_kw over time.
-    if outlook and solar_kw >= 1.0:
-        current_ghi = outlook.avg_ghi(1)  # GHI over the next hour ≈ current
-        if current_ghi >= 400:
-            sample = round(solar_kw / (current_ghi / 1000.0), 2)
-            # Sanity check: residential PV systems are 0.5–25 kW peak; reject corrupted readings
-            if 0.5 <= sample <= 25.0:
-                samples = state.get("solar_cal_samples", [])
-                samples.append(sample)
-                state["solar_cal_samples"] = samples[-50:]  # keep last 50
-                changed = True
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    pred_key  = f"predicted_kwh_{yesterday}"
+    yest_pred   = state.get(pred_key, 0.0)
+    yest_actual = 0.0
 
-    # ── Alert 0: morning preview 8:00–12:59 pm ───────────────────────
-    # Wide window so Mac sleep/wake still delivers the alert. Dedup via
-    # morning_preview_date ensures it fires at most once per day.
-    in_morning_preview = (8 <= hour < 13)
-    if in_morning_preview and state.get("morning_preview_date") != today:
-        # ── Update performance ratio from yesterday's actual vs predicted ──
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        pred_key  = f"predicted_kwh_{yesterday}"
-        if store is not None and pred_key in state:
-            # Use API's own daily total (MAX of running counter) — immune to poll gaps.
-            # Fall back to sampled sum only if API total unavailable (old rows).
-            actual_kwh = store.daily_solar_kwh_api(yesterday)
-            if actual_kwh <= 0.0:
-                actual_kwh = store.daily_solar_kwh(yesterday)
-            predicted_kwh  = state[pred_key]
-            yesterday_ghi  = state.get(f"predicted_avg_ghi_{yesterday}", 400.0)
-            cloudy_day     = yesterday_ghi < _GHI_CLOUDY_THRESHOLD
-            min_predicted  = 0.5 if cloudy_day else 3.0
-            if predicted_kwh >= min_predicted and actual_kwh >= 0.3:
-                ratio = round(actual_kwh / predicted_kwh, 3)
-                bucket = "perf_ratio_cloudy_samples" if cloudy_day else "perf_ratio_samples"
-                pr_samples = state.get(bucket, [])
-                pr_samples.append(ratio)
-                state[bucket] = pr_samples[-30:]
-                logger.info(
-                    "PR update (%s): actual=%.1f predicted=%.1f ratio=%.3f ghi=%.0f",
-                    "cloudy" if cloudy_day else "sunny",
-                    actual_kwh, predicted_kwh, ratio, yesterday_ghi,
-                )
-                changed = True
+    # Update PR calibration and fetch actual for accuracy display in one pass
+    if store is not None and yest_pred > 0:
+        yest_actual = store.daily_solar_kwh_api(yesterday)
+        if yest_actual <= 0.0:
+            yest_actual = store.daily_solar_kwh(yesterday)
+        yesterday_ghi = state.get(f"predicted_avg_ghi_{yesterday}", 400.0)
+        cloudy_day    = yesterday_ghi < _GHI_CLOUDY_THRESHOLD
+        min_predicted = 0.5 if cloudy_day else 3.0
+        if yest_pred >= min_predicted and yest_actual >= 0.3:
+            ratio  = round(yest_actual / yest_pred, 3)
+            bucket = "perf_ratio_cloudy_samples" if cloudy_day else "perf_ratio_samples"
+            pr_samples = state.get(bucket, [])
+            pr_samples.append(ratio)
+            state[bucket] = pr_samples[-30:]
+            state[f"daily_pr_{yesterday}"] = ratio
+            logger.info(
+                "PR update (%s): actual=%.1f predicted=%.1f ratio=%.3f ghi=%.0f",
+                "cloudy" if cloudy_day else "sunny",
+                yest_actual, yest_pred, ratio, yesterday_ghi,
+            )
 
-        if outlook:
-            cal_samples = state.get("solar_cal_samples", [])
-            if len(cal_samples) >= 3:
-                sorted_samples = sorted(cal_samples)
-                system_peak_kw = sorted_samples[len(sorted_samples) // 2]  # median
-                cal_note = f"{len(cal_samples)} readings"
-            else:
-                if usage_forecast and usage_forecast.hours:
-                    system_peak_kw = max(
-                        (p.predicted_solar_kw for p in usage_forecast.hours),
-                        default=solar_kw,
-                    ) * 1.2
-                else:
-                    system_peak_kw = max(solar_kw, 1.0) * 1.2
-                cal_note = f"calibrating, {len(cal_samples)}/3 readings"
-            system_peak_kw = max(system_peak_kw, 1.0)
+    soc      = c.battery_soc_pct
+    solar_kw = c.solar_production_kw
 
-            avg_ghi    = outlook.avg_ghi(12)
-            cloudy_day = avg_ghi < _GHI_CLOUDY_THRESHOLD
-            perf_ratio = _get_performance_ratio(state, cloudy=cloudy_day)
-            gen_kwh    = round(outlook.today_generation_kwh(system_peak_kw) * perf_ratio, 1)
-
-            # Store today's prediction + GHI for tomorrow's PR calibration
-            state[f"predicted_kwh_{today}"]  = gen_kwh
-            state[f"predicted_avg_ghi_{today}"] = round(avg_ghi, 1)
-            changed = True
-
-            if avg_ghi >= 400:
-                sky = "Sunny"
-            elif avg_ghi >= _GHI_CLOUDY_THRESHOLD:
-                sky = "Partly cloudy"
-            else:
-                sky = "Cloudy"
-            cloudy_samples = state.get("perf_ratio_cloudy_samples", [])
-            sunny_samples  = state.get("perf_ratio_samples", [])
-            if cloudy_day and len(cloudy_samples) >= 3:
-                pr_note = f"cloudy PR={perf_ratio:.2f} ({len(cloudy_samples)} days)"
-            elif not cloudy_day and len(sunny_samples) >= 3:
-                pr_note = f"PR={perf_ratio:.2f} ({len(sunny_samples)} days)"
-            else:
-                pr_note = cal_note
-            solar_est = f"~{gen_kwh:.1f} kWh predicted ({sky}, {pr_note})"
+    if outlook:
+        cal_samples = state.get("solar_cal_samples", [])
+        if len(cal_samples) >= 3:
+            sorted_s = sorted(cal_samples)
+            system_peak_kw = sorted_s[len(sorted_s) // 2]
+            cal_note = f"{len(cal_samples)} readings"
         else:
-            solar_est = "Solar forecast unavailable"
-        body = (
-            f"☀️ FranklinWH: Good morning! Daily preview\n"
-            f"Battery: {soc:.0f}% SoC  |  Solar now: {solar_kw:.2f} kW\n"
-            f"{solar_est}"
-        )
-        state["morning_preview_date"] = today
-        changed = True
-        _send_alert(body, cfg)
-        logger.info("Morning preview alert sent for %s", today)
-
-    # ── Alert 1: pulling from grid during 4–9 pm ─────────────────────
-    in_peak_window = 16 <= hour < 21
-    if in_peak_window and grid_kw > 0.3:
-        if state.get("grid_import_alerted_date") != today:
-            body = (
-                f"⚠️ FranklinWH: Pulling from grid during peak hours (4–9 pm)\n"
-                f"SoC {soc:.0f}%  |  Grid +{grid_kw:.2f} kW  |  "
-                f"Solar {solar_kw:.2f} kW  |  Load {load_kw:.2f} kW\n"
-                f"Time: {now.strftime('%-I:%M %p')}"
-            )
-            _send_alert(body, cfg)
-            logger.info("Peak grid-import alert sent for %s", today)
-            state["grid_import_alerted_date"] = today
-            changed = True
-
-    # ── Alert 2: SoC < 40% at 1–2 pm ────────────────────────────────
-    in_1pm_window = hour == 13 or (hour == 14 and minute == 0)
-    if in_1pm_window and soc < 40.0:
-        if state.get("low_soc_1pm_alerted_date") != today:
-            body = (
-                f"🟡 FranklinWH: Battery under 40% at {now.strftime('%-I:%M %p')}\n"
-                f"SoC {soc:.0f}% — grid import risk during 4–9 pm peak\n"
-                f"Solar {solar_kw:.2f} kW  |  Load {load_kw:.2f} kW\n"
-                f"Consider switching to Emergency Backup to charge before peak."
-            )
-            _send_alert(body, cfg)
-            logger.info("Low 1 pm SoC alert sent for %s (%.0f%%)", today, soc)
-            state["low_soc_1pm_alerted_date"] = today
-            changed = True
-
-    # ── Alert 3: SoC ≥ 80% at ~1:50 pm (Emergency Backup ready) ─────
-    in_eb_window = (hour == 13 and minute >= 40) or (hour == 14 and minute <= 10)
-    if in_eb_window and soc >= 80.0:
-        if state.get("eb_80pct_alerted_date") != today:
-            body = (
-                f"🟢 FranklinWH: Battery at {soc:.0f}% — Emergency Backup target reached\n"
-                f"Time: {now.strftime('%-I:%M %p')} — battery ready before 4 pm peak\n"
-                f"Solar {solar_kw:.2f} kW  |  Load {load_kw:.2f} kW\n"
-                f"You can now switch modes if needed."
-            )
-            _send_alert(body, cfg)
-            logger.info("EB 80%% SoC alert sent for %s (%.0f%%)", today, soc)
-            state["eb_80pct_alerted_date"] = today
-            changed = True
-
-    # ── Alert 4: low solar production by 10 am ───────────────────────
-    # Window: 9:30–10:30 am. Threshold: < 0.5 kW means heavy cloud cover.
-    in_morning_window = (hour == 9 and minute >= 30) or (hour == 10 and minute <= 30)
-    if in_morning_window and solar_kw < 0.5:
-        if state.get("low_solar_morning_date") != today:
-            body = (
-                f"☁️ FranklinWH: Low solar at {now.strftime('%-I:%M %p')} — cloudy day ahead\n"
-                f"Solar {solar_kw:.2f} kW  |  SoC {soc:.0f}%  |  Load {load_kw:.2f} kW\n"
-                f"Consider conserving battery early — less solar charging expected today."
-            )
-            _send_alert(body, cfg)
-            logger.info("Low morning solar alert sent for %s (%.2f kW)", today, solar_kw)
-            state["low_solar_morning_date"] = today
-            changed = True
-
-    # ── Alert 5: solar stopped unexpectedly mid-day ───────────────────
-    # Window: 11 am–3 pm. Fires if solar was previously > 0.5 kW and
-    # drops to < 0.3 kW. Track last-seen solar to detect the drop.
-    in_midday = 11 <= hour < 15
-    if in_midday:
-        last_solar = state.get("last_midday_solar_kw", 0.0)
-        if last_solar >= 0.5 and solar_kw < 0.3:
-            if state.get("solar_stopped_date") != today:
-                body = (
-                    f"🔴 FranklinWH: Solar dropped mid-day — possible issue\n"
-                    f"Was {last_solar:.2f} kW → now {solar_kw:.2f} kW "
-                    f"at {now.strftime('%-I:%M %p')}\n"
-                    f"SoC {soc:.0f}%  |  Check inverter or cloud cover."
-                )
-                _send_alert(body, cfg)
-                logger.info("Solar stopped alert sent for %s (%.2f→%.2f kW)", today, last_solar, solar_kw)
-                state["solar_stopped_date"] = today
-                changed = True
-        state["last_midday_solar_kw"] = solar_kw
-        changed = True
-
-    # ── Alert 6: battery not charging by noon despite solar ───────────
-    # Window: 11:30 am–12:30 pm. SoC < 30% with solar available (> 0.5 kW).
-    in_noon_window = (hour == 11 and minute >= 30) or (hour == 12 and minute <= 30)
-    if in_noon_window and soc < 30.0 and solar_kw > 0.5:
-        if state.get("low_noon_soc_date") != today:
-            body = (
-                f"🟡 FranklinWH: Battery still low at noon — only {soc:.0f}% SoC\n"
-                f"Solar {solar_kw:.2f} kW available but battery hasn't recovered\n"
-                f"Time: {now.strftime('%-I:%M %p')}  |  Load {load_kw:.2f} kW\n"
-                f"Check battery mode — may need manual intervention."
-            )
-            _send_alert(body, cfg)
-            logger.info("Low noon SoC alert sent for %s (%.0f%%)", today, soc)
-            state["low_noon_soc_date"] = today
-            changed = True
-
-    # ── Alert 7: end-of-day digest at 9 pm ───────────────────────────
-    # Window: full 9 pm hour. Wide enough to guarantee a 15-min poll hits it.
-    in_eod_window = hour in (21, 22)
-    if in_eod_window:
-        if state.get("eod_digest_date") != today:
-            t = stats.totals
-            if load_kw > 0.1:
-                backup_h = soc / 100 * getattr(cfg, "battery_capacity_kwh", _BATTERY_CAPACITY_KWH) / load_kw
-                backup_str = f"\nEst. backup now: ~{backup_h:.1f} hr at current load"
-            else:
-                backup_str = ""
-
-            # Solar prediction vs actual delta
-            predicted_kwh = state.get(f"predicted_kwh_{today}")
-            actual_kwh    = t.solar_kwh
-            if predicted_kwh and predicted_kwh > 0:
-                delta_kwh = actual_kwh - predicted_kwh
-                delta_pct = (delta_kwh / predicted_kwh) * 100
-                sign      = "+" if delta_kwh >= 0 else ""
-                solar_delta_str = (
-                    f"\n\nSolar forecast vs actual:\n"
-                    f"  Predicted:  {predicted_kwh:.1f} kWh\n"
-                    f"  Actual:     {actual_kwh:.1f} kWh\n"
-                    f"  Delta:      {sign}{delta_kwh:.1f} kWh ({sign}{delta_pct:.0f}%)"
-                )
-            else:
-                solar_delta_str = ""
-
-            # Predict SoC at 6 am tomorrow from overnight load profile
-            bat_cap = getattr(cfg, "battery_capacity_kwh", _BATTERY_CAPACITY_KWH)
-            soc_6am_str = ""
             if usage_forecast and usage_forecast.hours:
-                tomorrow_6am = (now + timedelta(days=1)).replace(
-                    hour=6, minute=0, second=0, microsecond=0
-                )
-                # Sum net kWh (solar−load) for each predicted hour between now and 6 am.
-                # Solar is ~0 overnight so net_kw ≈ −load_kw for each slot.
-                night_net_kwh = sum(
-                    p.net_kw
-                    for p in usage_forecast.hours
-                    if now <= p.dt < tomorrow_6am
-                )
-                predicted_soc_6am = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
-                soc_6am_str = f"\nPredicted SoC @ 6 am: ~{predicted_soc_6am:.0f}%"
-
-            body = (
-                f"📊 FranklinWH Daily Summary — {now.strftime('%a %b %-d')}\n"
-                f"Solar generated:  {t.solar_kwh:.1f} kWh\n"
-                f"Grid consumed:    {t.grid_load_kwh:.1f} kWh\n"
-                f"Grid exported:    {t.grid_export_kwh:.1f} kWh\n"
-                f"Home used:        {t.home_use_kwh:.1f} kWh\n"
-                f"Battery SoC now:  {soc:.0f}%{backup_str}{soc_6am_str}{solar_delta_str}"
-            )
-            _send_alert(body, cfg)
-            logger.info("End-of-day digest sent for %s", today)
-            state["eod_digest_date"] = today
-            changed = True
-
-    # ── Monthly summary: last day of month at EOD ─────────────────────
-    # Fires once on the last calendar day, comparing this month to last month.
-    if in_eod_window and store is not None:
-        import calendar as _cal
-        last_day_of_month = _cal.monthrange(now.year, now.month)[1]
-        if now.day == last_day_of_month and state.get("monthly_summary_month") != today[:7]:
-            this_ym  = now.strftime("%Y-%m")
-            first_of_this = now.replace(day=1)
-            last_ym  = (first_of_this - timedelta(days=1)).strftime("%Y-%m")
-
-            cur  = store.monthly_totals(this_ym)
-            prev = store.monthly_totals(last_ym)
-
-            def _delta(a: float, b: float) -> str:
-                if b == 0:
-                    return ""
-                d = a - b
-                pct = d / b * 100
-                sign = "+" if d >= 0 else ""
-                return f"  ({sign}{d:.1f} kWh, {sign}{pct:.0f}%)"
-
-            prev_label = (first_of_this - timedelta(days=1)).strftime("%b")
-            cur_label  = now.strftime("%b")
-            sparse_note = (
-                f"\n⚠️ Prior month only {prev.days_with_data}d data"
-                if prev.days_with_data < 20 else ""
-            )
-
-            body = (
-                f"📅 FranklinWH Monthly Summary — {cur_label} vs {prev_label}\n\n"
-                f"Solar generated:\n"
-                f"  {cur_label}: {cur.solar_kwh:.1f} kWh{_delta(cur.solar_kwh, prev.solar_kwh)}\n"
-                f"  {prev_label}: {prev.solar_kwh:.1f} kWh\n\n"
-                f"Grid imported:\n"
-                f"  {cur_label}: {cur.grid_import_kwh:.1f} kWh{_delta(cur.grid_import_kwh, prev.grid_import_kwh)}\n"
-                f"  {prev_label}: {prev.grid_import_kwh:.1f} kWh\n\n"
-                f"Grid exported:\n"
-                f"  {cur_label}: {cur.grid_export_kwh:.1f} kWh{_delta(cur.grid_export_kwh, prev.grid_export_kwh)}\n"
-                f"  {prev_label}: {prev.grid_export_kwh:.1f} kWh\n\n"
-                f"Home used:\n"
-                f"  {cur_label}: {cur.home_load_kwh:.1f} kWh{_delta(cur.home_load_kwh, prev.home_load_kwh)}\n"
-                f"  {prev_label}: {prev.home_load_kwh:.1f} kWh{sparse_note}"
-            )
-            _send_alert(body, cfg)
-            logger.info("Monthly summary sent for %s", this_ym)
-            state["monthly_summary_month"] = today[:7]
-            changed = True
-
-    # ── Alert 9: battery fully charged / no longer full ──────────────
-    # State machine: fires when SoC reaches 99%, then fires again when
-    # SoC drops below 90% (battery is being used), then resets.
-    full_state = state.get("full_charge_state", "watching_for_full")
-    if full_state == "watching_for_full" and soc >= 99.0:
-        body = (
-            f"🔋 FranklinWH: Battery fully charged — {soc:.0f}% SoC\n"
-            f"Time: {now.strftime('%-I:%M %p')}\n"
-            f"Solar {solar_kw:.2f} kW  |  Load {load_kw:.2f} kW"
-        )
-        _send_alert(body, cfg)
-        logger.info("Full charge alert sent (%.0f%%)", soc)
-        state["full_charge_state"] = "watching_for_discharge"
-        changed = True
-    elif full_state == "watching_for_discharge" and soc < 90.0:
-        # Only alert once per day in the 3–7 pm window (solar winding down).
-        # Outside that window, reset state silently so the cycle works tomorrow.
-        if 15 <= hour < 19 and state.get("no_longer_full_date") != today:
-            body = (
-                f"🔋 FranklinWH: Battery no longer full — {soc:.0f}% SoC\n"
-                f"Time: {now.strftime('%-I:%M %p')}\n"
-                f"Solar {solar_kw:.2f} kW  |  Load {load_kw:.2f} kW"
-            )
-            _send_alert(body, cfg)
-            logger.info("Battery discharged below 90%% alert sent (%.0f%%)", soc)
-            state["no_longer_full_date"] = today
-        else:
-            logger.info("Battery discharged below 90%% — outside 3–7 pm window, suppressed")
-        state["full_charge_state"] = "watching_for_full"
-        changed = True
-
-    # ── Alert 8: grid down ────────────────────────────────────────────
-    # Fires immediately (once per day) when grid_status is "down".
-    if grid_status == "down":
-        if state.get("grid_down_alerted_date") != today:
-            if load_kw > 0.1:
-                backup_h = soc / 100 * getattr(cfg, "battery_capacity_kwh", _BATTERY_CAPACITY_KWH) / load_kw
-                backup_str = f"  |  Est. backup: ~{backup_h:.1f} hr"
+                system_peak_kw = max(
+                    (p.predicted_solar_kw for p in usage_forecast.hours),
+                    default=solar_kw,
+                ) * 1.2
             else:
-                backup_str = ""
-            body = (
-                f"🔴 FranklinWH: GRID DOWN at {now.strftime('%-I:%M %p')}\n"
-                f"Running on battery — SoC {soc:.0f}%  |  Load {load_kw:.2f} kW{backup_str}\n"
-                f"Solar {solar_kw:.2f} kW"
-            )
-            _send_alert(body, cfg)
-            logger.info("Grid-down alert sent for %s", today)
-            state["grid_down_alerted_date"] = today
-            changed = True
+                system_peak_kw = max(solar_kw, 1.0) * 1.2
+            cal_note = f"calibrating, {len(cal_samples)}/3 readings"
+        system_peak_kw = max(system_peak_kw, 1.0)
 
-    # ── Alert 10: battery draining fast ─────────────────────────────────
-    # Fires when SoC drops > 8%/hr and battery is below 35% — unexpected
-    # high load or inverter issue. Track SoC every poll to compute the rate.
+        avg_ghi    = outlook.avg_ghi(12)
+        cloudy_day = avg_ghi < _GHI_CLOUDY_THRESHOLD
+        perf_ratio = _get_performance_ratio(state, cloudy=cloudy_day)
+        gen_kwh    = round(outlook.today_generation_kwh(system_peak_kw) * perf_ratio, 1)
+        state[f"predicted_kwh_{today}"]     = gen_kwh
+        state[f"predicted_avg_ghi_{today}"] = round(avg_ghi, 1)
+
+        sky = "Sunny" if avg_ghi >= 400 else ("Partly cloudy" if avg_ghi >= _GHI_CLOUDY_THRESHOLD else "Cloudy")
+        cloudy_samples = state.get("perf_ratio_cloudy_samples", [])
+        sunny_samples  = state.get("perf_ratio_samples", [])
+        if cloudy_day and len(cloudy_samples) >= 3:
+            pr_note = f"cloudy PR={perf_ratio:.2f} ({len(cloudy_samples)} days)"
+        elif not cloudy_day and len(sunny_samples) >= 3:
+            pr_note = f"PR={perf_ratio:.2f} ({len(sunny_samples)} days)"
+        else:
+            pr_note = cal_note
+        solar_est = f"~{gen_kwh:.1f} kWh predicted ({sky}, {pr_note})"
+
+        # Peak solar window (hours with GHI > 400 W/m²)
+        peak_hrs = [h for h in outlook.hours if h.time.date() == now.date() and h.ghi_wm2 > 400]
+        if peak_hrs:
+            start = peak_hrs[0].time.strftime("%-I%p").lower()
+            end   = (peak_hrs[-1].time + timedelta(hours=1)).strftime("%-I%p").lower()
+            peak_window_str = f"\nPeak solar window: {start}–{end}"
+        else:
+            peak_window_str = ""
+    else:
+        solar_est       = "Solar forecast unavailable"
+        peak_window_str = ""
+
+    yest_accuracy_str = ""
+    if yest_pred > 0 and yest_actual >= 0.3:
+        delta     = yest_actual - yest_pred
+        sign      = "+" if delta >= 0 else ""
+        yest_accuracy_str = (
+            f"\nYesterday: predicted {yest_pred:.1f} kWh → actual {yest_actual:.1f} kWh "
+            f"({sign}{delta:.1f} kWh)"
+        )
+
+    state["morning_preview_date"] = today
+    logger.info("Morning preview alert sent for %s", today)
+    return (
+        f"☀️ FranklinWH: Good morning! Daily preview\n"
+        f"Battery: {soc:.0f}% SoC  |  Solar now: {solar_kw:.2f} kW\n"
+        f"{solar_est}{peak_window_str}{yest_accuracy_str}"
+    )
+
+
+def _alert_grid_import(state: dict, today: str, now: datetime, c) -> str | None:
+    if not (16 <= now.hour < 21) or c.grid_use_kw <= 0.3:
+        return None
+    if state.get("grid_import_alerted_date") == today:
+        return None
+    state["grid_import_alerted_date"] = today
+    logger.info("Peak grid-import alert sent for %s", today)
+    return (
+        f"⚠️ FranklinWH: Pulling from grid during peak hours (4–9 pm)\n"
+        f"SoC {c.battery_soc_pct:.0f}%  |  Grid +{c.grid_use_kw:.2f} kW  |  "
+        f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW\n"
+        f"Time: {now.strftime('%-I:%M %p')}"
+    )
+
+
+def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c) -> str | None:
+    in_window = now.hour == 13 or (now.hour == 14 and now.minute == 0)
+    if not in_window or c.battery_soc_pct >= 40.0:
+        return None
+    if state.get("low_soc_1pm_alerted_date") == today:
+        return None
+    state["low_soc_1pm_alerted_date"] = today
+    logger.info("Low 1 pm SoC alert sent for %s (%.0f%%)", today, c.battery_soc_pct)
+    return (
+        f"🟡 FranklinWH: Battery under 40% at {now.strftime('%-I:%M %p')}\n"
+        f"SoC {c.battery_soc_pct:.0f}% — grid import risk during 4–9 pm peak\n"
+        f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW\n"
+        f"Consider switching to Emergency Backup to charge before peak."
+    )
+
+
+def _alert_eb_ready(state: dict, today: str, now: datetime, c) -> str | None:
+    in_window = (now.hour == 13 and now.minute >= 40) or (now.hour == 14 and now.minute <= 10)
+    if not in_window or c.battery_soc_pct < 80.0:
+        return None
+    if state.get("eb_80pct_alerted_date") == today:
+        return None
+    state["eb_80pct_alerted_date"] = today
+    logger.info("EB 80%% SoC alert sent for %s (%.0f%%)", today, c.battery_soc_pct)
+    return (
+        f"🟢 FranklinWH: Battery at {c.battery_soc_pct:.0f}% — Emergency Backup target reached\n"
+        f"Time: {now.strftime('%-I:%M %p')} — battery ready before 4 pm peak\n"
+        f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW\n"
+        f"You can now switch modes if needed."
+    )
+
+
+def _alert_low_morning_solar(state: dict, today: str, now: datetime, c) -> str | None:
+    in_window = (now.hour == 9 and now.minute >= 30) or (now.hour == 10 and now.minute <= 30)
+    if not in_window or c.solar_production_kw >= 0.5:
+        return None
+    if state.get("low_solar_morning_date") == today:
+        return None
+    state["low_solar_morning_date"] = today
+    logger.info("Low morning solar alert sent for %s (%.2f kW)", today, c.solar_production_kw)
+    return (
+        f"☁️ FranklinWH: Low solar at {now.strftime('%-I:%M %p')} — cloudy day ahead\n"
+        f"Solar {c.solar_production_kw:.2f} kW  |  SoC {c.battery_soc_pct:.0f}%  |  Load {c.home_load_kw:.2f} kW\n"
+        f"Consider conserving battery early — less solar charging expected today."
+    )
+
+
+def _alert_solar_stopped(state: dict, today: str, now: datetime, c) -> str | None:
+    """Always updates last_midday_solar_kw when in the midday window."""
+    if not (11 <= now.hour < 15):
+        return None
+    last_solar = state.get("last_midday_solar_kw", 0.0)
+    state["last_midday_solar_kw"] = c.solar_production_kw
+    if last_solar < 0.5 or c.solar_production_kw >= 0.3 or state.get("solar_stopped_date") == today:
+        return None
+    state["solar_stopped_date"] = today
+    logger.info("Solar stopped alert sent for %s (%.2f→%.2f kW)", today, last_solar, c.solar_production_kw)
+    return (
+        f"🔴 FranklinWH: Solar dropped mid-day — possible issue\n"
+        f"Was {last_solar:.2f} kW → now {c.solar_production_kw:.2f} kW "
+        f"at {now.strftime('%-I:%M %p')}\n"
+        f"SoC {c.battery_soc_pct:.0f}%  |  Check inverter or cloud cover."
+    )
+
+
+def _alert_low_noon_soc(state: dict, today: str, now: datetime, c) -> str | None:
+    in_window = (now.hour == 11 and now.minute >= 30) or (now.hour == 12 and now.minute <= 30)
+    if not in_window or c.battery_soc_pct >= 30.0 or c.solar_production_kw <= 0.5:
+        return None
+    if state.get("low_noon_soc_date") == today:
+        return None
+    state["low_noon_soc_date"] = today
+    logger.info("Low noon SoC alert sent for %s (%.0f%%)", today, c.battery_soc_pct)
+    return (
+        f"🟡 FranklinWH: Battery still low at noon — only {c.battery_soc_pct:.0f}% SoC\n"
+        f"Solar {c.solar_production_kw:.2f} kW available but battery hasn't recovered\n"
+        f"Time: {now.strftime('%-I:%M %p')}  |  Load {c.home_load_kw:.2f} kW\n"
+        f"Check battery mode — may need manual intervention."
+    )
+
+
+def _alert_eod_digest(
+    state: dict, today: str, now: datetime, stats, cfg: Config,
+    outlook, usage_forecast, store=None,
+) -> str | None:
+    if now.hour not in (21, 22) or state.get("eod_digest_date") == today:
+        return None
+
+    t       = stats.totals
+    c       = stats.current
+    soc     = c.battery_soc_pct
+    bat_cap = cfg.battery_capacity_kwh
+
+    backup_str = ""
+    if c.home_load_kw > 0.1:
+        backup_h   = soc / 100 * bat_cap / c.home_load_kw
+        backup_str = f"\nEst. backup now: ~{backup_h:.1f} hr at current load"
+
+    solar_delta_str = ""
+    predicted_kwh   = state.get(f"predicted_kwh_{today}")
+    if predicted_kwh and predicted_kwh > 0:
+        delta_kwh = t.solar_kwh - predicted_kwh
+        sign      = "+" if delta_kwh >= 0 else ""
+        solar_delta_str = (
+            f"\n\nSolar forecast vs actual:\n"
+            f"  Predicted:  {predicted_kwh:.1f} kWh\n"
+            f"  Actual:     {t.solar_kwh:.1f} kWh\n"
+            f"  Delta:      {sign}{delta_kwh:.1f} kWh ({sign}{delta_kwh / predicted_kwh * 100:.0f}%)"
+        )
+
+    soc_6am_str = ""
+    if usage_forecast and usage_forecast.hours:
+        tomorrow_6am  = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+        night_net_kwh = sum(p.net_kw for p in usage_forecast.hours if now <= p.dt < tomorrow_6am)
+        pred_soc_6am  = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
+        soc_6am_str   = f"\nPredicted SoC @ 6 am: ~{pred_soc_6am:.0f}%"
+
+    precharge_str = ""
+    if outlook:
+        tmrw_ghi = outlook.tomorrow_avg_ghi()
+        if tmrw_ghi < 100.0 and soc < 60.0:
+            precharge_str = (
+                f"\n\n⚡ Tomorrow looks dim ({tmrw_ghi:.0f} W/m² avg). "
+                f"Consider switching to Emergency Backup tonight to top up battery."
+            )
+
+    self_suff_str = ""
+    if t.home_use_kwh > 0:
+        self_suff     = max(0.0, min(100.0, (t.home_use_kwh - t.grid_load_kwh) / t.home_use_kwh * 100))
+        self_suff_str = f"\nSelf-sufficiency:  {self_suff:.0f}%"
+
+    # TOU daily cost estimate + peak coverage (requires history store)
+    tou_str      = ""
+    peak_cov_str = ""
+    if store is not None:
+        interval = 0.25
+        readings = store.weekly_readings(today, today)
+        if readings:
+            import_cost = export_credit = 0.0
+            peak_total = peak_no_grid = 0
+            for ts, grid_kw, _home_kw, _solar_kw in readings:
+                try:
+                    dt = datetime.fromisoformat(ts)
+                except Exception:
+                    continue
+                r = rate_at(dt)
+                if grid_kw > 0:
+                    import_cost   += grid_kw * interval * r
+                elif grid_kw < 0:
+                    export_credit += abs(grid_kw) * interval * r
+                if 16 <= dt.hour < 21:
+                    peak_total += 1
+                    if grid_kw <= 0:
+                        peak_no_grid += 1
+            net = import_cost - export_credit
+            tou_str = (
+                f"\nEst. grid cost today:  ${import_cost:.2f} import  "
+                f"${export_credit:.2f} export  (net ${net:.2f})"
+            )
+            if peak_total > 0:
+                pct = peak_no_grid / peak_total * 100
+                peak_cov_str = f"\nPeak coverage (4–9 pm): {pct:.0f}% battery/solar"
+                state[f"peak_cov_{today}"] = pct
+            else:
+                state[f"peak_cov_{today}"] = 0.0
+
+    state["eod_digest_date"] = today
+    logger.info("End-of-day digest sent for %s", today)
+    return (
+        f"📊 FranklinWH Daily Summary — {now.strftime('%a %b %-d')}\n"
+        f"Solar generated:  {t.solar_kwh:.1f} kWh\n"
+        f"Grid consumed:    {t.grid_load_kwh:.1f} kWh\n"
+        f"Grid exported:    {t.grid_export_kwh:.1f} kWh\n"
+        f"Home used:        {t.home_use_kwh:.1f} kWh{self_suff_str}{peak_cov_str}{tou_str}\n"
+        f"Battery SoC now:  {soc:.0f}%{backup_str}{soc_6am_str}{solar_delta_str}{precharge_str}"
+    )
+
+
+def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str | None:
+    """Sunday evening: TOU-weighted import/export cost + peak savings for the week."""
+    if store is None or now.weekday() != 6 or now.hour not in (21, 22):
+        return None
+    if state.get("weekly_summary_sent") == today:
+        return None
+
+    week_end   = now.date()
+    week_start = week_end - timedelta(days=6)
+    readings   = store.weekly_readings(
+        week_start.strftime("%Y-%m-%d"),
+        week_end.strftime("%Y-%m-%d"),
+    )
+    if not readings:
+        return None
+
+    interval      = 0.25   # 15-min poll → kWh per reading
+    import_cost   = 0.0
+    export_credit = 0.0
+    peak_saved    = 0.0    # on-peak hours (4–9 pm)
+    sop_saved     = 0.0    # super off-peak hours
+
+    for ts, grid_kw, home_kw, _solar_kw in readings:
+        try:
+            dt = datetime.fromisoformat(ts)
+        except Exception:
+            continue
+        r      = rate_at(dt)
+        period = period_at(dt)
+        if grid_kw > 0:
+            import_cost   += grid_kw * interval * r
+        elif grid_kw < 0:
+            export_credit += abs(grid_kw) * interval * r
+        # Energy served by battery+solar (not drawn from grid) × avoided rate
+        batt_solar_kwh = max(0.0, home_kw - max(0.0, grid_kw)) * interval
+        if period == TouPeriod.ON_PEAK:
+            peak_saved += batt_solar_kwh * r
+        elif period == TouPeriod.SUPER_OFF_PEAK:
+            sop_saved  += batt_solar_kwh * r
+
+    net_cost    = import_cost - export_credit
+    total_saved = peak_saved + sop_saved
+    week_label  = f"{week_start.strftime('%b %-d')}–{week_end.strftime('%b %-d')}"
+
+    state["weekly_summary_sent"] = today
+    logger.info("Weekly TOU summary sent for week ending %s", today)
+    return (
+        f"📊 FranklinWH Weekly Summary — {week_label}\n\n"
+        f"Grid cost (EV-TOU-5 rates):\n"
+        f"  Imported:  ${import_cost:.2f}\n"
+        f"  Exported:  ${export_credit:.2f} (est.)\n"
+        f"  Net cost:  ${net_cost:.2f}\n\n"
+        f"Est. savings from battery + solar:\n"
+        f"  Peak (4–9 pm):    ${peak_saved:.2f}\n"
+        f"  Super off-peak:   ${sop_saved:.2f}\n"
+        f"  Total saved:      ${total_saved:.2f}"
+    )
+
+
+def _alert_monthly_summary(state: dict, today: str, now: datetime, store) -> str | None:
+    """19th of each month: billing-cycle summary (20th last month → 19th this month)."""
+    if now.hour not in (21, 22) or store is None:
+        return None
+    if now.day != 19 or state.get("monthly_summary_date") == today:
+        return None
+
+    # Billing cycle: 20th of prior month → 19th of this month
+    cycle_end   = now.date()
+    cycle_start = (cycle_end.replace(day=1) - timedelta(days=1)).replace(day=20)
+    prev_end    = cycle_start - timedelta(days=1)
+    prev_start  = (prev_end.replace(day=1) - timedelta(days=1)).replace(day=20)
+
+    cur  = store.period_totals(cycle_start.strftime("%Y-%m-%d"), cycle_end.strftime("%Y-%m-%d"))
+    prev = store.period_totals(prev_start.strftime("%Y-%m-%d"), prev_end.strftime("%Y-%m-%d"))
+
+    cur_label  = f"{cycle_start.strftime('%b %-d')} – {cycle_end.strftime('%b %-d')}"
+    prev_label = f"{prev_start.strftime('%b %-d')} – {prev_end.strftime('%b %-d')}"
+
+    def _mdelta(a: float, b: float) -> str:
+        if b == 0:
+            return ""
+        d    = a - b
+        sign = "+" if d >= 0 else ""
+        return f"  ({sign}{d:.1f} kWh, {sign}{d / b * 100:.0f}%)"
+
+    sparse_note = f"\n⚠️ Prior cycle only {prev.days_with_data}d data" if prev.days_with_data < 20 else ""
+
+    state["monthly_summary_date"] = today
+    logger.info("Billing-cycle summary sent for %s → %s", cycle_start, cycle_end)
+    return (
+        f"📅 FranklinWH Billing Cycle — {cur_label}\n"
+        f"vs prior cycle ({prev_label})\n\n"
+        f"Solar generated:\n"
+        f"  This:  {cur.solar_kwh:.1f} kWh{_mdelta(cur.solar_kwh, prev.solar_kwh)}\n"
+        f"  Prior: {prev.solar_kwh:.1f} kWh\n\n"
+        f"Grid imported:\n"
+        f"  This:  {cur.grid_import_kwh:.1f} kWh{_mdelta(cur.grid_import_kwh, prev.grid_import_kwh)}\n"
+        f"  Prior: {prev.grid_import_kwh:.1f} kWh\n\n"
+        f"Grid exported:\n"
+        f"  This:  {cur.grid_export_kwh:.1f} kWh{_mdelta(cur.grid_export_kwh, prev.grid_export_kwh)}\n"
+        f"  Prior: {prev.grid_export_kwh:.1f} kWh\n\n"
+        f"Home used:\n"
+        f"  This:  {cur.home_load_kwh:.1f} kWh{_mdelta(cur.home_load_kwh, prev.home_load_kwh)}\n"
+        f"  Prior: {prev.home_load_kwh:.1f} kWh{sparse_note}"
+    )
+
+
+def _alert_grid_down(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
+    if c.grid_status != "down" or state.get("grid_down_alerted_date") == today:
+        return None
+    backup_str = ""
+    if c.home_load_kw > 0.1:
+        backup_h   = c.battery_soc_pct / 100 * cfg.battery_capacity_kwh / c.home_load_kw
+        backup_str = f"  |  Est. backup: ~{backup_h:.1f} hr"
+    state["grid_down_alerted_date"] = today
+    state["grid_down_start"]        = now.isoformat()
+    state["grid_down_soc"]          = c.battery_soc_pct
+    logger.info("Grid-down alert sent for %s", today)
+    return (
+        f"🔴 FranklinWH: GRID DOWN at {now.strftime('%-I:%M %p')}\n"
+        f"Running on battery — SoC {c.battery_soc_pct:.0f}%  |  Load {c.home_load_kw:.2f} kW{backup_str}\n"
+        f"Solar {c.solar_production_kw:.2f} kW"
+    )
+
+
+def _alert_grid_restored(state: dict, now: datetime, c, cfg: Config) -> str | None:
+    if c.grid_status != "normal" or "grid_down_start" not in state:
+        return None
+    try:
+        outage_start = datetime.fromisoformat(state["grid_down_start"])
+        duration_min = (now - outage_start).total_seconds() / 60
+    except (ValueError, TypeError):
+        state.pop("grid_down_start", None)
+        state.pop("grid_down_soc", None)
+        return None
+
+    soc_start    = state.pop("grid_down_soc", c.battery_soc_pct)
+    state.pop("grid_down_start")
+    soc_used     = max(0.0, soc_start - c.battery_soc_pct)
+    kwh_used     = round(soc_used / 100 * cfg.battery_capacity_kwh, 1)
+    dur_str      = (f"{duration_min / 60:.1f}h" if duration_min >= 60
+                    else f"{duration_min:.0f} min")
+    kwh_str      = f"  |  ~{kwh_used:.1f} kWh used from battery" if kwh_used > 0.1 else ""
+    logger.info("Grid-restored alert: outage lasted %s", dur_str)
+    return (
+        f"🟢 FranklinWH: GRID RESTORED at {now.strftime('%-I:%M %p')}\n"
+        f"Outage lasted {dur_str}{kwh_str}\n"
+        f"Battery SoC now: {c.battery_soc_pct:.0f}%  |  Solar {c.solar_production_kw:.2f} kW"
+    )
+
+
+def _alert_battery_full_cycle(state: dict, today: str, now: datetime, c) -> str | None:
+    full_state = state.get("full_charge_state", "watching_for_full")
+    if full_state == "watching_for_full" and c.battery_soc_pct >= 99.0:
+        state["full_charge_state"] = "watching_for_discharge"
+        logger.info("Full charge alert sent (%.0f%%)", c.battery_soc_pct)
+        return (
+            f"🔋 FranklinWH: Battery fully charged — {c.battery_soc_pct:.0f}% SoC\n"
+            f"Time: {now.strftime('%-I:%M %p')}\n"
+            f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW"
+        )
+    if full_state == "watching_for_discharge" and c.battery_soc_pct < 90.0:
+        state["full_charge_state"] = "watching_for_full"
+        if 15 <= now.hour < 19 and state.get("no_longer_full_date") != today:
+            state["no_longer_full_date"] = today
+            logger.info("Battery discharged below 90%% alert sent (%.0f%%)", c.battery_soc_pct)
+            return (
+                f"🔋 FranklinWH: Battery no longer full — {c.battery_soc_pct:.0f}% SoC\n"
+                f"Time: {now.strftime('%-I:%M %p')}\n"
+                f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW"
+            )
+        logger.info("Battery discharged below 90%% — outside 3–7 pm window, suppressed")
+    return None
+
+
+def _alert_fast_drain(state: dict, today: str, now: datetime, c) -> str | None:
+    """Always updates last_soc/last_soc_time for rate tracking."""
     prev_soc      = state.get("last_soc")
     prev_soc_time = state.get("last_soc_time")
+    body = None
     if prev_soc is not None and prev_soc_time is not None:
         try:
             elapsed_h = (now - datetime.fromisoformat(prev_soc_time)).total_seconds() / 3600
             if elapsed_h > 0:
-                drain_rate = (prev_soc - soc) / elapsed_h
-                if drain_rate >= 8.0 and soc < 35.0:
-                    if state.get("fast_drain_alerted_date") != today:
-                        body = (
-                            f"⚡ FranklinWH: Battery draining fast — {drain_rate:.0f}%/hr\n"
-                            f"SoC {soc:.0f}%  |  Load {load_kw:.2f} kW  |  "
-                            f"Solar {solar_kw:.2f} kW\n"
-                            f"Time: {now.strftime('%-I:%M %p')}"
-                        )
-                        state["fast_drain_alerted_date"] = today
-                        changed = True
-                        _send_alert(body, cfg)
-                        logger.info("Fast drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, soc)
+                drain_rate = (prev_soc - c.battery_soc_pct) / elapsed_h
+                if drain_rate >= 8.0 and c.battery_soc_pct < 35.0 and state.get("fast_drain_alerted_date") != today:
+                    state["fast_drain_alerted_date"] = today
+                    logger.info("Fast drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
+                    body = (
+                        f"⚡ FranklinWH: Battery draining fast — {drain_rate:.0f}%/hr\n"
+                        f"SoC {c.battery_soc_pct:.0f}%  |  Load {c.home_load_kw:.2f} kW  |  "
+                        f"Solar {c.solar_production_kw:.2f} kW\n"
+                        f"Time: {now.strftime('%-I:%M %p')}"
+                    )
         except (ValueError, TypeError):
             pass
-    state["last_soc"] = soc
+    state["last_soc"]      = c.battery_soc_pct
     state["last_soc_time"] = now.isoformat()
-    changed = True
+    return body
 
-    # ── Alert 11: battery not charging despite strong solar ──────────────
-    # Window: 10 am–2 pm. Fires if solar is strong but battery isn't absorbing it.
-    # p_fhp sign: negative = charging, positive = discharging. "Not charging" = battery_kw > -0.2.
-    in_solar_peak = 10 <= hour < 14
-    if in_solar_peak and solar_kw > 1.5 and soc < 80.0 and battery_kw > -0.2:
-        if state.get("not_charging_date") != today:
-            body = (
-                f"⚠️ FranklinWH: Battery not charging despite strong solar\n"
-                f"Solar {solar_kw:.2f} kW  |  Battery {battery_kw:+.2f} kW  |  SoC {soc:.0f}%\n"
-                f"Time: {now.strftime('%-I:%M %p')} — check battery mode or inverter."
-            )
+
+def _alert_not_charging(state: dict, today: str, now: datetime, c) -> str | None:
+    if not (10 <= now.hour < 14):
+        return None
+    if c.solar_production_kw <= 1.5 or c.battery_soc_pct >= 80.0 or c.battery_use_kw <= -0.2:
+        return None
+    if state.get("not_charging_date") == today:
+        return None
+    state["not_charging_date"] = today
+    logger.info("Not-charging alert sent for %s (solar=%.2f kW, batt=%.2f kW)", today, c.solar_production_kw, c.battery_use_kw)
+    return (
+        f"⚠️ FranklinWH: Battery not charging despite strong solar\n"
+        f"Solar {c.solar_production_kw:.2f} kW  |  Battery {c.battery_use_kw:+.2f} kW  |  SoC {c.battery_soc_pct:.0f}%\n"
+        f"Time: {now.strftime('%-I:%M %p')} — check battery mode or inverter."
+    )
+
+
+def _alert_solar_degradation(state: dict, today: str, now: datetime) -> str | None:
+    """Morning check: 7-day rolling PR median drops >5% vs 30-day baseline → possible degradation."""
+    if now.hour not in (8, 9) or state.get("solar_degradation_alerted_week") == today[:7]:
+        return None
+
+    cutoff_30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    cutoff_7  = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    all_pr: list[float]    = []
+    recent_pr: list[float] = []
+    for k, v in state.items():
+        if not k.startswith("daily_pr_"):
+            continue
+        date_str = k[len("daily_pr_"):]
+        if date_str < cutoff_30:
+            continue
+        try:
+            ratio = float(v)
+        except (TypeError, ValueError):
+            continue
+        all_pr.append(ratio)
+        if date_str >= cutoff_7:
+            recent_pr.append(ratio)
+
+    if len(all_pr) < 10 or len(recent_pr) < 4:
+        return None  # not enough data
+
+    def _median(lst: list[float]) -> float:
+        s = sorted(lst)
+        return s[len(s) // 2]
+
+    baseline = _median(all_pr)
+    recent   = _median(recent_pr)
+    if baseline <= 0 or recent >= baseline * 0.95:
+        return None
+
+    drop_pct = (baseline - recent) / baseline * 100
+    state["solar_degradation_alerted_week"] = today[:7]
+    logger.info("Solar degradation alert: baseline PR=%.3f recent PR=%.3f drop=%.1f%%",
+                baseline, recent, drop_pct)
+    return (
+        f"⚠️ FranklinWH: Solar output trending down\n"
+        f"7-day performance ratio: {recent:.2f} vs 30-day baseline {baseline:.2f} "
+        f"({drop_pct:.0f}% drop)\n"
+        f"This may indicate panel soiling, shading, or inverter efficiency loss.\n"
+        f"Consider cleaning panels or checking inverter logs."
+    )
+
+
+def _alert_peak_streak(state: dict, today: str, now: datetime) -> str | None:
+    """Evening check: last 3 consecutive days all <50% peak coverage → battery under-sized or depleting early."""
+    if now.hour not in (21, 22) or state.get("peak_streak_alerted_week") == today[:7]:
+        return None
+
+    low_days = []
+    check_date = datetime.now().date() - timedelta(days=1)
+    for _ in range(3):
+        date_str = check_date.strftime("%Y-%m-%d")
+        pct = state.get(f"peak_cov_{date_str}")
+        if pct is None:
+            return None  # missing data — can't confirm streak
+        if pct >= 50.0:
+            return None  # streak broken
+        low_days.append((date_str, pct))
+        check_date -= timedelta(days=1)
+
+    state["peak_streak_alerted_week"] = today[:7]
+    logger.info("Peak-coverage streak alert: 3 consecutive days under 50%%")
+    lines = "\n".join(f"  {d}: {p:.0f}%" for d, p in reversed(low_days))
+    return (
+        f"⚠️ FranklinWH: Battery running short at peak for 3 days in a row\n"
+        f"{lines}\n"
+        f"Battery may not be reaching 4 pm with enough charge. "
+        f"Consider charging earlier or checking whether EB mode is being triggered in time."
+    )
+
+
+def _alert_bill_projection(
+    state: dict, today: str, now: datetime, store,
+) -> str | None:
+    """5th of each month: project full-cycle bill from partial billing cycle data."""
+    if store is None or now.day != 5 or now.hour not in (8, 9):
+        return None
+    if state.get("bill_projection_date") == today:
+        return None
+
+    # Billing cycle started on 20th of prior month
+    cycle_start = (datetime.now().date().replace(day=1) - timedelta(days=1)).replace(day=20)
+    days_so_far = (datetime.now().date() - cycle_start).days
+    if days_so_far < 5:
+        return None
+
+    readings = store.weekly_readings(cycle_start.strftime("%Y-%m-%d"), today)
+    if not readings:
+        return None
+
+    interval      = 0.25
+    import_cost   = 0.0
+    export_credit = 0.0
+    for ts, grid_kw, _home_kw, _solar_kw in readings:
+        try:
+            dt = datetime.fromisoformat(ts)
+        except Exception:
+            continue
+        r = rate_at(dt)
+        if grid_kw > 0:
+            import_cost   += grid_kw * interval * r
+        elif grid_kw < 0:
+            export_credit += abs(grid_kw) * interval * r
+
+    net_actual     = import_cost - export_credit
+    daily_net      = net_actual / days_so_far
+    projected_net  = daily_net * 30
+    projected_imp  = import_cost / days_so_far * 30
+    projected_exp  = export_credit / days_so_far * 30
+    cycle_label    = f"{cycle_start.strftime('%b %-d')} – {datetime.now().date().strftime('%b %-d')}"
+
+    state["bill_projection_date"] = today
+    logger.info("Bill projection alert: %d days, net $%.2f/day → $%.2f projected",
+                days_so_far, daily_net, projected_net)
+    return (
+        f"💡 FranklinWH: Billing cycle projection\n"
+        f"Cycle so far ({cycle_label}, {days_so_far} days):\n"
+        f"  Grid import:  ${import_cost:.2f}\n"
+        f"  Grid export:  ${export_credit:.2f}\n"
+        f"  Net cost:     ${net_actual:.2f}\n\n"
+        f"Projected full cycle (~30 days):\n"
+        f"  Import:  ${projected_imp:.2f}\n"
+        f"  Export:  ${projected_exp:.2f}\n"
+        f"  Net:     ${projected_net:.2f}  (${daily_net:.2f}/day avg)"
+    )
+
+
+def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None, store=None) -> None:
+    if not cfg.imessage_phone and not (cfg.telegram_bot_token and cfg.telegram_chat_id):
+        return
+
+    now   = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    state = _load_peak_state(out)
+    c     = stats.current
+
+    _calibrate_solar(state, c.solar_production_kw, outlook)
+
+    for body in [
+        _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store),
+        _alert_grid_import(state, today, now, c),
+        _alert_low_soc_1pm(state, today, now, c),
+        _alert_eb_ready(state, today, now, c),
+        _alert_low_morning_solar(state, today, now, c),
+        _alert_solar_stopped(state, today, now, c),
+        _alert_low_noon_soc(state, today, now, c),
+        _alert_eod_digest(state, today, now, stats, cfg, outlook, usage_forecast, store),
+        _alert_weekly_summary(state, today, now, store),
+        _alert_monthly_summary(state, today, now, store),
+        _alert_grid_down(state, today, now, c, cfg),
+        _alert_grid_restored(state, now, c, cfg),
+        _alert_battery_full_cycle(state, today, now, c),
+        _alert_fast_drain(state, today, now, c),
+        _alert_not_charging(state, today, now, c),
+        _alert_solar_degradation(state, today, now),
+        _alert_peak_streak(state, today, now),
+        _alert_bill_projection(state, today, now, store),
+    ]:
+        if body:
             _send_alert(body, cfg)
-            logger.info("Not-charging alert sent for %s (solar=%.2f kW, batt=%.2f kW)", today, solar_kw, battery_kw)
-            state["not_charging_date"] = today
-            changed = True
 
-    if changed:
-        _save_peak_state(out, state)
+    _save_peak_state(out, state)
 
 
 def _dispatch_notifications(rec, cfg: Config, notify_flag: bool, last_mode: str | None, outdir: Path | None = None) -> None:
@@ -793,7 +1069,8 @@ def setup() -> None:
     ).strip()
     if tg_token:
         cfg.telegram_bot_token = tg_token
-        click.echo("  Detecting your Telegram chat ID…", nl=False)
+        click.echo("  Send any message to your bot in Telegram now, then wait…")
+        click.echo("  Detecting your Telegram chat ID (up to ~9 seconds)…", nl=False)
         chat_id = fetch_telegram_chat_id(tg_token)
         if chat_id:
             cfg.telegram_chat_id = chat_id
@@ -801,14 +1078,52 @@ def setup() -> None:
             _ok("Telegram alerts configured")
         else:
             click.echo(click.style(" Not found", fg="yellow"))
-            _warn("Make sure you sent a message to your bot first, then re-run setup.")
+            _warn("Could not detect chat ID automatically.")
             cfg.telegram_chat_id = click.prompt(
-                "  Or enter chat ID manually (or leave blank to skip)",
-                default="",
+                "  Enter chat ID manually (visit t.me/userinfobot to find yours)",
+                default=cfg.telegram_chat_id or "",
             ).strip()
     else:
         cfg.telegram_bot_token = ""
         cfg.telegram_chat_id   = ""
+
+    # ── AI Chatbot ────────────────────────────────────────────────────
+    click.echo()
+    click.echo(click.style("  AI Chatbot (optional — answers questions in Telegram)", bold=True))
+    click.echo("  Backends: 'anthropic' (cloud, free API key) or 'ollama' (local, private)")
+    click.echo()
+    backend = click.prompt(
+        "  Chat backend",
+        type=click.Choice(["anthropic", "ollama", "none"]),
+        default=cfg.chat_backend if cfg.chat_backend in ("anthropic", "ollama") else "none",
+    )
+    if backend == "anthropic":
+        click.echo("  Get a free API key at console.anthropic.com → API Keys")
+        ak = click.prompt(
+            "  Anthropic API key",
+            default=cfg.anthropic_api_key or "",
+            hide_input=True,
+        ).strip()
+        cfg.anthropic_api_key = ak
+        cfg.chat_backend = "anthropic"
+        _ok("Anthropic chatbot enabled")
+    elif backend == "ollama":
+        cfg.chat_backend = "ollama"
+        cfg.ollama_model = click.prompt(
+            "  Ollama model",
+            default=cfg.ollama_model or "llama3.1:8b",
+        ).strip()
+        cfg.ollama_url = click.prompt(
+            "  Ollama URL",
+            default=cfg.ollama_url or "http://localhost:11434",
+        ).strip()
+        _ok(f"Ollama chatbot enabled (model: {cfg.ollama_model})")
+        _info("Make sure Ollama is running: ollama serve")
+        _info(f"Pull model if needed: ollama pull {cfg.ollama_model}")
+    else:
+        cfg.chat_backend = "none"
+        cfg.anthropic_api_key = ""
+        _info("Chatbot disabled")
 
     # ── Preferences ──────────────────────────────────────────────────
     click.echo()
@@ -1201,6 +1516,29 @@ def cmd_advise(
             _info(f"Usage history: {readings} readings across {days} day(s) — {status}")
         click.echo()
 
+        # Start Telegram AI chatbot thread if configured
+        _chatbot: TelegramChatBot | None = None
+        _backend = getattr(cfg, "chat_backend", "anthropic")
+        _bot_ready = (
+            cfg.telegram_bot_token and _backend != "none" and (
+                (_backend == "anthropic" and getattr(cfg, "anthropic_api_key", "")) or
+                (_backend == "ollama")
+            )
+        )
+        if _bot_ready and _backend == "anthropic":
+            try:
+                import anthropic as _anthropic_check  # noqa: F401
+            except ImportError:
+                _warn("anthropic package not installed — chatbot disabled. Run: pip install anthropic")
+                _bot_ready = False
+        if _bot_ready:
+            import threading as _threading
+            _chatbot = TelegramChatBot(cfg, getattr(cfg, "anthropic_api_key", ""))
+            _bot_thread = _threading.Thread(target=_chatbot.run, daemon=True, name="tg-chatbot")
+            _bot_thread.start()
+            _info("Telegram AI chatbot started — message the bot to ask energy questions")
+            click.echo()
+
         while True:
             try:
                 stats = client.get_stats(gateway)
@@ -1209,10 +1547,16 @@ def cmd_advise(
                 outlook        = _fetch_outlook_cached(lat, lon)
                 system_peak_kw = _get_system_peak_kw(_load_peak_state(outdir))
                 usage_forecast = (
-                    predict(history, 12, outlook=outlook, system_peak_kw=system_peak_kw)
+                    predict(history, 24, outlook=outlook, system_peak_kw=system_peak_kw)
                     if history.has_enough_data() else None
                 )
-                rec = recommend(stats, outlook, usage_forecast)
+                rec = recommend(
+                    stats, outlook, usage_forecast,
+                    battery_capacity_kwh=getattr(cfg, "battery_capacity_kwh", _BATTERY_CAPACITY_KWH),
+                )
+
+                if _chatbot is not None:
+                    _chatbot.update_state(stats, history, outlook)
 
                 _print_recommendation(rec, stats, usage_forecast, cfg.location_name)
                 notify_log(rec, log_path)
@@ -1223,6 +1567,7 @@ def cmd_advise(
                 _save_last_mode(outdir, last_mode)
 
             except Exception as e:
+                logger.exception("Watch loop error")
                 _err(str(e))
 
             if not watch:

@@ -225,6 +225,109 @@ class HistoryStore:
         ).fetchone()
         return float(row[0]) if row and row[0] is not None else None
 
+    # ── Seasonal profiles ──────────────────────────────────────────── #
+
+    @staticmethod
+    def _season_months(season: str) -> tuple[int, ...]:
+        return {
+            "spring": (3, 4, 5),
+            "summer": (6, 7, 8),
+            "fall":   (9, 10, 11),
+            "winter": (12, 1, 2),
+        }[season]
+
+    def days_in_season(self, season: str) -> int:
+        """Distinct calendar days with data that fall in the given season."""
+        months = self._season_months(season)
+        placeholders = ",".join("?" * len(months))
+        row = self._conn.execute(
+            f"""
+            SELECT COUNT(DISTINCT substr(timestamp,1,10))
+            FROM readings
+            WHERE CAST(substr(timestamp,6,2) AS INTEGER) IN ({placeholders})
+            """,
+            months,
+        ).fetchone()
+        return row[0] if row else 0
+
+    def seasonal_load_profile(self, season: str) -> LoadProfile:
+        """Average home load kW keyed by (day_of_week, hour_of_day) for one season."""
+        months = self._season_months(season)
+        placeholders = ",".join("?" * len(months))
+        rows = self._conn.execute(
+            f"""
+            SELECT day_of_week, hour_of_day, AVG(home_load_kw)
+            FROM readings
+            WHERE CAST(substr(timestamp,6,2) AS INTEGER) IN ({placeholders})
+            GROUP BY day_of_week, hour_of_day
+            """,
+            months,
+        ).fetchall()
+        return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
+
+    def seasonal_solar_profile(self, season: str) -> LoadProfile:
+        """Average solar production kW keyed by (day_of_week, hour_of_day) for one season."""
+        months = self._season_months(season)
+        placeholders = ",".join("?" * len(months))
+        rows = self._conn.execute(
+            f"""
+            SELECT day_of_week, hour_of_day, AVG(solar_kw)
+            FROM readings
+            WHERE CAST(substr(timestamp,6,2) AS INTEGER) IN ({placeholders})
+            GROUP BY day_of_week, hour_of_day
+            """,
+            months,
+        ).fetchall()
+        return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
+
+    def period_totals(self, start_date: str, end_date: str, interval_hours: float = 0.25) -> MonthlyTotals:
+        """Aggregate energy totals for an arbitrary date range (inclusive YYYY-MM-DD).
+
+        Useful for billing-cycle summaries that don't align with calendar months.
+        Solar uses MAX(solar_total_kwh) per day; grid/load integrated from instantaneous kW.
+        """
+        solar_rows = self._conn.execute(
+            """
+            SELECT substr(timestamp,1,10), MAX(solar_total_kwh)
+            FROM readings
+            WHERE substr(timestamp,1,10) >= ? AND substr(timestamp,1,10) <= ?
+            GROUP BY substr(timestamp,1,10)
+            """,
+            (start_date, end_date),
+        ).fetchall()
+        solar_kwh      = round(sum(r[1] for r in solar_rows if r[1] is not None), 1)
+        days_with_data = len(solar_rows)
+
+        kw_rows = self._conn.execute(
+            "SELECT grid_use_kw, home_load_kw FROM readings "
+            "WHERE substr(timestamp,1,10) >= ? AND substr(timestamp,1,10) <= ?",
+            (start_date, end_date),
+        ).fetchall()
+        grid_import_kwh = round(sum(r[0] for r in kw_rows if r[0] > 0) * interval_hours, 1)
+        grid_export_kwh = round(sum(-r[0] for r in kw_rows if r[0] < 0) * interval_hours, 1)
+        home_load_kwh   = round(sum(r[1] for r in kw_rows) * interval_hours, 1)
+
+        return MonthlyTotals(
+            year_month=f"{start_date}:{end_date}",
+            solar_kwh=solar_kwh,
+            grid_import_kwh=grid_import_kwh,
+            grid_export_kwh=grid_export_kwh,
+            home_load_kwh=home_load_kwh,
+            days_with_data=days_with_data,
+        )
+
+    def weekly_readings(
+        self, start_date: str, end_date: str
+    ) -> list[tuple[str, float, float, float]]:
+        """Return (timestamp, grid_use_kw, home_load_kw, solar_kw) for a date range."""
+        rows = self._conn.execute(
+            "SELECT timestamp, grid_use_kw, home_load_kw, solar_kw FROM readings "
+            "WHERE substr(timestamp,1,10) >= ? AND substr(timestamp,1,10) <= ? "
+            "ORDER BY timestamp",
+            (start_date, end_date),
+        ).fetchall()
+        return [(r[0], float(r[1]), float(r[2]), float(r[3])) for r in rows]
+
     def close(self) -> None:
         self._conn.close()
 

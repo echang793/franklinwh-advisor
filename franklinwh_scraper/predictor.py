@@ -4,9 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Optional
 
-from .history import HistoryStore, LoadProfile
+from .history import HistoryStore
+
+_SEASON_MIN_DAYS = 21  # need at least this many days in season for seasonal profile
+
+
+def _current_season(month: int) -> str:
+    if month in (3, 4, 5):
+        return "spring"
+    if month in (6, 7, 8):
+        return "summer"
+    if month in (9, 10, 11):
+        return "fall"
+    return "winter"
 
 
 @dataclass
@@ -33,7 +44,7 @@ def predict(
     store: HistoryStore,
     horizon_hours: int = 12,
     outlook=None,
-    system_peak_kw: Optional[float] = None,
+    system_peak_kw: float | None = None,
 ) -> UsageForecast:
     """
     Predict home load and solar production for the next `horizon_hours` hours.
@@ -43,11 +54,19 @@ def predict(
     GHI forecast instead of historical averages.
     Confidence degrades with fewer data points.
     """
-    load_profile = store.load_profile()
-    solar_profile = store.solar_profile()
-    data_days = store.distinct_days()
+    now        = datetime.now()
+    season     = _current_season(now.month)
+    data_days  = store.distinct_days()
 
-    now = datetime.now()
+    # Use seasonal profiles when we have enough seasonal data (better accuracy);
+    # fall back to all-time profiles to avoid sparse-bucket gaps.
+    if store.days_in_season(season) >= _SEASON_MIN_DAYS:
+        load_profile  = store.seasonal_load_profile(season)
+        solar_profile = store.seasonal_solar_profile(season)
+    else:
+        load_profile  = store.load_profile()
+        solar_profile = store.solar_profile()
+
     predictions: list[HourPrediction] = []
 
     for h in range(horizon_hours):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,10 @@ class Config:
     telegram_bot_token: str = ""     # from @BotFather
     telegram_chat_id: str = ""       # auto-detected on setup
     battery_capacity_kwh: float = 13.6  # usable kWh — aPower 10=10, aPower 15=15, stacked=multiple
+    anthropic_api_key: str = ""         # for Telegram AI chatbot (get from console.anthropic.com)
+    chat_backend: str = "anthropic"     # "anthropic" or "ollama"
+    ollama_model: str = "llama3.1:8b"  # model to use when chat_backend = "ollama"
+    ollama_url: str = "http://localhost:11434"  # Ollama server base URL
 
     def is_complete(self) -> bool:
         return bool(self.email and self.password and self.lat and self.lon)
