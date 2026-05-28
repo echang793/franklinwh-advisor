@@ -228,7 +228,8 @@ def _alert_morning_preview(
     state: dict, today: str, now: datetime, c,
     outlook, usage_forecast, store,
 ) -> str | None:
-    if not (8 <= now.hour < 13) or state.get("morning_preview_date") == today:
+    in_window = (now.hour == 7 and now.minute >= 30) or now.hour == 8
+    if not in_window or state.get("morning_preview_date") == today:
         return None
 
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -307,21 +308,12 @@ def _alert_morning_preview(
         solar_est       = "Solar forecast unavailable"
         peak_window_str = ""
 
-    yest_accuracy_str = ""
-    if yest_pred > 0 and yest_actual >= 0.3:
-        delta     = yest_actual - yest_pred
-        sign      = "+" if delta >= 0 else ""
-        yest_accuracy_str = (
-            f"\nYesterday: predicted {yest_pred:.1f} kWh → actual {yest_actual:.1f} kWh "
-            f"({sign}{delta:.1f} kWh)"
-        )
-
     state["morning_preview_date"] = today
     logger.info("Morning preview alert sent for %s", today)
     return (
         f"☀️ FranklinWH: Good morning! Daily preview\n"
         f"Battery: {soc:.0f}% SoC  |  Solar now: {solar_kw:.2f} kW\n"
-        f"{solar_est}{peak_window_str}{yest_accuracy_str}"
+        f"{solar_est}{peak_window_str}"
     )
 
 

@@ -214,3 +214,29 @@ output/
 ### Adapting TOU rates for your utility
 
 Edit `franklinwh_scraper/tou.py` to match your electricity plan's on-peak hours and rates. The file is short and clearly commented.
+
+---
+
+## Appendix: Terms and units
+
+**SoC (State of Charge)** — Battery charge level as a percentage of usable capacity. 100% = fully charged, 0% = empty. The advisor targets having enough SoC to cover on-peak hours without importing from the grid.
+
+**kW (kilowatt)** — Rate of power flow right now. Positive grid_use_kw means you're importing; negative means you're exporting (selling back). Solar and home load are always shown as positive values.
+
+**kWh (kilowatt-hour)** — Energy consumed or produced over time. 1 kW flowing for 1 hour = 1 kWh. A 13.6 kWh battery at 50% SoC holds 6.8 kWh of usable energy.
+
+**GHI / Irradiance (W/m²)** — Global Horizontal Irradiance: total solar energy hitting a flat surface per square meter per second. Clear midday sun ≈ 900–1000 W/m². Overcast ≈ 50–200 W/m². The advisor uses hourly GHI forecasts from Open-Meteo to predict how much your panels will generate.
+
+**PR (Performance Ratio)** — Actual solar generation ÷ theoretical maximum based on irradiance. A PR of 1.0 means perfectly efficient; real systems land at 0.75–0.90 due to panel temperature, inverter losses, wiring, and shading. The advisor self-calibrates your PR over time and applies it to forecasts. Morning previews show your current PR (e.g. `PR=0.82`).
+
+**TOU (Time-of-Use)** — Electricity pricing that varies by time of day. On-peak hours (typically evenings) cost 3–7× more than off-peak. The advisor is pre-configured for SDG&E EV-TOU-5 but the rates file is easy to adapt.
+
+**Super Off-Peak** — The cheapest electricity period. On SDG&E EV-TOU-5 this is 10 am–2 pm on weekdays — the ideal window to charge your battery from the grid using Emergency Backup mode before the 4–9 pm on-peak window.
+
+**Emergency Backup (EB) mode** — FranklinWH battery mode that charges the battery from grid power. Useful before on-peak hours when solar won't fully charge the battery in time. The advisor calculates exactly how long to run it.
+
+**Self-Consumption mode** — Default FranklinWH mode: use solar first, then battery, then grid. Best when solar is plentiful.
+
+**Net energy (kWh net)** — Solar generated minus home load. Positive = surplus (can export or store). Negative = deficit (must draw from battery or grid).
+
+**Peak coverage %** — Percentage of 15-minute intervals between 4–9 pm where you drew zero grid power (battery/solar covered all load). 100% = perfect peak avoidance. Shown in the end-of-day digest.
