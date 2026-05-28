@@ -12,31 +12,53 @@ Every 15 minutes (7 am – 11 pm daily) it:
 
 1. Reads live data from your FranklinWH account — battery SoC, solar, grid, load
 2. Fetches a 48-hour solar irradiance forecast from [Open-Meteo](https://open-meteo.com) (free, no key)
-3. Analyzes your historical usage patterns to predict demand over the next 12 hours
-4. Recommends a battery mode and sends an alert if action is needed
+3. Analyzes your historical usage patterns to predict demand over the next 24 hours
+4. Recommends a battery mode using TOU-aware scheduling and sends an alert if action is needed
 
 ### Alerts you get
 
-**Mode change alerts** (only when action is needed):
-- Good solar day ahead → switch to Self-Consumption
-- Bad weather or high demand → switch to Emergency Backup
+**TOU-aware mode recommendations** (SDG&E EV-TOU-5 — adapt rates in `tou.py` for your utility):
+- Projects battery SoC at 4 pm on-peak start using usage + solar forecast
+- Recommends Emergency Backup with exact charge duration if battery will fall short
+- Switches to Self-Consumption when solar surplus predicted
 
 **Scheduled daily alerts:**
-- 8:00 am — Morning preview: SoC + predicted solar generation for the day
+- 8:00 am — Morning preview: SoC + predicted solar generation + yesterday's accuracy
 - 9:30 am — Low solar warning if cloudy morning detected
 - 11 am–3 pm — Solar dropped mid-day (possible inverter issue)
 - 11:30 am–12:30 pm — Battery still low at noon despite available solar
 - 1–2 pm — Battery under 40% before peak hours
-- 1:40–2:10 pm — Battery at 80%+ before 4 pm peak
+- 1:40–2:10 pm — Battery at 80%+ before 4 pm peak (Emergency Backup target reached)
 - 4–9 pm — Grid import during peak hours
-- 9 pm — End-of-day digest with daily totals and estimated backup duration
+- 9–10 pm — End-of-day digest: daily totals, TOU grid cost, peak coverage %, predicted 6 am SoC
+
+**Weekly & monthly:**
+- Sunday 9–10 pm — Weekly TOU cost summary: import cost, export credit, peak savings
+- 5th of month — Projected full billing cycle cost based on actual data so far
+- 19th of month — Billing cycle summary (20th–19th) vs prior cycle
+
+**Long-term health:**
+- Solar degradation alert — fires if 7-day performance ratio drops >5% vs 30-day baseline
+- Peak coverage streak — fires if battery runs short (< 50%) at peak 3 days in a row
 
 **Immediate alerts:**
 - Grid down — with estimated battery backup hours at current load
+- Grid restored — outage duration and kWh used from battery
 - Battery fully charged (SoC ≥ 99%)
 - Battery dropping below 90% during 3–7 pm
 - Battery draining fast (> 8%/hr below 35% SoC)
 - Battery not charging despite strong solar (possible inverter/mode issue)
+
+### AI chatbot (optional)
+
+Message your Telegram bot natural-language questions about your system:
+
+> "Should I charge the car now or wait?"
+> "Why is my battery at 30% already?"
+> "How much am I spending on electricity this week?"
+
+Powered by **Claude Haiku** (cloud, ~$0 at home usage) or **Ollama** (fully local, private).
+Set up during `python3 scrape.py setup`.
 
 ---
 
@@ -67,6 +89,9 @@ The wizard will ask for:
 - Your home location (for solar forecast)
 - Telegram bot token (create one via [@BotFather](https://t.me/BotFather)) or iMessage phone number
 - Your battery's usable capacity in kWh (check your FranklinWH app)
+- AI chatbot backend: `anthropic` (get a free key at [console.anthropic.com](https://console.anthropic.com)), `ollama` (local — run `ollama pull llama3.1:8b` first), or `none`
+
+> **Privacy:** every user runs their own copy with their own credentials. Nothing is shared between users.
 
 ### Start monitoring
 
@@ -170,11 +195,13 @@ Update it any time with `python3 scrape.py setup`.
 scrape.py                 Entry point
 franklinwh_scraper/       Python package
   account.py              FranklinWH API client
-  advisor.py              Mode recommendation logic
+  advisor.py              TOU-aware mode recommendation logic
+  tou.py                  SDG&E EV-TOU-5 schedule and rates
   weather.py              Open-Meteo solar forecast
   history.py              SQLite usage history
-  predictor.py            Load + solar forecasting
+  predictor.py            Seasonal load + solar forecasting
   notifier.py             Telegram / iMessage dispatchers
+  chatbot.py              AI chatbot (Claude / Ollama)
   cli.py                  All commands and alert logic
   config.py               Configuration persistence
 output/
@@ -183,3 +210,7 @@ output/
   advisor.log             Raw cron output
 ~/.franklinwh.json        Your private config (never share this file)
 ```
+
+### Adapting TOU rates for your utility
+
+Edit `franklinwh_scraper/tou.py` to match your electricity plan's on-peak hours and rates. The file is short and clearly commented.

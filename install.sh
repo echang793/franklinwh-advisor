@@ -26,7 +26,7 @@ echo "  Using: $($PYTHON --version)"
 
 # ── Install dependencies ─────────────────────────────────────────────
 echo "  Installing dependencies..."
-$PYTHON -m pip install --quiet requests click beautifulsoup4
+$PYTHON -m pip install --quiet requests click beautifulsoup4 anthropic
 
 # ── Cron setup (Linux only) ──────────────────────────────────────────
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
