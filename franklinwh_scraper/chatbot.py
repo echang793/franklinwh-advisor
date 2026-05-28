@@ -160,12 +160,20 @@ class TelegramChatBot:
                             "FranklinWH AI assistant\n\n"
                             "Ask me anything about your solar, battery, or energy costs.\n"
                             "Example: \"Should I charge the car now?\" or \"Why is my battery low?\"\n\n"
-                            "/clear — reset conversation history"
+                            "/status — current snapshot\n"
+                            "/clear  — reset conversation history"
                         )
                         continue
                     if text.lower() == "/clear":
                         self._convos.pop(chat_id, None)
                         self._send(chat_id, "Conversation cleared.")
+                        continue
+                    if text.lower() == "/status":
+                        threading.Thread(
+                            target=self._send_status,
+                            args=(chat_id,),
+                            daemon=True,
+                        ).start()
                         continue
                     threading.Thread(
                         target=self._handle,
@@ -177,6 +185,16 @@ class TelegramChatBot:
             except Exception as e:
                 logger.warning("Chatbot poll error: %s", e)
                 time.sleep(5)
+
+    def _send_status(self, chat_id: str) -> None:
+        with self._lock:
+            stats   = self._stats
+            store   = self._hist_store
+            outlook = self._outlook
+        if stats is None:
+            self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+            return
+        self._send(chat_id, build_context(stats, store, outlook, self._cfg))
 
     def _handle(self, chat_id: str, text: str) -> None:
         try:

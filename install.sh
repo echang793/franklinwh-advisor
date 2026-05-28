@@ -26,7 +26,12 @@ echo "  Using: $($PYTHON --version)"
 
 # ── Install dependencies ─────────────────────────────────────────────
 echo "  Installing dependencies..."
-$PYTHON -m pip install --quiet requests click beautifulsoup4 anthropic
+PIP_FLAGS="--quiet"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS Homebrew Python is externally managed — must pass this flag
+    PIP_FLAGS="$PIP_FLAGS --break-system-packages"
+fi
+$PYTHON -m pip install $PIP_FLAGS requests click beautifulsoup4 anthropic
 
 # ── Cron setup (Linux only) ──────────────────────────────────────────
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then

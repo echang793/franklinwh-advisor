@@ -1127,11 +1127,35 @@ def setup() -> None:
     cfg.output_dir = click.prompt(
         "  Output directory", default=cfg.output_dir,
     )
-    click.echo("  Battery capacity: check your FranklinWH app or manual (aPower 10=10, aPower 15=15)")
-    cfg.battery_capacity_kwh = click.prompt(
-        "  Battery usable capacity (kWh)", type=float,
-        default=cfg.battery_capacity_kwh,
+    _BATTERY_MODELS = [
+        ("aPower 10",       10.0),
+        ("aPower 15",       15.0),
+        ("2× aPower 10",    20.0),
+        ("2× aPower 15",    30.0),
+        ("Enter manually",  None),
+    ]
+    click.echo()
+    click.echo("  Battery model:")
+    for i, (name, kwh) in enumerate(_BATTERY_MODELS, 1):
+        kwh_str = f"  ({kwh} kWh)" if kwh else ""
+        click.echo(f"    {i}. {name}{kwh_str}")
+    model_choice = click.prompt(
+        "  Select model",
+        type=click.IntRange(1, len(_BATTERY_MODELS)),
+        default=next(
+            (i for i, (_, k) in enumerate(_BATTERY_MODELS, 1) if k == cfg.battery_capacity_kwh),
+            len(_BATTERY_MODELS),
+        ),
     )
+    chosen_kwh = _BATTERY_MODELS[model_choice - 1][1]
+    if chosen_kwh is None:
+        cfg.battery_capacity_kwh = click.prompt(
+            "  Battery usable capacity (kWh)", type=float,
+            default=cfg.battery_capacity_kwh,
+        )
+    else:
+        cfg.battery_capacity_kwh = chosen_kwh
+        _ok(f"Battery set to {cfg.battery_capacity_kwh} kWh")
 
     # ── Save ─────────────────────────────────────────────────────────
     save_config(cfg)
@@ -1549,6 +1573,17 @@ def cmd_advise(
 
                 if _chatbot is not None:
                     _chatbot.update_state(stats, history, outlook)
+
+                # First-run welcome message
+                if history.reading_count() == 1 and cfg.telegram_bot_token and cfg.telegram_chat_id:
+                    notify_telegram(
+                        "✅ FranklinWH Advisor is running!\n\n"
+                        f"Monitoring your battery at {cfg.location_name or 'your location'}.\n"
+                        "Collecting usage data — full predictions and alerts activate after 3 days.\n\n"
+                        "You'll get a morning preview each day at 7:30 am and alerts whenever action is needed."
+                        + ("\n\nTip: message this bot to ask energy questions." if _chatbot is not None else ""),
+                        cfg.telegram_bot_token, cfg.telegram_chat_id,
+                    )
 
                 _print_recommendation(rec, stats, usage_forecast, cfg.location_name)
                 notify_log(rec, log_path)
