@@ -296,12 +296,17 @@ def _alert_morning_preview(
             pr_note = cal_note
         solar_est = f"~{gen_kwh:.1f} kWh predicted ({sky}, {pr_note})"
 
-        # Peak solar window (hours with GHI > 400 W/m²)
-        peak_hrs = [h for h in outlook.hours if h.time.date() == now.date() and h.ghi_wm2 > 400]
+        # Peak solar window — relative threshold (30% of day's peak, min 150 W/m²)
+        today_hrs = [h for h in outlook.hours if h.time.date() == now.date()]
+        day_peak_ghi = max((h.ghi_wm2 for h in today_hrs), default=0.0)
+        ghi_thresh = max(150.0, day_peak_ghi * 0.30)
+        peak_hrs = [h for h in today_hrs if h.ghi_wm2 >= ghi_thresh]
         if peak_hrs:
-            start = peak_hrs[0].time.strftime("%-I%p").lower()
-            end   = (peak_hrs[-1].time + timedelta(hours=1)).strftime("%-I%p").lower()
-            peak_window_str = f"\nPeak solar window: {start}–{end}"
+            start    = peak_hrs[0].time.strftime("%-I%p").lower()
+            end      = (peak_hrs[-1].time + timedelta(hours=1)).strftime("%-I%p").lower()
+            peak_hr  = max(peak_hrs, key=lambda h: h.ghi_wm2)
+            peak_at  = peak_hr.time.strftime("%-I%p").lower()
+            peak_window_str = f"\nBest solar: {start}–{end} (peak ~{peak_at})"
         else:
             peak_window_str = ""
     else:
