@@ -117,6 +117,24 @@ The `install.sh` script sets this up automatically. To do it manually:
 
 ---
 
+## Updating
+
+Pull the latest changes from GitHub and restart the service:
+
+```bash
+bash update.sh
+```
+
+That's it. The script fetches the latest code and reloads the LaunchAgent (macOS) or restarts the cron job (Linux).
+
+### Sharing with neighbors
+
+Each person installs their own copy by cloning this repo and running `bash install.sh`. They use their own FranklinWH credentials — nothing is shared between installs.
+
+When improvements are pushed to this repo, neighbors update by running `bash update.sh` from their local copy. No server or account required.
+
+---
+
 ## Configuration
 
 All settings are stored at `~/.franklinwh.json` (chmod 600, never committed to git).
