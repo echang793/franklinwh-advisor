@@ -723,11 +723,17 @@ def _alert_not_charging(state: dict, today: str, now: datetime, c) -> str | None
         return None
     if state.get("not_charging_date") == today:
         return None
+    # Suppress when home load absorbs most of solar — EV charging or heavy AC
+    # explains why battery isn't getting much; this isn't a fault worth alerting.
+    solar_surplus_kw = c.solar_production_kw - c.home_load_kw
+    if solar_surplus_kw < 0.8:
+        return None
     state["not_charging_date"] = today
-    logger.info("Not-charging alert sent for %s (solar=%.2f kW, batt=%.2f kW)", today, c.solar_production_kw, c.battery_use_kw)
+    logger.info("Not-charging alert sent for %s (solar=%.2f kW, load=%.2f kW, batt=%.2f kW)", today, c.solar_production_kw, c.home_load_kw, c.battery_use_kw)
     return (
         f"⚠️ FranklinWH: Battery not charging despite strong solar\n"
-        f"Solar {c.solar_production_kw:.2f} kW  |  Battery {c.battery_use_kw:+.2f} kW  |  SoC {c.battery_soc_pct:.0f}%\n"
+        f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW  |  "
+        f"Battery {c.battery_use_kw:+.2f} kW  |  SoC {c.battery_soc_pct:.0f}%\n"
         f"Time: {now.strftime('%-I:%M %p')} — check battery mode or inverter."
     )
 
