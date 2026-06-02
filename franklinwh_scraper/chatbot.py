@@ -347,18 +347,20 @@ class TelegramChatBot:
         if stats is None:
             self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
             return
-        from .tou import TouPeriod, period_at, on_peak_window
+        from .tou import TouPeriod, period_at, on_peak_window, rate_at
         now    = datetime.now()
         c      = stats.current
         soc    = c.battery_soc_pct
         solar  = c.solar_production_kw
         grid   = c.grid_use_kw
         period = period_at(now)
+        rate   = rate_at(now)
         peak_start, _ = on_peak_window(now)
-        mins_to_peak  = max(0, int((peak_start - now).total_seconds() / 60))
+        secs_to_peak  = (peak_start - now).total_seconds()
+        mins_to_peak  = int(secs_to_peak / 60) if secs_to_peak > 0 else 0
 
         if period == TouPeriod.ON_PEAK and grid > 0.5:
-            msg = (f"⚠️ Importing {grid:.1f} kW during on-peak (costs ${0.80:.3f}/kWh).\n"
+            msg = (f"⚠️ Importing {grid:.1f} kW during on-peak (${rate:.3f}/kWh).\n"
                    f"Battery at {soc:.0f}% — reduce non-essential loads if possible.")
         elif period == TouPeriod.ON_PEAK and soc < 20:
             msg = (f"🔴 Battery critical ({soc:.0f}%) during peak.\n"
@@ -366,11 +368,11 @@ class TelegramChatBot:
         elif period == TouPeriod.ON_PEAK and soc >= 80:
             msg = (f"🟢 Well positioned for on-peak — {soc:.0f}% SoC, "
                    f"solar {solar:.1f} kW. No action needed.")
-        elif period in (TouPeriod.OFF_PEAK, TouPeriod.SUPER_OFF_PEAK) and soc < 30 and mins_to_peak < 120:
+        elif period in (TouPeriod.OFF_PEAK, TouPeriod.SUPER_OFF_PEAK) and soc < 30 and 0 < mins_to_peak < 120:
             msg = (f"🟡 Battery at {soc:.0f}% with on-peak in {mins_to_peak // 60}h {mins_to_peak % 60}m.\n"
                    f"Switch to Emergency Backup now to charge before 4 pm.")
         elif period == TouPeriod.SUPER_OFF_PEAK and soc < 50 and solar < 1.0:
-            msg = (f"💡 Super off-peak now (cheapest grid rate: ${0.124:.3f}/kWh).\n"
+            msg = (f"💡 Super off-peak now (cheapest rate: ${rate:.3f}/kWh).\n"
                    f"Battery at {soc:.0f}%, solar low — good time for Emergency Backup.")
         elif solar > 3.0 and soc >= 95:
             msg = (f"🌞 Solar producing {solar:.1f} kW and battery full ({soc:.0f}%).\n"
