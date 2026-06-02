@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import atexit
+import fcntl
 import json
 import logging
 import os
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -205,6 +207,19 @@ def _save_peak_state(out: Path, state: dict) -> None:
     tmp = target.with_suffix(".tmp")
     tmp.write_text(json.dumps(_prune_old_state(state)))
     tmp.replace(target)  # atomic on POSIX — no partial-write corruption
+
+
+@contextmanager
+def _state_lock(out: Path):
+    """Exclusive file lock preventing concurrent cron processes from double-alerting."""
+    lock_path = out / ".peak_alert_state.lock"
+    out.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 # ── Per-alert helper functions ────────────────────────────────────────
@@ -877,35 +892,37 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
 
     now   = datetime.now()
     today = now.strftime("%Y-%m-%d")
-    state = _load_peak_state(out)
     c     = stats.current
 
-    _calibrate_solar(state, c.solar_production_kw, outlook)
+    with _state_lock(out):
+        state = _load_peak_state(out)
+        _calibrate_solar(state, c.solar_production_kw, outlook)
+        to_send = [
+            body for body in [
+                _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store),
+                _alert_grid_import(state, today, now, c),
+                _alert_low_soc_1pm(state, today, now, c),
+                _alert_eb_ready(state, today, now, c),
+                _alert_low_morning_solar(state, today, now, c),
+                _alert_solar_stopped(state, today, now, c),
+                _alert_low_noon_soc(state, today, now, c),
+                _alert_eod_digest(state, today, now, stats, cfg, outlook, usage_forecast, store),
+                _alert_weekly_summary(state, today, now, store),
+                _alert_monthly_summary(state, today, now, store),
+                _alert_grid_down(state, today, now, c, cfg),
+                _alert_grid_restored(state, now, c, cfg),
+                _alert_battery_full_cycle(state, today, now, c),
+                _alert_fast_drain(state, today, now, c),
+                _alert_not_charging(state, today, now, c),
+                _alert_solar_degradation(state, today, now),
+                _alert_peak_streak(state, today, now),
+                _alert_bill_projection(state, today, now, store),
+            ] if body
+        ]
+        _save_peak_state(out, state)
 
-    for body in [
-        _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store),
-        _alert_grid_import(state, today, now, c),
-        _alert_low_soc_1pm(state, today, now, c),
-        _alert_eb_ready(state, today, now, c),
-        _alert_low_morning_solar(state, today, now, c),
-        _alert_solar_stopped(state, today, now, c),
-        _alert_low_noon_soc(state, today, now, c),
-        _alert_eod_digest(state, today, now, stats, cfg, outlook, usage_forecast, store),
-        _alert_weekly_summary(state, today, now, store),
-        _alert_monthly_summary(state, today, now, store),
-        _alert_grid_down(state, today, now, c, cfg),
-        _alert_grid_restored(state, now, c, cfg),
-        _alert_battery_full_cycle(state, today, now, c),
-        _alert_fast_drain(state, today, now, c),
-        _alert_not_charging(state, today, now, c),
-        _alert_solar_degradation(state, today, now),
-        _alert_peak_streak(state, today, now),
-        _alert_bill_projection(state, today, now, store),
-    ]:
-        if body:
-            _send_alert(body, cfg)
-
-    _save_peak_state(out, state)
+    for body in to_send:
+        _send_alert(body, cfg)
 
 
 def _dispatch_notifications(rec, cfg: Config, notify_flag: bool, last_mode: str | None, outdir: Path | None = None) -> None:
@@ -922,13 +939,14 @@ def _dispatch_notifications(rec, cfg: Config, notify_flag: bool, last_mode: str 
 
     # Mode-change alerts fire at most once per day per mode to stop oscillation noise.
     if outdir is not None:
-        state = _load_peak_state(outdir)
-        today = datetime.now().strftime("%Y-%m-%d")
-        key   = f"alerted_{rec.mode.value}_date"
-        if state.get(key) == today:
-            return
-        state[key] = today
-        _save_peak_state(outdir, state)
+        with _state_lock(outdir):
+            state = _load_peak_state(outdir)
+            today = datetime.now().strftime("%Y-%m-%d")
+            key   = f"alerted_{rec.mode.value}_date"
+            if state.get(key) == today:
+                return
+            state[key] = today
+            _save_peak_state(outdir, state)
 
     if notify_flag:
         notify_macos(rec)

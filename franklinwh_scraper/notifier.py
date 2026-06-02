@@ -8,8 +8,8 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.error import URLError
-from urllib.request import Request, urlopen
+
+import requests
 
 from .advisor import Recommendation
 
@@ -101,16 +101,24 @@ def notify_imessage_text(body: str, phone: str) -> None:
 
 def notify_telegram(body: str, bot_token: str, chat_id: str) -> None:
     """Send a Telegram message via the Bot API (cross-platform, free)."""
-    url  = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    data = json.dumps({"chat_id": chat_id, "text": body}).encode()
-    req  = Request(url, data=data, headers={"Content-Type": "application/json"})
-    try:
-        urlopen(req, timeout=10)
-        logger.debug("Telegram message sent to chat %s", chat_id)
-    except URLError as e:
-        logger.warning("Telegram notification failed: %s", e)
-    except Exception as e:
-        logger.warning("Telegram notification error: %s", e)
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                url,
+                json={"chat_id": chat_id, "text": body},
+                timeout=10,
+            )
+            if r.ok:
+                logger.debug("Telegram message sent to chat %s", chat_id)
+                return
+            logger.warning("Telegram error %s: %s", r.status_code, r.text[:200])
+            if r.status_code < 500:
+                return  # 4xx — don't retry
+        except Exception as e:
+            logger.warning("Telegram notification failed (attempt %d/3): %s", attempt + 1, e)
+        if attempt < 2:
+            time.sleep(2)
 
 
 def fetch_telegram_chat_id(bot_token: str, retries: int = 3, wait: int = 3) -> str | None:
@@ -122,8 +130,7 @@ def fetch_telegram_chat_id(bot_token: str, retries: int = 3, wait: int = 3) -> s
     url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
     for attempt in range(retries):
         try:
-            with urlopen(url, timeout=10) as r:
-                data = json.loads(r.read())
+            data = requests.get(url, timeout=10).json()
             for upd in reversed(data.get("result", [])):
                 for key in ("message", "edited_message", "channel_post"):
                     msg = upd.get(key)
