@@ -160,8 +160,10 @@ class TelegramChatBot:
                             "FranklinWH AI assistant\n\n"
                             "Ask me anything about your solar, battery, or energy costs.\n"
                             "Example: \"Should I charge the car now?\" or \"Why is my battery low?\"\n\n"
-                            "/status — current snapshot\n"
-                            "/clear  — reset conversation history"
+                            "/status   — current snapshot\n"
+                            "/forecast — solar & weather outlook\n"
+                            "/history  — 7-day energy summary\n"
+                            "/clear    — reset conversation history"
                         )
                         continue
                     if text.lower() == "/clear":
@@ -171,6 +173,20 @@ class TelegramChatBot:
                     if text.lower() == "/status":
                         threading.Thread(
                             target=self._send_status,
+                            args=(chat_id,),
+                            daemon=True,
+                        ).start()
+                        continue
+                    if text.lower() == "/forecast":
+                        threading.Thread(
+                            target=self._send_forecast,
+                            args=(chat_id,),
+                            daemon=True,
+                        ).start()
+                        continue
+                    if text.lower() == "/history":
+                        threading.Thread(
+                            target=self._send_history,
                             args=(chat_id,),
                             daemon=True,
                         ).start()
@@ -195,6 +211,70 @@ class TelegramChatBot:
             self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
             return
         self._send(chat_id, build_context(stats, store, outlook, self._cfg))
+
+    def _send_forecast(self, chat_id: str) -> None:
+        with self._lock:
+            outlook = self._outlook
+            stats   = self._stats
+        if outlook is None:
+            self._send(chat_id, "No weather data yet — try again in a moment.")
+            return
+        now       = datetime.now()
+        today_ghi = outlook.avg_ghi(12)
+        tmrw_ghi  = outlook.tomorrow_avg_ghi()
+
+        def _sky(ghi: float) -> str:
+            return "Sunny" if ghi >= 400 else ("Partly cloudy" if ghi >= 300 else "Cloudy")
+
+        lines = [f"🌤️ Solar Forecast — {now.strftime('%a %b %-d')}"]
+        lines.append(f"Today:    {_sky(today_ghi)} ({today_ghi:.0f} W/m² avg)")
+        lines.append(f"Tomorrow: {_sky(tmrw_ghi)} ({tmrw_ghi:.0f} W/m² avg)")
+        if stats:
+            c = stats.current
+            lines.append(f"\nNow: Solar {c.solar_production_kw:.2f} kW  |  SoC {c.battery_soc_pct:.0f}%")
+        self._send(chat_id, "\n".join(lines))
+
+    def _send_history(self, chat_id: str) -> None:
+        with self._lock:
+            store = self._hist_store
+        if store is None:
+            self._send(chat_id, "No history data yet — start the advisor first.")
+            return
+        from .tou import rate_at
+        now        = datetime.now()
+        week_end   = now.date()
+        week_start = week_end - timedelta(days=6)
+        readings   = store.weekly_readings(
+            week_start.strftime("%Y-%m-%d"),
+            week_end.strftime("%Y-%m-%d"),
+        )
+        if not readings:
+            self._send(chat_id, "No history data for the past 7 days yet.")
+            return
+        interval      = 0.25
+        import_cost   = 0.0
+        export_credit = 0.0
+        solar_kwh     = 0.0
+        for ts, grid_kw, _home_kw, s_kw in readings:
+            try:
+                dt = datetime.fromisoformat(ts)
+            except Exception:
+                continue
+            r = rate_at(dt)
+            if grid_kw > 0:
+                import_cost   += grid_kw * interval * r
+            elif grid_kw < 0:
+                export_credit += abs(grid_kw) * interval * r
+            solar_kwh += s_kw * interval
+        net        = import_cost - export_credit
+        week_label = f"{week_start.strftime('%b %-d')}–{week_end.strftime('%b %-d')}"
+        self._send(chat_id,
+            f"📊 7-Day Energy — {week_label}\n"
+            f"Solar generated:     {solar_kwh:.1f} kWh\n"
+            f"Grid import cost:    ${import_cost:.2f}\n"
+            f"Grid export credit:  ${export_credit:.2f}\n"
+            f"Net cost:            ${net:.2f}"
+        )
 
     def _handle(self, chat_id: str, text: str) -> None:
         try:

@@ -170,7 +170,8 @@ def _send_alert(body: str, cfg: Config) -> None:
 
 # ── Peak-hour alert helpers ───────────────────────────────────────────
 
-_PEAK_STATE_FILE = ".peak_alert_state.json"
+_PEAK_STATE_FILE  = ".peak_alert_state.json"
+_CMR_OUTAGE_FLAG  = Path.home() / ".cmr-power-outage.flag"
 
 
 def _load_peak_state(out: Path) -> dict:
@@ -886,6 +887,29 @@ def _alert_bill_projection(
     )
 
 
+def _alert_area_power_outage(state: dict, today: str, now: datetime) -> str | None:
+    """Check if CMR News wrote an outage flag for the local area."""
+    if not _CMR_OUTAGE_FLAG.exists():
+        state.pop("cmr_outage_alerted_date", None)
+        return None
+    try:
+        data        = json.loads(_CMR_OUTAGE_FLAG.read_text())
+        detected_at = data.get("detected_at", "")
+        source      = data.get("source", "CMR News")
+    except Exception:
+        return None
+    if state.get("cmr_outage_alerted_date") == today:
+        return None
+    state["cmr_outage_alerted_date"] = today
+    logger.info("CMR area power outage alert bridged from %s", source)
+    ts = detected_at[:16].replace("T", " ")
+    return (
+        f"⚡ Area power outage detected nearby (via {source})\n"
+        f"Detected: {ts}\n"
+        f"Your FranklinWH battery is backing up your home if the grid is affected."
+    )
+
+
 def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None, store=None) -> None:
     if not cfg.imessage_phone and not (cfg.telegram_bot_token and cfg.telegram_chat_id):
         return
@@ -917,6 +941,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
                 _alert_solar_degradation(state, today, now),
                 _alert_peak_streak(state, today, now),
                 _alert_bill_projection(state, today, now, store),
+                _alert_area_power_outage(state, today, now),
             ] if body
         ]
         _save_peak_state(out, state)
