@@ -163,6 +163,8 @@ class TelegramChatBot:
                             "/status   — current snapshot\n"
                             "/forecast — solar & weather outlook\n"
                             "/history  — 7-day energy summary\n"
+                            "/bill     — current billing cycle cost + projection\n"
+                            "/tip      — best action right now\n"
                             "/clear    — reset conversation history"
                         )
                         continue
@@ -187,6 +189,20 @@ class TelegramChatBot:
                     if text.lower() == "/history":
                         threading.Thread(
                             target=self._send_history,
+                            args=(chat_id,),
+                            daemon=True,
+                        ).start()
+                        continue
+                    if text.lower() == "/bill":
+                        threading.Thread(
+                            target=self._send_bill,
+                            args=(chat_id,),
+                            daemon=True,
+                        ).start()
+                        continue
+                    if text.lower() == "/tip":
+                        threading.Thread(
+                            target=self._send_tip,
                             args=(chat_id,),
                             daemon=True,
                         ).start()
@@ -275,6 +291,94 @@ class TelegramChatBot:
             f"Grid export credit:  ${export_credit:.2f}\n"
             f"Net cost:            ${net:.2f}"
         )
+
+    def _send_bill(self, chat_id: str) -> None:
+        with self._lock:
+            store = self._hist_store
+        if store is None:
+            self._send(chat_id, "No history data yet — start the advisor first.")
+            return
+        from .tou import rate_at
+        now         = datetime.now()
+        today       = now.strftime("%Y-%m-%d")
+        cycle_start = (now.date().replace(day=1) - timedelta(days=1)).replace(day=20)
+        days_so_far = (now.date() - cycle_start).days
+        if days_so_far < 1:
+            self._send(chat_id, "Billing cycle just started — not enough data yet.")
+            return
+        readings = store.weekly_readings(cycle_start.strftime("%Y-%m-%d"), today)
+        if not readings:
+            self._send(chat_id, "No readings for current billing cycle yet.")
+            return
+        interval      = 0.25
+        import_cost   = 0.0
+        export_credit = 0.0
+        for ts, grid_kw, _home_kw, _solar_kw in readings:
+            try:
+                dt = datetime.fromisoformat(ts)
+            except Exception:
+                continue
+            r = rate_at(dt)
+            if grid_kw > 0:
+                import_cost   += grid_kw * interval * r
+            elif grid_kw < 0:
+                export_credit += abs(grid_kw) * interval * r
+        net_actual    = import_cost - export_credit
+        daily_net     = net_actual / days_so_far
+        projected_net = daily_net * 30
+        projected_imp = import_cost / days_so_far * 30
+        projected_exp = export_credit / days_so_far * 30
+        cycle_label   = f"{cycle_start.strftime('%b %-d')} – {now.date().strftime('%b %-d')}"
+        self._send(chat_id,
+            f"💡 Billing Cycle — {cycle_label} ({days_so_far} days)\n"
+            f"Grid import:  ${import_cost:.2f}\n"
+            f"Grid export:  ${export_credit:.2f}\n"
+            f"Net so far:   ${net_actual:.2f}\n\n"
+            f"Projected full cycle (~30 days):\n"
+            f"  Import:  ${projected_imp:.2f}\n"
+            f"  Export:  ${projected_exp:.2f}\n"
+            f"  Net:     ${projected_net:.2f}  (${daily_net:.2f}/day avg)"
+        )
+
+    def _send_tip(self, chat_id: str) -> None:
+        with self._lock:
+            stats   = self._stats
+            outlook = self._outlook
+        if stats is None:
+            self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+            return
+        from .tou import TouPeriod, period_at, on_peak_window
+        now    = datetime.now()
+        c      = stats.current
+        soc    = c.battery_soc_pct
+        solar  = c.solar_production_kw
+        grid   = c.grid_use_kw
+        period = period_at(now)
+        peak_start, _ = on_peak_window(now)
+        mins_to_peak  = max(0, int((peak_start - now).total_seconds() / 60))
+
+        if period == TouPeriod.ON_PEAK and grid > 0.5:
+            msg = (f"⚠️ Importing {grid:.1f} kW during on-peak (costs ${0.80:.3f}/kWh).\n"
+                   f"Battery at {soc:.0f}% — reduce non-essential loads if possible.")
+        elif period == TouPeriod.ON_PEAK and soc < 20:
+            msg = (f"🔴 Battery critical ({soc:.0f}%) during peak.\n"
+                   f"Shed non-essential loads to extend backup duration.")
+        elif period == TouPeriod.ON_PEAK and soc >= 80:
+            msg = (f"🟢 Well positioned for on-peak — {soc:.0f}% SoC, "
+                   f"solar {solar:.1f} kW. No action needed.")
+        elif period in (TouPeriod.OFF_PEAK, TouPeriod.SUPER_OFF_PEAK) and soc < 30 and mins_to_peak < 120:
+            msg = (f"🟡 Battery at {soc:.0f}% with on-peak in {mins_to_peak // 60}h {mins_to_peak % 60}m.\n"
+                   f"Switch to Emergency Backup now to charge before 4 pm.")
+        elif period == TouPeriod.SUPER_OFF_PEAK and soc < 50 and solar < 1.0:
+            msg = (f"💡 Super off-peak now (cheapest grid rate: ${0.124:.3f}/kWh).\n"
+                   f"Battery at {soc:.0f}%, solar low — good time for Emergency Backup.")
+        elif solar > 3.0 and soc >= 95:
+            msg = (f"🌞 Solar producing {solar:.1f} kW and battery full ({soc:.0f}%).\n"
+                   f"Self-Consumption mode is optimal — excess going to grid.")
+        else:
+            msg = (f"✅ All looks good — {soc:.0f}% SoC, {solar:.1f} kW solar, "
+                   f"grid {grid:+.1f} kW ({period.value.replace('_', ' ')}).")
+        self._send(chat_id, msg)
 
     def _handle(self, chat_id: str, text: str) -> None:
         try:

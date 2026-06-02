@@ -887,6 +887,35 @@ def _alert_bill_projection(
     )
 
 
+def _alert_heat_wave_prep(state: dict, today: str, now: datetime, c, outlook) -> str | None:
+    """Evening alert when tomorrow's forecast exceeds 95°F — AC load spike risk."""
+    if now.hour not in (21, 22) or outlook is None:
+        return None
+    if state.get("heat_wave_prep_date") == today:
+        return None
+    tomorrow = (now + timedelta(days=1)).date()
+    tmrw_hours = [h for h in outlook.hours if h.time.date() == tomorrow]
+    if not tmrw_hours:
+        return None
+    max_temp_c = max(h.temp_c for h in tmrw_hours)
+    if max_temp_c < 35.0:  # 95°F
+        return None
+    max_temp_f = max_temp_c * 9 / 5 + 32
+    state["heat_wave_prep_date"] = today
+    logger.info("Heat wave prep alert: tomorrow max %.1f°C (%.0f°F)", max_temp_c, max_temp_f)
+    soc = c.battery_soc_pct
+    action = (
+        f"Battery at {soc:.0f}% — consider switching to Emergency Backup tonight to top up before the AC load spike."
+        if soc < 80 else
+        f"Battery at {soc:.0f}% — well positioned. Monitor peak-hour load tomorrow."
+    )
+    return (
+        f"🌡️ FranklinWH: Heat wave tomorrow — {max_temp_f:.0f}°F forecast\n"
+        f"Expect higher AC load and grid risk during 4–9 pm on-peak.\n"
+        f"{action}"
+    )
+
+
 def _alert_area_power_outage(state: dict, today: str, now: datetime) -> str | None:
     """Check if CMR News wrote an outage flag for the local area."""
     if not _CMR_OUTAGE_FLAG.exists():
@@ -941,6 +970,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
                 _alert_solar_degradation(state, today, now),
                 _alert_peak_streak(state, today, now),
                 _alert_bill_projection(state, today, now, store),
+                _alert_heat_wave_prep(state, today, now, c, outlook),
                 _alert_area_power_outage(state, today, now),
             ] if body
         ]
