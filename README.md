@@ -48,6 +48,7 @@ Every 15 minutes (7 am – 11 pm daily) it:
 - Battery dropping below 90% during 3–7 pm
 - Battery draining fast (> 8%/hr below 35% SoC)
 - Battery not charging despite strong solar (possible inverter/mode issue)
+- Area power outage bridged from [CMR News](https://github.com/echang793/cmr-news) — fires when that bot detects a nearby outage
 
 ### AI chatbot (optional)
 
@@ -59,6 +60,15 @@ Message your Telegram bot natural-language questions about your system:
 
 Powered by **Claude Haiku** (cloud, ~$0 at home usage) or **Ollama** (fully local, private).
 Set up during `python3 scrape.py setup`.
+
+Built-in commands (no AI token used):
+
+| Command | Response |
+|---------|----------|
+| `/status` | Live snapshot: SoC, solar, grid, TOU period |
+| `/forecast` | Today + tomorrow GHI-based sky condition and solar outlook |
+| `/history` | 7-day TOU-weighted solar generated, grid import/export cost |
+| `/clear` | Reset conversation memory |
 
 ---
 
