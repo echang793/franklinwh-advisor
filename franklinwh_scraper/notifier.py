@@ -121,6 +121,15 @@ def notify_telegram(body: str, bot_token: str, chat_id: str) -> None:
             time.sleep(2)
 
 
+def notify_ha_webhook(url: str, data: dict) -> None:
+    """POST a JSON state payload to a Home Assistant webhook URL."""
+    try:
+        requests.post(url, json=data, timeout=5)
+        logger.debug("HA webhook posted to %s", url)
+    except Exception as e:
+        logger.warning("HA webhook failed: %s", e)
+
+
 def fetch_telegram_chat_id(bot_token: str, retries: int = 3, wait: int = 3) -> str | None:
     """Poll getUpdates to auto-detect the chat ID after user messages the bot.
 

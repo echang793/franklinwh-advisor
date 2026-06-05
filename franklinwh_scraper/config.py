@@ -30,6 +30,7 @@ class Config:
     chat_backend: str = "anthropic"     # "anthropic" or "ollama"
     ollama_model: str = "llama3.1:8b"  # model to use when chat_backend = "ollama"
     ollama_url: str = "http://localhost:11434"  # Ollama server base URL
+    ha_webhook_url: str = ""            # Home Assistant webhook URL for state push
 
     def is_complete(self) -> bool:
         return bool(self.email and self.password and self.lat and self.lon)

@@ -123,20 +123,26 @@ class TelegramChatBot:
     """Long-poll Telegram bot backed by Claude Haiku for energy Q&A."""
 
     def __init__(self, cfg, api_key: str):
-        self._cfg        = cfg
-        self._api_key    = api_key
-        self._offset     = 0
+        self._cfg             = cfg
+        self._api_key         = api_key
+        self._offset          = 0
         self._convos: dict[str, list[dict]] = {}
-        self._lock       = threading.Lock()
-        self._stats      = None
-        self._hist_store = None
-        self._outlook    = None
+        self._lock            = threading.Lock()
+        self._stats           = None
+        self._hist_store      = None
+        self._outlook         = None
+        self._system_peak_kw: float | None = None
+        self._perf_ratio: float = 1.0
 
-    def update_state(self, stats, history_store, outlook) -> None:
+    def update_state(self, stats, history_store, outlook,
+                     system_peak_kw: float | None = None,
+                     perf_ratio: float = 1.0) -> None:
         with self._lock:
-            self._stats      = stats
-            self._hist_store = history_store
-            self._outlook    = outlook
+            self._stats          = stats
+            self._hist_store     = history_store
+            self._outlook        = outlook
+            self._system_peak_kw = system_peak_kw
+            self._perf_ratio     = perf_ratio
 
     def run(self) -> None:
         logger.info("Telegram chatbot started")
@@ -230,21 +236,53 @@ class TelegramChatBot:
 
     def _send_forecast(self, chat_id: str) -> None:
         with self._lock:
-            outlook = self._outlook
-            stats   = self._stats
+            outlook     = self._outlook
+            stats       = self._stats
+            system_peak = self._system_peak_kw
+            perf_ratio  = self._perf_ratio
         if outlook is None:
             self._send(chat_id, "No weather data yet — try again in a moment.")
             return
-        now       = datetime.now()
-        today_ghi = outlook.avg_ghi(12)
-        tmrw_ghi  = outlook.tomorrow_avg_ghi()
+        now  = datetime.now()
 
         def _sky(ghi: float) -> str:
             return "Sunny" if ghi >= 400 else ("Partly cloudy" if ghi >= 300 else "Cloudy")
 
+        def _bar(ghi: float) -> str:
+            if ghi < 50:  return " "
+            if ghi < 150: return "▁"
+            if ghi < 250: return "▃"
+            if ghi < 380: return "▅"
+            if ghi < 530: return "▇"
+            return "█"
+
+        today    = now.date()
+        tomorrow = (now + timedelta(days=1)).date()
+
+        today_hrs = [h for h in outlook.hours if h.time.date() == today    and 6 <= h.time.hour <= 19]
+        tmrw_hrs  = [h for h in outlook.hours if h.time.date() == tomorrow and 6 <= h.time.hour <= 19]
+
+        today_ghi = outlook.avg_ghi(12)
+        tmrw_ghi  = outlook.tomorrow_avg_ghi()
+
         lines = [f"🌤️ Solar Forecast — {now.strftime('%a %b %-d')}"]
-        lines.append(f"Today:    {_sky(today_ghi)} ({today_ghi:.0f} W/m² avg)")
-        lines.append(f"Tomorrow: {_sky(tmrw_ghi)} ({tmrw_ghi:.0f} W/m² avg)")
+
+        lines.append(f"\nToday: {_sky(today_ghi)} ({today_ghi:.0f} W/m²)")
+        if today_hrs:
+            lines.append(f"6a {''.join(_bar(h.ghi_wm2) for h in today_hrs)} 7p")
+        if system_peak:
+            today_kwh = round(outlook.today_generation_kwh(system_peak) * perf_ratio, 1)
+            lines.append(f"~{today_kwh:.1f} kWh predicted")
+
+        lines.append(f"\nTomorrow: {_sky(tmrw_ghi)} ({tmrw_ghi:.0f} W/m²)")
+        if tmrw_hrs:
+            lines.append(f"6a {''.join(_bar(h.ghi_wm2) for h in tmrw_hrs)} 7p")
+        if system_peak:
+            tmrw_kwh = outlook.tomorrow_generation_kwh(system_peak, perf_ratio)
+            lines.append(f"~{tmrw_kwh:.1f} kWh predicted")
+            if tmrw_ghi < 250:
+                lines.append("⚡ Dim tomorrow — consider Emergency Backup tonight.")
+
         if stats:
             c = stats.current
             lines.append(f"\nNow: Solar {c.solar_production_kw:.2f} kW  |  SoC {c.battery_soc_pct:.0f}%")

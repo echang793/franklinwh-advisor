@@ -26,8 +26,7 @@ from .exporters import export_csv, export_json
 
 from .history import HistoryStore
 from .notifier import (notify_imessage, notify_imessage_text, notify_log,
-                       notify_macos, notify_telegram, fetch_telegram_chat_id,
-                       rec_to_text)
+                       notify_macos, notify_telegram, fetch_telegram_chat_id, rec_to_text)
 from .predictor import predict
 from .tou import TouPeriod, period_at, rate_at
 from .scrapers import FAQScraper, ProductsScraper, SupportScraper
@@ -121,9 +120,9 @@ def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
     Falls back to sunny PR × 1.10 until 3 cloudy-day samples accumulate.
     """
     if cloudy:
-        samples = state.get("perf_ratio_cloudy_samples", [])
+        samples = [v for v in state.get("perf_ratio_cloudy_samples", []) if v <= 1.4]
         if len(samples) < 3:
-            sunny = state.get("perf_ratio_samples", [])
+            sunny = [v for v in state.get("perf_ratio_samples", []) if v <= 1.4]
             if len(sunny) >= 3:
                 s = sorted(sunny)
                 return max(s[len(s) // 2] * 1.10, 0.60)
@@ -131,7 +130,7 @@ def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
         s = sorted(samples)
         return max(s[len(s) // 2], 0.55)
     else:
-        samples = state.get("perf_ratio_samples", [])
+        samples = [v for v in state.get("perf_ratio_samples", []) if v <= 1.4]
         if len(samples) < 3:
             return 1.0
         s = sorted(samples)
@@ -311,6 +310,14 @@ def _alert_morning_preview(
         else:
             pr_note = cal_note
         solar_est = f"~{gen_kwh:.1f} kWh predicted ({sky}, {pr_note})"
+
+        # Tomorrow forecast
+        tmrw_ghi = outlook.tomorrow_avg_ghi()
+        tmrw_sky = "Sunny" if tmrw_ghi >= 400 else ("Partly cloudy" if tmrw_ghi >= _GHI_CLOUDY_THRESHOLD else "Cloudy")
+        tmrw_kwh = outlook.tomorrow_generation_kwh(system_peak_kw, perf_ratio)
+        solar_est += f"\nTomorrow: {tmrw_sky} — ~{tmrw_kwh:.1f} kWh"
+        if tmrw_ghi < 100 and soc < 60:
+            solar_est += "\n⚡ Dim tomorrow — consider Emergency Backup tonight."
 
         # Peak solar window — relative threshold (30% of day's peak, min 150 W/m²)
         today_hrs = [h for h in outlook.hours if h.time.date() == now.date()]
@@ -518,6 +525,7 @@ def _alert_eod_digest(
                 state[f"peak_cov_{today}"] = pct
             else:
                 state[f"peak_cov_{today}"] = 0.0
+            state[f"daily_import_cost_{today}"] = round(import_cost, 2)
 
     state["eod_digest_date"] = today
     logger.info("End-of-day digest sent for %s", today)
@@ -575,6 +583,33 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
     total_saved = peak_saved + sop_saved
     week_label  = f"{week_start.strftime('%b %-d')}–{week_end.strftime('%b %-d')}"
 
+    # Avg daily cost from stored EOD data
+    daily_costs = [
+        state[f"daily_import_cost_{(now.date() - timedelta(days=i)).strftime('%Y-%m-%d')}"]
+        for i in range(7)
+        if f"daily_import_cost_{(now.date() - timedelta(days=i)).strftime('%Y-%m-%d')}" in state
+    ]
+    avg_cost_str = f"  Avg daily import: ${sum(daily_costs) / len(daily_costs):.2f}\n" if daily_costs else ""
+
+    # Solar prediction accuracy (±% avg error vs actual)
+    cutoff = (now.date() - timedelta(days=7)).strftime("%Y-%m-%d")
+    week_prs = [
+        float(v) for k, v in state.items()
+        if k.startswith("daily_pr_") and k[len("daily_pr_"):] >= cutoff
+    ]
+    accuracy_str = ""
+    if len(week_prs) >= 3:
+        avg_err = sum(abs(1.0 - pr) * 100 for pr in week_prs) / len(week_prs)
+        accuracy_str = f"\nSolar forecast accuracy: ±{avg_err:.1f}% avg ({len(week_prs)} days)"
+
+    # Battery cycle count
+    cycles_week  = state.pop("batt_cycles_this_week", 0)
+    total_cycles = state.get("batt_cycle_count", 0)
+    cycle_str    = ""
+    if total_cycles > 0 or cycles_week > 0:
+        pct_used = total_cycles / 6000 * 100
+        cycle_str = f"\nBattery cycles: {cycles_week} this week | {total_cycles} total ({pct_used:.1f}% of 6000 rated)"
+
     state["weekly_summary_sent"] = today
     logger.info("Weekly TOU summary sent for week ending %s", today)
     return (
@@ -582,11 +617,13 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
         f"Grid cost (EV-TOU-5 rates):\n"
         f"  Imported:  ${import_cost:.2f}\n"
         f"  Exported:  ${export_credit:.2f} (est.)\n"
-        f"  Net cost:  ${net_cost:.2f}\n\n"
-        f"Est. savings from battery + solar:\n"
+        f"  Net cost:  ${net_cost:.2f}\n"
+        f"{avg_cost_str}"
+        f"\nEst. savings from battery + solar:\n"
         f"  Peak (4–9 pm):    ${peak_saved:.2f}\n"
         f"  Super off-peak:   ${sop_saved:.2f}\n"
         f"  Total saved:      ${total_saved:.2f}"
+        f"{accuracy_str}{cycle_str}"
     )
 
 
@@ -704,6 +741,20 @@ def _alert_battery_full_cycle(state: dict, today: str, now: datetime, c) -> str 
             )
         logger.info("Battery discharged below 90%% — outside 3–7 pm window, suppressed")
     return None
+
+
+def _track_battery_cycles(state: dict, c) -> None:
+    """Count deep-discharge cycles (80%→20%) for battery health estimation."""
+    soc = c.battery_soc_pct
+    if not state.get("batt_cycle_active", False):
+        if soc >= 80.0:
+            state["batt_cycle_active"] = True
+    else:
+        if soc <= 20.0:
+            state["batt_cycle_active"] = False
+            state["batt_cycle_count"] = state.get("batt_cycle_count", 0) + 1
+            state["batt_cycles_this_week"] = state.get("batt_cycles_this_week", 0) + 1
+            logger.debug("Battery cycle completed, total=%d", state["batt_cycle_count"])
 
 
 def _alert_fast_drain(state: dict, today: str, now: datetime, c) -> str | None:
@@ -950,12 +1001,12 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
     with _state_lock(out):
         state = _load_peak_state(out)
         _calibrate_solar(state, c.solar_production_kw, outlook)
+        _track_battery_cycles(state, c)
         to_send = [
             body for body in [
                 _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store),
                 _alert_grid_import(state, today, now, c),
                 _alert_low_soc_1pm(state, today, now, c),
-                _alert_eb_ready(state, today, now, c),
                 _alert_low_morning_solar(state, today, now, c),
                 _alert_solar_stopped(state, today, now, c),
                 _alert_low_noon_soc(state, today, now, c),
@@ -990,6 +1041,11 @@ def _dispatch_notifications(rec, cfg: Config, notify_flag: bool, last_mode: str 
 
     # Never notify for NO_CHANGE — "Battery OK" messages are noise.
     if not rec.needs_action and not critical:
+        return
+
+    # Suppress info-level alerts during quiet hours (midnight–7am).
+    if rec.urgency == "info" and not critical and datetime.now().hour < 7:
+        logger.debug("Suppressing info alert during quiet hours: %s", rec.mode.value)
         return
 
     # Mode-change alerts fire at most once per day per mode to stop oscillation noise.
@@ -1645,9 +1701,17 @@ def cmd_advise(
                 history.record(stats)
 
                 outlook        = _fetch_outlook_cached(lat, lon)
-                system_peak_kw = _get_system_peak_kw(_load_peak_state(outdir))
+                _peak_state    = _load_peak_state(outdir)
+                system_peak_kw = _get_system_peak_kw(_peak_state)
+                cloudy_now     = (
+                    outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD
+                    if outlook else False
+                )
+                perf_ratio     = _get_performance_ratio(_peak_state, cloudy=cloudy_now)
+                avg_temp_c     = outlook.avg_temp_c(24) if outlook else 22.0
                 usage_forecast = (
-                    predict(history, 24, outlook=outlook, system_peak_kw=system_peak_kw)
+                    predict(history, 24, outlook=outlook, system_peak_kw=system_peak_kw,
+                            perf_ratio=perf_ratio, avg_temp_c=avg_temp_c)
                     if history.has_enough_data() else None
                 )
                 rec = recommend(
@@ -1656,7 +1720,25 @@ def cmd_advise(
                 )
 
                 if _chatbot is not None:
-                    _chatbot.update_state(stats, history, outlook)
+                    _chatbot.update_state(stats, history, outlook, system_peak_kw, perf_ratio)
+
+                # Home Assistant webhook state push
+                if getattr(cfg, "ha_webhook_url", ""):
+                    from .notifier import notify_ha_webhook as _ha_push
+                    from .tou import period_at as _pat, rate_at as _rat
+                    _now = datetime.now()
+                    _ha_push(cfg.ha_webhook_url, {
+                        "soc_pct":          stats.current.battery_soc_pct,
+                        "solar_kw":         stats.current.solar_production_kw,
+                        "home_load_kw":     stats.current.home_load_kw,
+                        "grid_kw":          stats.current.grid_use_kw,
+                        "battery_kw":       stats.current.battery_use_kw,
+                        "grid_status":      stats.current.grid_status,
+                        "solar_today_kwh":  stats.totals.solar_kwh,
+                        "tou_period":       _pat(_now).value,
+                        "tou_rate":         _rat(_now),
+                        "timestamp":        _now.isoformat(),
+                    })
 
                 # First-run welcome message
                 if history.reading_count() == 1 and cfg.telegram_bot_token and cfg.telegram_chat_id:

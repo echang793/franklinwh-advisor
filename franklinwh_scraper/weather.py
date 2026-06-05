@@ -129,6 +129,29 @@ class SolarOutlook:
                 return h.ghi_wm2
         return 0.0
 
+    def avg_temp_c(self, next_hours: int) -> float:
+        """Average forecast air temperature (°C) over the next N hours."""
+        now = datetime.now()
+        window = [
+            h for h in self.hours
+            if 0 <= (h.time - now).total_seconds() / 3600 <= next_hours
+        ]
+        if not window:
+            return 22.0
+        return sum(h.temp_c for h in window) / len(window)
+
+    def tomorrow_generation_kwh(self, system_peak_kw: float, perf_ratio: float = 1.0) -> float:
+        """Estimate tomorrow's total solar generation in kWh with temperature derating."""
+        now = datetime.now()
+        tomorrow = (now + timedelta(days=1)).date()
+        total_kwh = 0.0
+        for h in self.hours:
+            if h.time.date() != tomorrow:
+                continue
+            eff = max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (h.panel_temp_c - 25.0))
+            total_kwh += h.ghi_wm2 / 1000.0 * system_peak_kw * eff
+        return round(total_kwh * perf_ratio, 1)
+
 
 def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int = 3) -> SolarOutlook:
     """Fetch 48-hour hourly solar irradiance + temperature forecast for a location."""

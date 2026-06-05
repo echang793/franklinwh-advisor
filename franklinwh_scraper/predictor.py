@@ -45,6 +45,8 @@ def predict(
     horizon_hours: int = 12,
     outlook=None,
     system_peak_kw: float | None = None,
+    perf_ratio: float = 1.0,
+    avg_temp_c: float = 22.0,
 ) -> UsageForecast:
     """
     Predict home load and solar production for the next `horizon_hours` hours.
@@ -67,6 +69,9 @@ def predict(
         load_profile  = store.load_profile()
         solar_profile = store.solar_profile()
 
+    # Temperature-load scaling: +2.5% load per °C above 27°C (80°F) models AC draw.
+    temp_scale = 1.0 + 0.025 * max(0.0, avg_temp_c - 27.0)
+
     predictions: list[HourPrediction] = []
 
     for h in range(horizon_hours):
@@ -75,10 +80,10 @@ def predict(
 
         load_kw = load_profile.get(slot)
 
-        # Weather-adjusted solar: GHI/1000 × system_peak_kw is more accurate than
-        # historical averages, which don't reflect today's cloud cover.
+        # Weather-adjusted solar: GHI/1000 × system_peak_kw × perf_ratio corrects
+        # for systematic GHI model bias learned from actual vs. predicted history.
         if outlook is not None and system_peak_kw is not None:
-            solar_kw = max(0.0, outlook.ghi_at(future) / 1000.0 * system_peak_kw)
+            solar_kw = max(0.0, outlook.ghi_at(future) / 1000.0 * system_peak_kw * perf_ratio)
         else:
             solar_kw = solar_profile.get(slot, 0.0)
 
@@ -101,6 +106,7 @@ def predict(
         else:
             confidence = "low"
 
+        load_kw = load_kw * temp_scale
         predictions.append(HourPrediction(
             dt=future,
             predicted_load_kw=round(load_kw, 2),
