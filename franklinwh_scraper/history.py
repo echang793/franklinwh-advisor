@@ -22,18 +22,58 @@ CREATE TABLE IF NOT EXISTS readings (
     battery_soc      REAL    NOT NULL,
     grid_use_kw      REAL    NOT NULL,
     grid_status      TEXT    NOT NULL,
-    solar_total_kwh  REAL    NOT NULL DEFAULT 0
+    solar_total_kwh  REAL    NOT NULL DEFAULT 0,
+    battery_use_kw   REAL    NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_slot ON readings(day_of_week, hour_of_day);
 """
 
-_MIGRATE_SQL = """
-ALTER TABLE readings ADD COLUMN solar_total_kwh REAL NOT NULL DEFAULT 0;
-"""
+# Per-column migrations for pre-existing DBs. Each runs in its own try/except
+# so an already-applied column doesn't block later ones.
+_MIGRATIONS = [
+    "ALTER TABLE readings ADD COLUMN solar_total_kwh REAL NOT NULL DEFAULT 0;",
+    "ALTER TABLE readings ADD COLUMN battery_use_kw REAL NOT NULL DEFAULT 0;",
+]
 
 
 # (day_of_week, hour_of_day) → average kW
 LoadProfile = dict[tuple[int, int], float]
+
+# Polls target ~15 min but drift to 1-2 h (or longer during daemon downtime).
+# Trapezoidal integration over real timestamps replaces the old fixed-0.25 h
+# assumption, which undercounted energy by ~1.5x when polls were sparse.
+# Gaps longer than this cap are clamped so multi-hour outages aren't integrated
+# as continuous power.
+_MAX_INTEGRATION_GAP_H = 1.0
+
+
+def integrate_intervals(
+    readings: list[tuple],
+) -> list[tuple[datetime, float, float, float, float]]:
+    """Trapezoidal pairing of consecutive kW readings over actual elapsed time.
+
+    Input rows: (timestamp_iso, grid_kw, home_kw, solar_kw) in any order.
+    Yields one tuple per interval: (interval_start_dt, hours, grid_kw_avg,
+    home_kw_avg, solar_kw_avg). Each interval's hours is the real gap to the
+    next reading, clamped to _MAX_INTEGRATION_GAP_H. Multiply a kW_avg by hours
+    for that interval's kWh; apply rate_at(interval_start_dt) for TOU cost.
+    """
+    parsed: list[tuple[datetime, float, float, float]] = []
+    for r in readings:
+        try:
+            dt = datetime.fromisoformat(r[0])
+        except (ValueError, TypeError):
+            continue
+        parsed.append((dt, float(r[1]), float(r[2]), float(r[3])))
+    parsed.sort(key=lambda x: x[0])
+
+    out: list[tuple[datetime, float, float, float, float]] = []
+    for (d0, g0, h0, s0), (d1, g1, h1, s1) in zip(parsed, parsed[1:]):
+        hours = min(_MAX_INTEGRATION_GAP_H, (d1 - d0).total_seconds() / 3600)
+        if hours <= 0:
+            continue
+        out.append((d0, hours, (g0 + g1) / 2, (h0 + h1) / 2, (s0 + s1) / 2))
+    return out
 
 
 @dataclass
@@ -60,10 +100,11 @@ class HistoryStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path))
         self._conn.executescript(_CREATE_SQL)
-        try:
-            self._conn.executescript(_MIGRATE_SQL)
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        for migration in _MIGRATIONS:
+            try:
+                self._conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass  # column already exists
         self._conn.commit()
 
     # ---------------------------------------------------------------- #
@@ -75,8 +116,8 @@ class HistoryStore:
             INSERT INTO readings
               (timestamp, day_of_week, hour_of_day,
                home_load_kw, solar_kw, battery_soc, grid_use_kw, grid_status,
-               solar_total_kwh)
-            VALUES (?,?,?,?,?,?,?,?,?)
+               solar_total_kwh, battery_use_kw)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 now.isoformat(),
@@ -88,6 +129,7 @@ class HistoryStore:
                 stats.current.grid_use_kw,
                 stats.current.grid_status,
                 stats.totals.solar_kwh,
+                stats.current.battery_use_kw,
             ),
         )
         self._conn.commit()
@@ -151,17 +193,18 @@ class HistoryStore:
             sample_count=int(row[2]),
         )
 
-    def daily_solar_kwh(self, date_str: str, interval_hours: float = 0.25) -> float:
-        """Sum actual solar production for a calendar date.
+    def daily_solar_kwh(self, date_str: str) -> float:
+        """Integrate actual solar production for a calendar date (trapezoidal).
 
-        Assumes readings are taken every `interval_hours` (default 15 min = 0.25 h).
+        Fallback for daily_solar_kwh_api when the API running counter is absent.
         Returns 0.0 if no readings exist for that date.
         """
         rows = self._conn.execute(
-            "SELECT solar_kw FROM readings WHERE substr(timestamp,1,10)=?",
+            "SELECT timestamp, grid_use_kw, home_load_kw, solar_kw FROM readings "
+            "WHERE substr(timestamp,1,10)=? ORDER BY timestamp",
             (date_str,),
         ).fetchall()
-        return round(sum(r[0] for r in rows) * interval_hours, 2)
+        return round(sum(s * hours for _dt, hours, _g, _h, s in integrate_intervals(rows)), 2)
 
     def daily_solar_kwh_api(self, date_str: str) -> float:
         """Return actual daily solar kWh from the API's own running total.
@@ -176,7 +219,7 @@ class HistoryStore:
         ).fetchone()
         return round(float(row[0]), 2) if row and row[0] is not None else 0.0
 
-    def monthly_totals(self, year_month: str, interval_hours: float = 0.25) -> MonthlyTotals:
+    def monthly_totals(self, year_month: str) -> MonthlyTotals:
         """Aggregate energy totals for a calendar month (YYYY-MM).
 
         Solar uses MAX(solar_total_kwh) per day — the API running counter peaks at
@@ -198,14 +241,22 @@ class HistoryStore:
         solar_kwh = round(sum(r[1] for r in solar_rows if r[1] is not None), 1)
         days_with_data = len(solar_rows)
 
-        # Grid and load: integrate instantaneous kW over poll interval
+        # Grid and load: trapezoidal integration over real timestamps
         kw_rows = self._conn.execute(
-            "SELECT grid_use_kw, home_load_kw FROM readings WHERE timestamp LIKE ?",
+            "SELECT timestamp, grid_use_kw, home_load_kw, solar_kw FROM readings "
+            "WHERE timestamp LIKE ? ORDER BY timestamp",
             (prefix + "%",),
         ).fetchall()
-        grid_import_kwh = round(sum(r[0] for r in kw_rows if r[0] > 0) * interval_hours, 1)
-        grid_export_kwh = round(sum(-r[0] for r in kw_rows if r[0] < 0) * interval_hours, 1)
-        home_load_kwh   = round(sum(r[1] for r in kw_rows) * interval_hours, 1)
+        grid_import_kwh = grid_export_kwh = home_load_kwh = 0.0
+        for _dt, hours, grid_kw, home_kw, _solar in integrate_intervals(kw_rows):
+            if grid_kw > 0:
+                grid_import_kwh += grid_kw * hours
+            elif grid_kw < 0:
+                grid_export_kwh += -grid_kw * hours
+            home_load_kwh += home_kw * hours
+        grid_import_kwh = round(grid_import_kwh, 1)
+        grid_export_kwh = round(grid_export_kwh, 1)
+        home_load_kwh   = round(home_load_kwh, 1)
 
         return MonthlyTotals(
             year_month=year_month,
@@ -280,7 +331,7 @@ class HistoryStore:
         ).fetchall()
         return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
 
-    def period_totals(self, start_date: str, end_date: str, interval_hours: float = 0.25) -> MonthlyTotals:
+    def period_totals(self, start_date: str, end_date: str) -> MonthlyTotals:
         """Aggregate energy totals for an arbitrary date range (inclusive YYYY-MM-DD).
 
         Useful for billing-cycle summaries that don't align with calendar months.
@@ -299,13 +350,21 @@ class HistoryStore:
         days_with_data = len(solar_rows)
 
         kw_rows = self._conn.execute(
-            "SELECT grid_use_kw, home_load_kw FROM readings "
-            "WHERE substr(timestamp,1,10) >= ? AND substr(timestamp,1,10) <= ?",
+            "SELECT timestamp, grid_use_kw, home_load_kw, solar_kw FROM readings "
+            "WHERE substr(timestamp,1,10) >= ? AND substr(timestamp,1,10) <= ? "
+            "ORDER BY timestamp",
             (start_date, end_date),
         ).fetchall()
-        grid_import_kwh = round(sum(r[0] for r in kw_rows if r[0] > 0) * interval_hours, 1)
-        grid_export_kwh = round(sum(-r[0] for r in kw_rows if r[0] < 0) * interval_hours, 1)
-        home_load_kwh   = round(sum(r[1] for r in kw_rows) * interval_hours, 1)
+        grid_import_kwh = grid_export_kwh = home_load_kwh = 0.0
+        for _dt, hours, grid_kw, home_kw, _solar in integrate_intervals(kw_rows):
+            if grid_kw > 0:
+                grid_import_kwh += grid_kw * hours
+            elif grid_kw < 0:
+                grid_export_kwh += -grid_kw * hours
+            home_load_kwh += home_kw * hours
+        grid_import_kwh = round(grid_import_kwh, 1)
+        grid_export_kwh = round(grid_export_kwh, 1)
+        home_load_kwh   = round(home_load_kwh, 1)
 
         return MonthlyTotals(
             year_month=f"{start_date}:{end_date}",
@@ -327,6 +386,59 @@ class HistoryStore:
             (start_date, end_date),
         ).fetchall()
         return [(r[0], float(r[1]), float(r[2]), float(r[3])) for r in rows]
+
+    def capacity_samples(
+        self, start_date: str, end_date: str, min_soc_drop: float = 30.0,
+    ) -> list[float]:
+        """Effective usable-capacity estimates (kWh) from clean battery-only discharge runs.
+
+        A run = consecutive readings where the battery is discharging
+        (battery_use_kw < 0) and the home is not importing from grid
+        (grid_use_kw <= ~0). For each run whose SoC declines by at least
+        `min_soc_drop` percent, effective capacity = discharge_kWh / (soc_drop/100).
+        Aggregating over a run (not per-sample) suppresses meter noise.
+        Returns one capacity estimate per qualifying run.
+        """
+        rows = self._conn.execute(
+            "SELECT timestamp, battery_use_kw, grid_use_kw, battery_soc FROM readings "
+            "WHERE substr(timestamp,1,10) >= ? AND substr(timestamp,1,10) <= ? "
+            "ORDER BY timestamp",
+            (start_date, end_date),
+        ).fetchall()
+
+        samples: list[float] = []
+        run_kwh = 0.0
+        run_soc_start: float | None = None
+        prev: tuple[datetime, float, float, float] | None = None
+
+        def _flush(soc_end: float) -> None:
+            nonlocal run_kwh, run_soc_start
+            if run_soc_start is not None:
+                drop = run_soc_start - soc_end
+                if drop >= min_soc_drop and run_kwh > 0:
+                    samples.append(run_kwh / (drop / 100.0))
+            run_kwh = 0.0
+            run_soc_start = None
+
+        for ts, batt_kw, grid_kw, soc in rows:
+            try:
+                dt = datetime.fromisoformat(ts)
+            except (ValueError, TypeError):
+                continue
+            batt_kw, grid_kw, soc = float(batt_kw), float(grid_kw), float(soc)
+            discharging = batt_kw < -0.05 and grid_kw <= 0.05 and soc < (prev[3] if prev else soc) + 0.01
+            if prev is not None and discharging:
+                hours = min(_MAX_INTEGRATION_GAP_H, (dt - prev[0]).total_seconds() / 3600)
+                if hours > 0:
+                    if run_soc_start is None:
+                        run_soc_start = prev[3]
+                    run_kwh += (-(prev[1] + batt_kw) / 2) * hours  # avg discharge kW × hours
+            else:
+                _flush(prev[3] if prev else soc)
+            prev = (dt, batt_kw, grid_kw, soc)
+        if prev is not None:
+            _flush(prev[3])
+        return samples
 
     def close(self) -> None:
         self._conn.close()

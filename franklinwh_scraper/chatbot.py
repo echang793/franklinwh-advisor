@@ -85,18 +85,14 @@ def build_context(stats, history, outlook, cfg) -> str:
             readings   = history.weekly_readings(week_start, today_str)
             if readings:
                 from .tou import rate_at as _r
-                interval = 0.25
+                from .history import integrate_intervals
                 imp = exp = 0.0
-                for ts, grid_kw, _hk, _sk in readings:
-                    try:
-                        dt = datetime.fromisoformat(ts)
-                    except Exception:
-                        continue
+                for dt, hours, grid_kw, _hk, _sk in integrate_intervals(readings):
                     r = _r(dt)
                     if grid_kw > 0:
-                        imp += grid_kw * interval * r
+                        imp += grid_kw * hours * r
                     elif grid_kw < 0:
-                        exp += abs(grid_kw) * interval * r
+                        exp += -grid_kw * hours * r
                 solar_7d = sum(
                     history.daily_solar_kwh_api(
                         (now.date() - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -305,21 +301,17 @@ class TelegramChatBot:
         if not readings:
             self._send(chat_id, "No history data for the past 7 days yet.")
             return
-        interval      = 0.25
+        from .history import integrate_intervals
         import_cost   = 0.0
         export_credit = 0.0
         solar_kwh     = 0.0
-        for ts, grid_kw, _home_kw, s_kw in readings:
-            try:
-                dt = datetime.fromisoformat(ts)
-            except Exception:
-                continue
+        for dt, hours, grid_kw, _home_kw, s_kw in integrate_intervals(readings):
             r = rate_at(dt)
             if grid_kw > 0:
-                import_cost   += grid_kw * interval * r
+                import_cost   += grid_kw * hours * r
             elif grid_kw < 0:
-                export_credit += abs(grid_kw) * interval * r
-            solar_kwh += s_kw * interval
+                export_credit += -grid_kw * hours * r
+            solar_kwh += s_kw * hours
         net        = import_cost - export_credit
         week_label = f"{week_start.strftime('%b %-d')}–{week_end.strftime('%b %-d')}"
         self._send(chat_id,
@@ -348,19 +340,15 @@ class TelegramChatBot:
         if not readings:
             self._send(chat_id, "No readings for current billing cycle yet.")
             return
-        interval      = 0.25
+        from .history import integrate_intervals
         import_cost   = 0.0
         export_credit = 0.0
-        for ts, grid_kw, _home_kw, _solar_kw in readings:
-            try:
-                dt = datetime.fromisoformat(ts)
-            except Exception:
-                continue
+        for dt, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(readings):
             r = rate_at(dt)
             if grid_kw > 0:
-                import_cost   += grid_kw * interval * r
+                import_cost   += grid_kw * hours * r
             elif grid_kw < 0:
-                export_credit += abs(grid_kw) * interval * r
+                export_credit += -grid_kw * hours * r
         net_actual    = import_cost - export_credit
         daily_net     = net_actual / days_so_far
         projected_net = daily_net * 30
