@@ -159,18 +159,31 @@ def _fetch_outlook_cached(lat: float, lon: float):
 
 # ── Multi-channel alert dispatcher ───────────────────────────────────
 
-def _send_alert(body: str, cfg: Config) -> None:
-    """Send to every configured channel (iMessage and/or Telegram)."""
+def _send_alert(body: str, cfg: Config, urgent: bool = False) -> None:
+    """Send to all configured channels."""
     if cfg.imessage_phone:
         notify_imessage_text(body, cfg.imessage_phone)
     if cfg.telegram_bot_token and cfg.telegram_chat_id:
         notify_telegram(body, cfg.telegram_bot_token, cfg.telegram_chat_id)
+    if cfg.smtp_host and cfg.email_to:
+        notify_email(body, cfg)
+    if cfg.webhook_url:
+        notify_webhook(body, urgent, cfg)
 
 
 # ── Peak-hour alert helpers ───────────────────────────────────────────
 
-_PEAK_STATE_FILE  = ".peak_alert_state.json"
-_CMR_OUTAGE_FLAG  = Path.home() / ".cmr-power-outage.flag"
+_PEAK_STATE_FILE = ".peak_alert_state.json"
+_CMR_OUTAGE_FLAG = Path.home() / ".cmr-power-outage.flag"
+
+# Safety alerts that cannot be disabled by the user.
+_ALWAYS_ON_ALERTS = frozenset({"grid_down", "grid_restored", "area_power_outage", "fast_drain"})
+
+
+def _alert_enabled(cfg: Config, name: str) -> bool:
+    if name in _ALWAYS_ON_ALERTS:
+        return True
+    return name not in (cfg.disabled_alerts or [])
 
 # NEM evening export compensation ($/kWh) by month → {hour: rate}.
 # Only August and September have boosted evening export worth arbitraging;
@@ -347,9 +360,9 @@ def _alert_morning_preview(
         cloudy_samples = state.get("perf_ratio_cloudy_samples", [])
         sunny_samples  = state.get("perf_ratio_samples", [])
         if cloudy_day and len(cloudy_samples) >= 3:
-            pr_note = f"cloudy PR={perf_ratio:.2f} ({len(cloudy_samples)} days)"
+            pr_note = f"cloudy PR={perf_ratio:.2f}"
         elif not cloudy_day and len(sunny_samples) >= 3:
-            pr_note = f"PR={perf_ratio:.2f} ({len(sunny_samples)} days)"
+            pr_note = f"PR={perf_ratio:.2f}"
         else:
             pr_note = cal_note
         solar_est = f"~{gen_kwh:.1f} kWh predicted ({sky}, {pr_note})"
@@ -1188,32 +1201,36 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
         state = _load_peak_state(out)
         _calibrate_solar(state, c.solar_production_kw, outlook)
         _track_battery_cycles(state, c)
-        to_send = [
-            body for body in [
-                _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store, cfg),
-                _alert_grid_import(state, today, now, c),
-                _alert_eb_ready(state, today, now, c),
-                _alert_low_soc_1pm(state, today, now, c),
-                _alert_low_morning_solar(state, today, now, c),
-                _alert_solar_stopped(state, today, now, c),
-                _alert_low_noon_soc(state, today, now, c),
-                _alert_export_arbitrage(state, today, now, c, cfg, usage_forecast),
-                _alert_eod_digest(state, today, now, stats, cfg, outlook, usage_forecast, store),
-                _alert_weekly_summary(state, today, now, store),
-                _alert_monthly_summary(state, today, now, store),
-                _alert_grid_down(state, today, now, c, cfg),
-                _alert_grid_restored(state, now, c, cfg),
-                _alert_battery_full_cycle(state, today, now, c),
-                _alert_fast_drain(state, today, now, c),
-                _alert_not_charging(state, today, now, c),
-                _alert_solar_degradation(state, today, now),
-                _alert_capacity_fade(state, today, now, store),
-                _alert_peak_streak(state, today, now),
-                _alert_bill_projection(state, today, now, store),
-                _alert_heat_wave_prep(state, today, now, c, outlook),
-                _alert_area_power_outage(state, today, now, c, cfg),
-            ] if body
+        _candidates = [
+            ("morning_preview",   lambda: _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store, cfg)),
+            ("grid_import",       lambda: _alert_grid_import(state, today, now, c)),
+            ("eb_ready",          lambda: _alert_eb_ready(state, today, now, c)),
+            ("low_soc_1pm",       lambda: _alert_low_soc_1pm(state, today, now, c)),
+            ("low_morning_solar", lambda: _alert_low_morning_solar(state, today, now, c)),
+            ("solar_stopped",     lambda: _alert_solar_stopped(state, today, now, c)),
+            ("low_noon_soc",      lambda: _alert_low_noon_soc(state, today, now, c)),
+            ("export_arbitrage",  lambda: _alert_export_arbitrage(state, today, now, c, cfg, usage_forecast)),
+            ("eod_digest",        lambda: _alert_eod_digest(state, today, now, stats, cfg, outlook, usage_forecast, store)),
+            ("weekly_summary",    lambda: _alert_weekly_summary(state, today, now, store)),
+            ("monthly_summary",   lambda: _alert_monthly_summary(state, today, now, store)),
+            ("grid_down",         lambda: _alert_grid_down(state, today, now, c, cfg)),
+            ("grid_restored",     lambda: _alert_grid_restored(state, now, c, cfg)),
+            ("battery_full_cycle",lambda: _alert_battery_full_cycle(state, today, now, c)),
+            ("fast_drain",        lambda: _alert_fast_drain(state, today, now, c)),
+            ("not_charging",      lambda: _alert_not_charging(state, today, now, c)),
+            ("solar_degradation", lambda: _alert_solar_degradation(state, today, now)),
+            ("capacity_fade",     lambda: _alert_capacity_fade(state, today, now, store)),
+            ("peak_streak",       lambda: _alert_peak_streak(state, today, now)),
+            ("bill_projection",   lambda: _alert_bill_projection(state, today, now, store)),
+            ("heat_wave_prep",    lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),
+            ("area_power_outage", lambda: _alert_area_power_outage(state, today, now, c, cfg)),
         ]
+        to_send: list[str] = []
+        for _name, _fn in _candidates:
+            if _alert_enabled(cfg, _name):
+                _body = _fn()
+                if _body:
+                    to_send.append(_body)
         _save_peak_state(out, state)
 
     for body in to_send:
@@ -1364,27 +1381,17 @@ def setup() -> None:
     # ── Notifications ────────────────────────────────────────────────
     click.echo()
     click.echo(click.style("  Notifications", bold=True))
-    click.echo("  You can enable iMessage (macOS only) and/or Telegram (free, any OS).")
+    click.echo("  Choose how you want to receive alerts. You can enable multiple channels.")
     click.echo()
 
-    # ── iMessage ─────────────────────────────────────────────────────
-    phone = click.prompt(
-        "  iMessage phone number (e.g. +19255884276, or leave blank to skip)",
-        default=cfg.imessage_phone or "",
-    ).strip()
-    cfg.imessage_phone = phone if phone else ""
-    if cfg.imessage_phone:
-        _ok(f"iMessage alerts will be sent to {cfg.imessage_phone}")
-
-    # ── Telegram ──────────────────────────────────────────────────────
-    click.echo()
-    click.echo(click.style("  Telegram (optional, works on any device)", bold=True))
-    click.echo("  1. Message @BotFather on Telegram → /newbot → copy the token")
-    click.echo("  2. Send any message to your new bot")
-    click.echo("  3. Paste the token below — chat ID is auto-detected")
+    # ── Telegram ─────────────────────────────────────────────────────
+    click.echo(click.style("  Telegram", bold=True) + "  — free, cross-platform, recommended")
+    click.echo("    1. Message @BotFather on Telegram → /newbot → copy the token")
+    click.echo("    2. Send any message to your new bot")
+    click.echo("    3. Paste the token below (chat ID is auto-detected)")
     click.echo()
     tg_token = click.prompt(
-        "  Telegram bot token (leave blank to skip)",
+        "  Bot token (leave blank to skip)",
         default=cfg.telegram_bot_token or "",
         hide_input=True,
     ).strip()
@@ -1408,54 +1415,174 @@ def setup() -> None:
         cfg.telegram_bot_token = ""
         cfg.telegram_chat_id   = ""
 
-    # ── AI Chatbot ────────────────────────────────────────────────────
+    # ── Email ─────────────────────────────────────────────────────────
     click.echo()
-    click.echo(click.style("  AI Chatbot (optional — answers questions in Telegram)", bold=True))
-    click.echo("  Backends: 'anthropic' (cloud, free API key) or 'ollama' (local, private)")
+    click.echo(click.style("  Email", bold=True) + "  — SMTP (Gmail, Outlook, any provider)")
+    click.echo("    Gmail tip: use an App Password (myaccount.google.com → Security → App Passwords)")
     click.echo()
-    backend = click.prompt(
-        "  Chat backend",
-        type=click.Choice(["anthropic", "ollama", "none"]),
-        default=cfg.chat_backend if cfg.chat_backend in ("anthropic", "ollama") else "none",
-    )
-    if backend == "anthropic":
-        click.echo("  Get a free API key at console.anthropic.com → API Keys")
-        ak = click.prompt(
-            "  Anthropic API key",
-            default=cfg.anthropic_api_key or "",
+    email_to = click.prompt(
+        "  Recipient email (leave blank to skip)",
+        default=cfg.email_to or "",
+    ).strip()
+    if email_to:
+        cfg.email_to   = email_to
+        cfg.smtp_host  = click.prompt("  SMTP host",     default=cfg.smtp_host  or "smtp.gmail.com").strip()
+        cfg.smtp_port  = click.prompt("  SMTP port",     default=cfg.smtp_port  or 587, type=int)
+        cfg.smtp_user  = click.prompt("  SMTP username", default=cfg.smtp_user  or email_to).strip()
+        cfg.smtp_password = click.prompt(
+            "  SMTP password / app password", default=cfg.smtp_password or "",
             hide_input=True,
         ).strip()
-        cfg.anthropic_api_key = ak
-        cfg.chat_backend = "anthropic"
-        _ok("Anthropic chatbot enabled")
-    elif backend == "ollama":
-        cfg.chat_backend = "ollama"
-        cfg.ollama_model = click.prompt(
-            "  Ollama model",
-            default=cfg.ollama_model or "llama3.1:8b",
+        cfg.email_from = click.prompt(
+            "  From address", default=cfg.email_from or email_to,
         ).strip()
-        cfg.ollama_url = click.prompt(
-            "  Ollama URL",
-            default=cfg.ollama_url or "http://localhost:11434",
-        ).strip()
-        _ok(f"Ollama chatbot enabled (model: {cfg.ollama_model})")
-        _info("Make sure Ollama is running: ollama serve")
-        _info(f"Pull model if needed: ollama pull {cfg.ollama_model}")
+        # Test
+        click.echo("  Sending test email…", nl=False)
+        try:
+            notify_email("FranklinWH advisor connected ✓\nThis is your test message.", cfg)
+            click.echo(click.style(" Sent!", fg="green"))
+            _ok("Email alerts configured")
+        except Exception as e:
+            click.echo(click.style(f" Failed: {e}", fg="red"))
+            _warn("Email saved but test failed — double-check your credentials.")
     else:
-        cfg.chat_backend = "none"
-        cfg.anthropic_api_key = ""
-        _info("Chatbot disabled")
+        cfg.email_to = cfg.email_from = cfg.smtp_host = cfg.smtp_user = cfg.smtp_password = ""
 
-    # ── Preferences ──────────────────────────────────────────────────
+    # ── Webhook ───────────────────────────────────────────────────────
     click.echo()
-    click.echo(click.style("  Preferences", bold=True))
-    cfg.watch_interval = click.prompt(
-        "  Advisor check interval (minutes)", type=int,
-        default=cfg.watch_interval,
-    )
-    cfg.output_dir = click.prompt(
-        "  Output directory", default=cfg.output_dir,
-    )
+    click.echo(click.style("  Webhook", bold=True) + "  — POST JSON to Slack, Discord, or any custom URL")
+    click.echo("    Payload: {\"alert\": \"...\", \"urgent\": bool, \"timestamp\": \"ISO8601\"}")
+    click.echo()
+    wh = click.prompt(
+        "  Webhook URL (leave blank to skip)",
+        default=cfg.webhook_url or "",
+    ).strip()
+    if wh:
+        cfg.webhook_url = wh
+        click.echo("  Sending test webhook…", nl=False)
+        try:
+            notify_webhook("FranklinWH advisor connected ✓  This is your test message.", False, cfg)
+            click.echo(click.style(" Sent!", fg="green"))
+            _ok("Webhook configured")
+        except Exception as e:
+            click.echo(click.style(f" Failed: {e}", fg="red"))
+            _warn("Webhook saved but test failed — check the URL.")
+    else:
+        cfg.webhook_url = ""
+
+    # ── iMessage ─────────────────────────────────────────────────────
+    click.echo()
+    click.echo(click.style("  iMessage", bold=True) + "  — macOS only")
+    click.echo()
+    phone = click.prompt(
+        "  Phone number (e.g. +19255884276, leave blank to skip)",
+        default=cfg.imessage_phone or "",
+    ).strip()
+    cfg.imessage_phone = phone if phone else ""
+    if cfg.imessage_phone:
+        import sys as _sys
+        if _sys.platform != "darwin":
+            _warn("iMessage only works on macOS — saved but won't send on this OS.")
+        else:
+            _ok(f"iMessage alerts will be sent to {cfg.imessage_phone}")
+
+    if not any([cfg.telegram_chat_id, cfg.email_to, cfg.webhook_url, cfg.imessage_phone]):
+        _warn("No notification channels configured — you won't receive any alerts.")
+
+    # ── AI Chatbot ────────────────────────────────────────────────────
+    if cfg.telegram_bot_token and cfg.telegram_chat_id:
+        click.echo()
+        click.echo(click.style("  AI Chatbot (optional)", bold=True))
+        click.echo('  Answer questions like "How much did I save this week?" in Telegram.')
+        click.echo()
+        backend = click.prompt(
+            "  Chat backend",
+            type=click.Choice(["anthropic", "ollama", "none"]),
+            default=cfg.chat_backend if cfg.chat_backend in ("anthropic", "ollama") else "none",
+        )
+        if backend == "anthropic":
+            click.echo("  Get an API key at console.anthropic.com → API Keys (free credits available)")
+            ak = click.prompt(
+                "  Anthropic API key",
+                default=cfg.anthropic_api_key or "",
+                hide_input=True,
+            ).strip()
+            cfg.anthropic_api_key = ak
+            cfg.chat_backend = "anthropic"
+            _ok("Anthropic chatbot enabled")
+        elif backend == "ollama":
+            cfg.chat_backend = "ollama"
+            cfg.ollama_model = click.prompt("  Ollama model", default=cfg.ollama_model or "llama3.1:8b").strip()
+            cfg.ollama_url   = click.prompt("  Ollama URL",   default=cfg.ollama_url or "http://localhost:11434").strip()
+            _ok(f"Ollama chatbot enabled (model: {cfg.ollama_model})")
+            _info("Make sure Ollama is running: ollama serve")
+        else:
+            cfg.chat_backend = "none"
+            _info("Chatbot disabled")
+
+    # ── Alert preferences ─────────────────────────────────────────────
+    click.echo()
+    click.echo(click.style("  Alert preferences", bold=True))
+    click.echo("  Safety alerts (grid outage, fast battery drain) are always on.")
+    click.echo("  Toggle the optional groups below — you can change these later in ~/.franklinwh.json.")
+    click.echo()
+
+    _ALERT_GROUPS: list[tuple[str, str, list[str]]] = [
+        (
+            "Morning briefing",
+            "Daily preview with today's solar forecast, pre-charge advice, and peak solar window",
+            ["morning_preview"],
+        ),
+        (
+            "Peak-hour monitoring",
+            "Alerts during 4–9 pm: grid import, low SoC, battery not charging, export opportunity",
+            ["grid_import", "eb_ready", "low_soc_1pm", "low_noon_soc",
+             "low_morning_solar", "solar_stopped", "not_charging", "export_arbitrage"],
+        ),
+        (
+            "Daily / weekly reports",
+            "End-of-day digest, weekly TOU cost summary, monthly billing cycle, bill projection",
+            ["eod_digest", "weekly_summary", "monthly_summary", "bill_projection"],
+        ),
+        (
+            "Battery health",
+            "Full-charge events, capacity fade, solar degradation, heat wave prep",
+            ["battery_full_cycle", "solar_degradation", "capacity_fade",
+             "peak_streak", "heat_wave_prep"],
+        ),
+    ]
+
+    cfg.disabled_alerts = list(cfg.disabled_alerts or [])
+    for group_name, group_desc, members in _ALERT_GROUPS:
+        currently_on = not any(m in cfg.disabled_alerts for m in members)
+        click.echo(f"  {click.style(group_name, bold=True)}")
+        click.echo(f"    {group_desc}")
+        enabled = click.confirm("    Enable?", default=currently_on)
+        if enabled:
+            for m in members:
+                if m in cfg.disabled_alerts:
+                    cfg.disabled_alerts.remove(m)
+            if click.confirm("    Customize individual alerts in this group?", default=False):
+                for m in members:
+                    on = click.confirm(f"      {m}?", default=m not in cfg.disabled_alerts)
+                    if on and m in cfg.disabled_alerts:
+                        cfg.disabled_alerts.remove(m)
+                    elif not on and m not in cfg.disabled_alerts:
+                        cfg.disabled_alerts.append(m)
+        else:
+            for m in members:
+                if m not in cfg.disabled_alerts:
+                    cfg.disabled_alerts.append(m)
+        click.echo()
+
+    if cfg.disabled_alerts:
+        _info(f"Disabled alerts: {', '.join(sorted(cfg.disabled_alerts))}")
+    else:
+        _info("All optional alerts enabled")
+
+    # ── Battery & system ──────────────────────────────────────────────
+    click.echo()
+    click.echo(click.style("  Battery & system", bold=True))
     _BATTERY_MODELS = [
         ("aPower 10",       10.0),
         ("aPower 15",       15.0),
@@ -1486,13 +1613,88 @@ def setup() -> None:
         cfg.battery_capacity_kwh = chosen_kwh
         _ok(f"Battery set to {cfg.battery_capacity_kwh} kWh")
 
+    cfg.output_dir = click.prompt("  Output directory", default=cfg.output_dir)
+
     # ── Save ─────────────────────────────────────────────────────────
     save_config(cfg)
     click.echo()
     _ok("Configuration saved to ~/.franklinwh.json")
     click.echo()
-    click.echo("  You're all set! To start monitoring, run:")
-    click.echo(click.style("      python3.13 scrape.py start", fg="cyan", bold=True))
+
+    import sys as _sys2
+    if _sys2.platform == "darwin":
+        click.echo("  Start the advisor:")
+        click.echo(click.style("      franklinwh install-service", fg="cyan", bold=True))
+        click.echo("  (installs a LaunchAgent that runs automatically on login)")
+    else:
+        click.echo("  Add a cron job to run the advisor every 5 minutes (7am–11pm):")
+        click.echo(click.style(
+            "      (crontab -l; echo '*/5 7-23 * * * franklinwh account advise >> ~/franklinwh.log 2>&1') | crontab -",
+            fg="cyan", bold=True,
+        ))
+    click.echo()
+
+
+# ── Doctor ───────────────────────────────────────────────────────────
+
+@cli.command()
+def doctor() -> None:
+    """Check your configuration and connectivity."""
+    from franklinwh_scraper.config import CONFIG_PATH
+    import pathlib
+
+    click.echo()
+    click.echo(click.style("  FranklinWH Doctor", bold=True, fg="cyan"))
+    _hr()
+
+    def _check(label: str, ok: bool, detail: str = "") -> None:
+        mark  = click.style("✓", fg="green") if ok else click.style("✗", fg="red")
+        extra = f"  {detail}" if detail else ""
+        click.echo(f"  {mark}  {label}{extra}")
+
+    cfg = load_config()
+
+    _check("Config file exists",   CONFIG_PATH.exists(),       str(CONFIG_PATH))
+    _check("Email configured",     bool(cfg.email))
+    _check("Password set",         bool(cfg.password))
+    _check("Location set",         bool(cfg.lat and cfg.lon),  f"{cfg.lat:.4f}, {cfg.lon:.4f}" if cfg.lat else "")
+
+    # At least one notification channel
+    has_channel = bool(
+        cfg.imessage_phone or (cfg.telegram_bot_token and cfg.telegram_chat_id)
+        or (cfg.smtp_host and cfg.email_to) or cfg.webhook_url
+    )
+    _check("Notification channel", has_channel)
+
+    # Output dir writable
+    out = pathlib.Path(cfg.output_dir)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / ".doctor_tmp").touch()
+        (out / ".doctor_tmp").unlink()
+        _check("Output directory writable", True, str(out.resolve()))
+    except Exception as e:
+        _check("Output directory writable", False, str(e))
+
+    # History DB
+    db_path = out / "history.db"
+    _check("History database exists", db_path.exists(), str(db_path) if db_path.exists() else "(will be created on first run)")
+
+    # API login
+    if cfg.email and cfg.password:
+        click.echo("  Checking FranklinWH API login…", nl=False)
+        try:
+            with AccountClient(cfg.email, cfg.password) as client:
+                client.login()
+                gateways = client.get_gateways()
+            click.echo(click.style(" OK", fg="green"))
+            _check("API login", True, f"{len(gateways)} gateway(s) found")
+        except Exception as e:
+            click.echo(click.style(f" FAILED: {e}", fg="red"))
+            _check("API login", False)
+    else:
+        _check("API login", False, "credentials not set — run: franklinwh setup")
+
     click.echo()
 
 

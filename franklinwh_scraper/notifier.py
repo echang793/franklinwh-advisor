@@ -8,10 +8,14 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import requests
 
 from .advisor import Recommendation
+
+if TYPE_CHECKING:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -159,3 +163,43 @@ def fetch_telegram_chat_id(bot_token: str, retries: int = 3, wait: int = 3) -> s
 def _esc(s: str) -> str:
     """Escape double quotes for osascript strings."""
     return s.replace('"', '\\"')
+
+
+def notify_email(body: str, cfg: "Config") -> None:
+    """Send alert via SMTP email. Uses STARTTLS on cfg.smtp_port (default 587)."""
+    if not (cfg.smtp_host and cfg.email_to):
+        return
+    try:
+        subject = body.splitlines()[0][:60] if body else "FranklinWH Alert"
+        msg = MIMEText(body, "plain")
+        msg["Subject"] = subject
+        msg["From"] = cfg.email_from or cfg.email_to
+        msg["To"] = cfg.email_to
+        with smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=15) as s:
+            s.ehlo()
+            s.starttls()
+            if cfg.smtp_user:
+                s.login(cfg.smtp_user, cfg.smtp_password)
+            s.sendmail(msg["From"], [cfg.email_to], msg.as_string())
+        logger.debug("Email sent to %s", cfg.email_to)
+    except Exception as e:
+        logger.warning("Email notification failed: %s", e)
+
+
+def notify_webhook(body: str, urgent: bool, cfg: "Config") -> None:
+    """POST alert as JSON to cfg.webhook_url (Slack, Discord, custom endpoint, etc.)."""
+    if not cfg.webhook_url:
+        return
+    try:
+        requests.post(
+            cfg.webhook_url,
+            json={
+                "alert":     body,
+                "urgent":    urgent,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            timeout=10,
+        )
+        logger.debug("Webhook posted to %s", cfg.webhook_url)
+    except Exception as e:
+        logger.warning("Webhook notification failed: %s", e)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -19,18 +19,33 @@ class Config:
     lat: float = 0.0
     lon: float = 0.0
     location_name: str = ""
-    gateway: str = ""       # empty = auto-detect first gateway
+    gateway: str = ""
     output_dir: str = "output"
-    watch_interval: int = 30   # minutes
-    imessage_phone: str = ""         # e.g. "+19255884276" (macOS only)
-    telegram_bot_token: str = ""     # from @BotFather
-    telegram_chat_id: str = ""       # auto-detected on setup
-    battery_capacity_kwh: float = 13.6  # usable kWh — aPower 10=10, aPower 15=15, stacked=multiple
-    anthropic_api_key: str = ""         # for Telegram AI chatbot (get from console.anthropic.com)
-    chat_backend: str = "anthropic"     # "anthropic" or "ollama"
-    ollama_model: str = "llama3.1:8b"  # model to use when chat_backend = "ollama"
-    ollama_url: str = "http://localhost:11434"  # Ollama server base URL
-    ha_webhook_url: str = ""            # Home Assistant webhook URL for state push
+    watch_interval: int = 30
+    imessage_phone: str = ""
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    battery_capacity_kwh: float = 13.6
+    anthropic_api_key: str = ""
+    chat_backend: str = "none"      # "anthropic" | "ollama" | "none"
+    ollama_model: str = "llama3.1:8b"
+    ollama_url: str = "http://localhost:11434"
+    ha_webhook_url: str = ""
+
+    # Email (SMTP) notifications
+    email_to: str = ""
+    email_from: str = ""            # defaults to email_to when blank
+    smtp_host: str = ""             # e.g. smtp.gmail.com
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+
+    # Generic webhook (POST JSON to Slack, Discord, custom URL, etc.)
+    webhook_url: str = ""
+
+    # Per-alert opt-outs.  Empty = all alerts enabled.
+    # Values are alert-name strings (function suffix after _alert_).
+    disabled_alerts: list[str] = field(default_factory=list)
 
     def is_complete(self) -> bool:
         return bool(self.email and self.password and self.lat and self.lon)
@@ -52,7 +67,6 @@ def load() -> Config:
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Env vars override saved config (allows CI / temporary overrides)
     overrides = {
         "email":    os.environ.get("FRANKLINWH_EMAIL", ""),
         "password": os.environ.get("FRANKLINWH_PASSWORD", ""),
@@ -76,5 +90,4 @@ def load() -> Config:
 def save(cfg: Config) -> None:
     """Save config to ~/.franklinwh.json with restricted permissions."""
     CONFIG_PATH.write_text(json.dumps(cfg.to_dict(), indent=2))
-    # chmod 600 — owner read/write only (password is stored here)
     CONFIG_PATH.chmod(stat.S_IRUSR | stat.S_IWUSR)
