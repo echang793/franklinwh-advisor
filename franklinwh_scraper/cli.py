@@ -28,9 +28,9 @@ from .history import HistoryStore, integrate_intervals
 from .notifier import (notify_imessage, notify_imessage_text, notify_log,
                        notify_macos, notify_telegram, fetch_telegram_chat_id, rec_to_text)
 from .predictor import predict
-from .tou import TouPeriod, cheap_charge_deadline, period_at, rate_at
+from .tou import TouPeriod, base_service_cost, cheap_charge_deadline, period_at, rate_at
 from .scrapers import FAQScraper, ProductsScraper, SupportScraper
-from .weather import fetch_solar_outlook, geocode
+from .weather import fetch_nws_storm_alerts, fetch_solar_outlook, geocode
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -169,6 +169,21 @@ def _send_alert(body: str, cfg: Config, urgent: bool = False) -> None:
         notify_email(body, cfg)
     if cfg.webhook_url:
         notify_webhook(body, urgent, cfg)
+
+
+def _ping_healthcheck(cfg: Config) -> None:
+    """Ping the uptime monitor (e.g. healthchecks.io) after a healthy cycle.
+
+    Fire-and-forget — if pings stop, the monitor alerts the user that the
+    advisor has gone down. Never raises.
+    """
+    if not cfg.healthcheck_url:
+        return
+    try:
+        import requests as _rq
+        _rq.get(cfg.healthcheck_url, timeout=5)
+    except Exception as e:
+        logger.debug("Healthcheck ping failed: %s", e)
 
 
 # ── Peak-hour alert helpers ───────────────────────────────────────────
@@ -621,10 +636,11 @@ def _alert_eod_digest(
                     peak_total += 1
                     if grid_kw < 0.05:  # <50 W treated as noise, not real grid draw
                         peak_no_grid += 1
-            net = import_cost - export_credit
+            base_fee = base_service_cost(1)
+            net = import_cost - export_credit + base_fee
             tou_str = (
                 f"\nEst. grid cost today:  ${import_cost:.2f} import  "
-                f"${export_credit:.2f} export  (net ${net:.2f})"
+                f"${export_credit:.2f} export  +${base_fee:.2f} base  (net ${net:.2f})"
             )
             if peak_total > 0:
                 pct = peak_no_grid / peak_total * 100
@@ -682,7 +698,8 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
         elif period == TouPeriod.SUPER_OFF_PEAK:
             sop_saved  += batt_solar_kwh * r
 
-    net_cost    = import_cost - export_credit
+    base_fee    = base_service_cost(7)
+    net_cost    = import_cost - export_credit + base_fee
     total_saved = peak_saved + sop_saved
     week_label  = f"{week_start.strftime('%b %-d')}–{week_end.strftime('%b %-d')}"
 
@@ -718,9 +735,10 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
     return (
         f"📊 FranklinWH Weekly Summary — {week_label}\n\n"
         f"Grid cost (EV-TOU-5 rates):\n"
-        f"  Imported:  ${import_cost:.2f}\n"
-        f"  Exported:  ${export_credit:.2f} (est.)\n"
-        f"  Net cost:  ${net_cost:.2f}\n"
+        f"  Imported:     ${import_cost:.2f}\n"
+        f"  Exported:     ${export_credit:.2f} (est.)\n"
+        f"  Base service: ${base_fee:.2f}\n"
+        f"  Net cost:     ${net_cost:.2f}\n"
         f"{avg_cost_str}"
         f"\nEst. savings from battery + solar:\n"
         f"  Peak (4–9 pm):    ${peak_saved:.2f}\n"
@@ -769,15 +787,17 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store) -> str
             import_cost   += grid_kw * hours * r
         elif grid_kw < 0:
             export_credit += -grid_kw * hours * r
-    net_cycle  = import_cost - export_credit
     days       = max(1, (cycle_end - cycle_start).days + 1)
+    base_fee   = base_service_cost(days)
+    net_cycle  = import_cost - export_credit + base_fee
     annual     = net_cycle / days * 365
     direction  = "net consumer (you owe)" if annual >= 0 else "net exporter (building credit)"
     trueup_str = (
         f"\n\nNEM true-up (est.):\n"
-        f"  Import:  ${import_cost:.2f}\n"
-        f"  Export:  ${export_credit:.2f}\n"
-        f"  Net:     ${net_cycle:+.2f} this cycle\n"
+        f"  Import:       ${import_cost:.2f}\n"
+        f"  Export:       ${export_credit:.2f}\n"
+        f"  Base service: ${base_fee:.2f}\n"
+        f"  Net:          ${net_cycle:+.2f} this cycle\n"
         f"  ~${annual:+.0f}/yr at this rate — {direction}"
     )
 
@@ -1107,11 +1127,13 @@ def _alert_bill_projection(
         elif grid_kw < 0:
             export_credit += -grid_kw * hours * r
 
-    net_actual     = import_cost - export_credit
+    base_actual    = base_service_cost(days_so_far)
+    net_actual     = import_cost - export_credit + base_actual
     daily_net      = net_actual / days_so_far
     projected_net  = daily_net * 30
     projected_imp  = import_cost / days_so_far * 30
     projected_exp  = export_credit / days_so_far * 30
+    projected_base = base_service_cost(30)
     cycle_label    = f"{cycle_start.strftime('%b %-d')} – {datetime.now().date().strftime('%b %-d')}"
 
     state["bill_projection_date"] = today
@@ -1122,10 +1144,12 @@ def _alert_bill_projection(
         f"Cycle so far ({cycle_label}, {days_so_far} days):\n"
         f"  Grid import:  ${import_cost:.2f}\n"
         f"  Grid export:  ${export_credit:.2f}\n"
+        f"  Base service: ${base_actual:.2f}\n"
         f"  Net cost:     ${net_actual:.2f}\n\n"
         f"Projected full cycle (~30 days):\n"
         f"  Import:  ${projected_imp:.2f}\n"
         f"  Export:  ${projected_exp:.2f}\n"
+        f"  Base:    ${projected_base:.2f}\n"
         f"  Net:     ${projected_net:.2f}  (${daily_net:.2f}/day avg)"
     )
 
@@ -1156,6 +1180,56 @@ def _alert_heat_wave_prep(state: dict, today: str, now: datetime, c, outlook) ->
         f"🌡️ FranklinWH: Heat wave tomorrow — {max_temp_f:.0f}°F forecast\n"
         f"Expect higher AC load and grid risk during 4–9 pm on-peak.\n"
         f"{action}"
+    )
+
+
+def _alert_ev_charge_window(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
+    """Evening: recommend the cheapest window to charge an EV (super-off-peak).
+
+    Only fires when cfg.ev_charging is set. Advisory only.
+    """
+    if not getattr(cfg, "ev_charging", False):
+        return None
+    if now.hour not in (20, 21) or state.get("ev_charge_window_date") == today:
+        return None
+    state["ev_charge_window_date"] = today
+    # Super-off-peak overnight window: midnight–6 am (weekday rate)
+    sop = rate_at(now.replace(hour=1, minute=0, second=0, microsecond=0))
+    onp = rate_at(now.replace(hour=17, minute=0, second=0, microsecond=0))
+    cost_line = ""
+    kwh = getattr(cfg, "ev_kwh_per_session", 0.0) or 0.0
+    if kwh > 0:
+        save = kwh * (onp - sop)
+        cost_line = (f"\n~{kwh:.0f} kWh: ${kwh * sop:.2f} at super-off-peak "
+                     f"vs ${kwh * onp:.2f} on-peak (save ${save:.2f}).")
+    logger.info("EV charge window alert sent for %s", today)
+    return (
+        f"🔌 FranklinWH: Best EV charging window tonight\n"
+        f"Charge midnight–6 AM (super-off-peak, ${sop:.2f}/kWh) — cheapest of the day. "
+        f"Avoid 4–9 PM on-peak (${onp:.2f}/kWh).{cost_line}"
+    )
+
+
+def _alert_storm_prep(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
+    """Evening: if an NWS storm/wind/flood alert is active and SoC < 90%, advise
+    charging to 100% tonight so the battery is ready for a possible outage.
+    """
+    if now.hour not in (21, 22) or state.get("storm_prep_date") == today:
+        return None
+    if c.battery_soc_pct >= 90.0:
+        return None
+    try:
+        events = fetch_nws_storm_alerts(cfg.lat, cfg.lon)
+    except Exception:
+        events = []
+    if not events:
+        return None
+    state["storm_prep_date"] = today
+    logger.info("Storm prep alert: %s", ", ".join(events))
+    return (
+        f"⛈️ FranklinWH: Weather alert — {events[0]}\n"
+        f"Battery at {c.battery_soc_pct:.0f}%. Consider charging to 100% tonight "
+        f"(Emergency Backup) so you have full backup if the grid goes down."
     )
 
 
@@ -1223,6 +1297,8 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("peak_streak",       lambda: _alert_peak_streak(state, today, now)),
             ("bill_projection",   lambda: _alert_bill_projection(state, today, now, store)),
             ("heat_wave_prep",    lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),
+            ("storm_prep",        lambda: _alert_storm_prep(state, today, now, c, cfg)),
+            ("ev_charge_window",  lambda: _alert_ev_charge_window(state, today, now, c, cfg)),
             ("area_power_outage", lambda: _alert_area_power_outage(state, today, now, c, cfg)),
         ]
         to_send: list[str] = []
@@ -1535,9 +1611,10 @@ def setup() -> None:
         ),
         (
             "Peak-hour monitoring",
-            "Alerts during 4–9 pm: grid import, low SoC, battery not charging, export opportunity",
+            "Alerts during 4–9 pm: grid import, low SoC, battery not charging, export opportunity, EV charging window",
             ["grid_import", "eb_ready", "low_soc_1pm", "low_noon_soc",
-             "low_morning_solar", "solar_stopped", "not_charging", "export_arbitrage"],
+             "low_morning_solar", "solar_stopped", "not_charging", "export_arbitrage",
+             "ev_charge_window"],
         ),
         (
             "Daily / weekly reports",
@@ -1546,9 +1623,9 @@ def setup() -> None:
         ),
         (
             "Battery health",
-            "Full-charge events, capacity fade, solar degradation, heat wave prep",
+            "Full-charge events, capacity fade, solar degradation, heat wave & storm prep",
             ["battery_full_cycle", "solar_degradation", "capacity_fade",
-             "peak_streak", "heat_wave_prep"],
+             "peak_streak", "heat_wave_prep", "storm_prep"],
         ),
     ]
 
@@ -1615,6 +1692,27 @@ def setup() -> None:
 
     cfg.output_dir = click.prompt("  Output directory", default=cfg.output_dir)
 
+    # ── EV charging ───────────────────────────────────────────────────
+    click.echo()
+    cfg.ev_charging = click.confirm(
+        "  Do you charge an EV at home? (enables off-peak charging advice)",
+        default=cfg.ev_charging,
+    )
+    if cfg.ev_charging:
+        cfg.ev_kwh_per_session = click.prompt(
+            "  Typical kWh per charge (0 if unsure)", type=float,
+            default=cfg.ev_kwh_per_session or 0.0,
+        )
+
+    # ── Uptime monitoring ─────────────────────────────────────────────
+    click.echo()
+    click.echo(click.style("  Uptime monitoring (optional)", bold=True))
+    click.echo("  Get a free ping URL at healthchecks.io — you'll be notified if the advisor stops running.")
+    cfg.healthcheck_url = click.prompt(
+        "  Healthcheck ping URL (leave blank to skip)",
+        default=cfg.healthcheck_url or "",
+    ).strip()
+
     # ── Save ─────────────────────────────────────────────────────────
     save_config(cfg)
     click.echo()
@@ -1665,6 +1763,8 @@ def doctor() -> None:
         or (cfg.smtp_host and cfg.email_to) or cfg.webhook_url
     )
     _check("Notification channel", has_channel)
+    _check("Uptime monitoring",    bool(cfg.healthcheck_url),
+           "configured" if cfg.healthcheck_url else "optional — set up at healthchecks.io")
 
     # Output dir writable
     out = pathlib.Path(cfg.output_dir)
@@ -2149,6 +2249,8 @@ def cmd_advise(
 
                 last_mode = rec.mode.value
                 _save_last_mode(outdir, last_mode)
+
+                _ping_healthcheck(cfg)  # signal a healthy completed cycle
 
             except Exception as e:
                 logger.exception("Watch loop error")

@@ -30,6 +30,15 @@ _RATES = {
 _ON_PEAK_START = 16  # 4 pm
 _ON_PEAK_END   = 21  # 9 pm
 
+# SDG&E EV-TOU-5 fixed Basic Service Fee — charged per day regardless of usage.
+# ~$16/month ÷ 30. Verify against your bill; update if SDG&E changes it.
+BASE_SERVICE_DAILY = 0.53
+
+
+def base_service_cost(days: float) -> float:
+    """Fixed basic-service charge over N days (EV-TOU-5)."""
+    return max(0.0, days) * BASE_SERVICE_DAILY
+
 
 def period_at(dt: datetime) -> TouPeriod:
     """Return the EV-TOU-5 period for a given datetime."""

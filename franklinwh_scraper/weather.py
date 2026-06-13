@@ -153,6 +153,37 @@ class SolarOutlook:
         return round(total_kwh * perf_ratio, 1)
 
 
+_STORM_KEYWORDS = (
+    "storm", "wind", "flood", "rain", "tornado", "hurricane",
+    "blizzard", "winter", "tropical", "fire weather", "red flag",
+)
+
+
+def fetch_nws_storm_alerts(lat: float, lon: float, timeout: int = 10) -> list[str]:
+    """Active NWS alert event names for this point that imply outage/backup risk.
+
+    Returns a list of event strings (e.g. ['High Wind Warning']). Empty on error.
+    """
+    try:
+        r = requests.get(
+            "https://api.weather.gov/alerts/active",
+            params={"point": f"{lat},{lon}"},
+            headers={"User-Agent": "franklinwh-advisor (github.com/echang793)"},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        features = r.json().get("features", [])
+    except Exception as e:
+        logger.debug("NWS alert fetch failed: %s", e)
+        return []
+    events: list[str] = []
+    for f in features:
+        event = (f.get("properties", {}).get("event") or "").strip()
+        if event and any(kw in event.lower() for kw in _STORM_KEYWORDS):
+            events.append(event)
+    return events
+
+
 def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int = 3) -> SolarOutlook:
     """Fetch 48-hour hourly solar irradiance + temperature forecast for a location."""
     import time as _time

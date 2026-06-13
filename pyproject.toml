@@ -35,6 +35,12 @@ dependencies = [
     "anthropic>=0.40",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [[project.authors]]
 name = "Eric Chang"
 

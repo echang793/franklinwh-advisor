@@ -312,13 +312,16 @@ class TelegramChatBot:
             elif grid_kw < 0:
                 export_credit += -grid_kw * hours * r
             solar_kwh += s_kw * hours
-        net        = import_cost - export_credit
+        from .tou import base_service_cost
+        base_fee   = base_service_cost(7)
+        net        = import_cost - export_credit + base_fee
         week_label = f"{week_start.strftime('%b %-d')}–{week_end.strftime('%b %-d')}"
         self._send(chat_id,
             f"📊 7-Day Energy — {week_label}\n"
             f"Solar generated:     {solar_kwh:.1f} kWh\n"
             f"Grid import cost:    ${import_cost:.2f}\n"
             f"Grid export credit:  ${export_credit:.2f}\n"
+            f"Base service:        ${base_fee:.2f}\n"
             f"Net cost:            ${net:.2f}"
         )
 
@@ -349,20 +352,25 @@ class TelegramChatBot:
                 import_cost   += grid_kw * hours * r
             elif grid_kw < 0:
                 export_credit += -grid_kw * hours * r
-        net_actual    = import_cost - export_credit
+        from .tou import base_service_cost
+        base_actual   = base_service_cost(days_so_far)
+        net_actual    = import_cost - export_credit + base_actual
         daily_net     = net_actual / days_so_far
         projected_net = daily_net * 30
         projected_imp = import_cost / days_so_far * 30
         projected_exp = export_credit / days_so_far * 30
+        projected_base = base_service_cost(30)
         cycle_label   = f"{cycle_start.strftime('%b %-d')} – {now.date().strftime('%b %-d')}"
         self._send(chat_id,
             f"💡 Billing Cycle — {cycle_label} ({days_so_far} days)\n"
             f"Grid import:  ${import_cost:.2f}\n"
             f"Grid export:  ${export_credit:.2f}\n"
+            f"Base service: ${base_actual:.2f}\n"
             f"Net so far:   ${net_actual:.2f}\n\n"
             f"Projected full cycle (~30 days):\n"
             f"  Import:  ${projected_imp:.2f}\n"
             f"  Export:  ${projected_exp:.2f}\n"
+            f"  Base:    ${projected_base:.2f}\n"
             f"  Net:     ${projected_net:.2f}  (${daily_net:.2f}/day avg)"
         )
 

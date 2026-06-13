@@ -43,6 +43,14 @@ class Config:
     # Generic webhook (POST JSON to Slack, Discord, custom URL, etc.)
     webhook_url: str = ""
 
+    # Uptime monitoring — ping this URL each successful run (e.g. healthchecks.io).
+    # If pings stop, the service notifies you the advisor has gone down.
+    healthcheck_url: str = ""
+
+    # EV charging — enables the off-peak EV charge-window advisor.
+    ev_charging: bool = False
+    ev_kwh_per_session: float = 0.0   # 0 = unknown; if set, shows $ savings estimate
+
     # Per-alert opt-outs.  Empty = all alerts enabled.
     # Values are alert-name strings (function suffix after _alert_).
     disabled_alerts: list[str] = field(default_factory=list)
