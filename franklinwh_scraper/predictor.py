@@ -70,7 +70,8 @@ def predict(
         solar_profile = store.solar_profile()
 
     # Temperature-load scaling: +2.5% load per °C above 27°C (80°F) models AC draw.
-    temp_scale = 1.0 + 0.025 * max(0.0, avg_temp_c - 27.0)
+    # Only applied during waking hours (7am–11pm) when AC actually runs.
+    ac_temp_scale = 1.0 + 0.025 * max(0.0, avg_temp_c - 27.0)
 
     predictions: list[HourPrediction] = []
 
@@ -106,6 +107,7 @@ def predict(
         else:
             confidence = "low"
 
+        temp_scale = ac_temp_scale if 7 <= future.hour < 23 else 1.0
         load_kw = load_kw * temp_scale
         predictions.append(HourPrediction(
             dt=future,

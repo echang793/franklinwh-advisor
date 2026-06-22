@@ -86,15 +86,6 @@ class MonthlyTotals:
     days_with_data: int
 
 
-@dataclass
-class SlotStats:
-    day_of_week: int
-    hour_of_day: int
-    avg_load_kw: float
-    avg_solar_kw: float
-    sample_count: int
-
-
 class HistoryStore:
     def __init__(self, db_path: Path = DEFAULT_DB_PATH):
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,25 +165,6 @@ class HistoryStore:
         ).fetchall()
         return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
 
-    def slot_detail(self, day_of_week: int, hour_of_day: int) -> SlotStats | None:
-        row = self._conn.execute(
-            """
-            SELECT AVG(home_load_kw), AVG(solar_kw), COUNT(*)
-            FROM readings
-            WHERE day_of_week=? AND hour_of_day=?
-            """,
-            (day_of_week, hour_of_day),
-        ).fetchone()
-        if not row or row[2] == 0:
-            return None
-        return SlotStats(
-            day_of_week=day_of_week,
-            hour_of_day=hour_of_day,
-            avg_load_kw=float(row[0]),
-            avg_solar_kw=float(row[1]),
-            sample_count=int(row[2]),
-        )
-
     def daily_solar_kwh(self, date_str: str) -> float:
         """Integrate actual solar production for a calendar date (trapezoidal).
 
@@ -218,54 +190,6 @@ class HistoryStore:
             (date_str,),
         ).fetchone()
         return round(float(row[0]), 2) if row and row[0] is not None else 0.0
-
-    def monthly_totals(self, year_month: str) -> MonthlyTotals:
-        """Aggregate energy totals for a calendar month (YYYY-MM).
-
-        Solar uses MAX(solar_total_kwh) per day — the API running counter peaks at
-        end-of-day, so summing daily maxima gives true monthly generation regardless
-        of poll gaps.  Grid and load are integrated from instantaneous kW readings.
-        """
-        prefix = year_month + "-"
-
-        # Solar: sum of each day's MAX API counter
-        solar_rows = self._conn.execute(
-            """
-            SELECT substr(timestamp,1,10), MAX(solar_total_kwh)
-            FROM readings
-            WHERE timestamp LIKE ?
-            GROUP BY substr(timestamp,1,10)
-            """,
-            (prefix + "%",),
-        ).fetchall()
-        solar_kwh = round(sum(r[1] for r in solar_rows if r[1] is not None), 1)
-        days_with_data = len(solar_rows)
-
-        # Grid and load: trapezoidal integration over real timestamps
-        kw_rows = self._conn.execute(
-            "SELECT timestamp, grid_use_kw, home_load_kw, solar_kw FROM readings "
-            "WHERE timestamp LIKE ? ORDER BY timestamp",
-            (prefix + "%",),
-        ).fetchall()
-        grid_import_kwh = grid_export_kwh = home_load_kwh = 0.0
-        for _dt, hours, grid_kw, home_kw, _solar in integrate_intervals(kw_rows):
-            if grid_kw > 0:
-                grid_import_kwh += grid_kw * hours
-            elif grid_kw < 0:
-                grid_export_kwh += -grid_kw * hours
-            home_load_kwh += home_kw * hours
-        grid_import_kwh = round(grid_import_kwh, 1)
-        grid_export_kwh = round(grid_export_kwh, 1)
-        home_load_kwh   = round(home_load_kwh, 1)
-
-        return MonthlyTotals(
-            year_month=year_month,
-            solar_kwh=solar_kwh,
-            grid_import_kwh=grid_import_kwh,
-            grid_export_kwh=grid_export_kwh,
-            home_load_kwh=home_load_kwh,
-            days_with_data=days_with_data,
-        )
 
     def recent_avg_load(self, hours: int = 2) -> float | None:
         """Average home load over the last N hours of recorded data."""

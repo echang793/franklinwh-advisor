@@ -35,10 +35,12 @@ You'll need:
 Open Terminal (on Mac: press ⌘ Space, type *Terminal*, press Enter) and run:
 
 ```bash
-pip install franklinwh-advisor
+git clone https://github.com/echang793/franklinwh-advisor
+cd franklinwh-advisor
+bash install.sh
 ```
 
-> **Windows users:** if that doesn't work, try `pip3 install franklinwh-advisor`
+`install.sh` checks your Python version, installs the required packages, and on Linux sets up a cron job automatically.
 
 ---
 
@@ -47,7 +49,7 @@ pip install franklinwh-advisor
 Run the setup wizard:
 
 ```bash
-franklinwh setup
+python3 scrape.py setup
 ```
 
 It will walk you through five steps — just answer the prompts. Most have a default you can accept by pressing Enter.
@@ -81,7 +83,7 @@ Enter your email address and SMTP details. For Gmail:
 Paste the webhook URL and alerts will be posted as JSON.
 
 ### Step 4 — Which alerts you want
-The wizard shows four groups of alerts. Press **Y** to enable a group (default) or **N** to skip it. You can always re-run `franklinwh setup` to change this.
+The wizard shows four groups of alerts. Press **Y** to enable a group (default) or **N** to skip it. You can always re-run `python3 scrape.py setup` to change this.
 
 Safety alerts (grid outage, fast battery drain) are always on — they can't be turned off.
 
@@ -95,7 +97,7 @@ Pick your FranklinWH battery model from the list (aPower 10, aPower 15, or stack
 After setup, run a quick health check:
 
 ```bash
-franklinwh doctor
+python3 scrape.py doctor
 ```
 
 You should see all green checkmarks. If anything is red, it will tell you what to fix.
@@ -103,7 +105,7 @@ You should see all green checkmarks. If anything is red, it will tell you what t
 Then start the advisor:
 
 ```bash
-franklinwh start
+python3 scrape.py start
 ```
 
 You'll receive a test alert confirming it's working.
@@ -112,25 +114,27 @@ You'll receive a test alert confirming it's working.
 
 **Mac:**
 ```bash
-franklinwh install-service
+python3 scrape.py install-service
 ```
 This sets up automatic startup — the advisor will run in the background whenever your Mac is on, and restart itself if it ever stops.
 
 **Linux / Raspberry Pi:**
+
+`install.sh` already sets up a cron job for you. To add it manually:
 ```bash
-(crontab -l; echo '*/5 7-23 * * * franklinwh account advise >> ~/franklinwh.log 2>&1') | crontab -
+(crontab -l; echo "*/15 7-23 * * * cd $(pwd) && python3 scrape.py account advise >> output/advisor.log 2>&1") | crontab -
 ```
-This runs the advisor every 5 minutes between 7 am and 11 pm.
+This runs the advisor every 15 minutes between 7 am and 11 pm.
 
 ---
 
 ## Updating
 
 ```bash
-pip install --upgrade franklinwh-advisor
+git pull
 ```
 
-Your settings are kept — nothing to re-configure.
+Your settings in `~/.franklinwh.json` are kept — nothing to re-configure.
 
 ---
 
@@ -142,7 +146,7 @@ If you set up Telegram, you can enable an AI assistant that answers questions ab
 > "Should I charge my car now or wait until tonight?"
 > "Why is my battery already at 30%?"
 
-To enable it, run `franklinwh setup` again and choose a chatbot backend:
+To enable it, run `python3 scrape.py setup` again and choose a chatbot backend:
 
 - **Anthropic Claude** — most accurate. Get a free API key at [console.anthropic.com](https://console.anthropic.com) (free credits available).
 - **Ollama** — runs entirely on your own computer. Free and private. Requires [Ollama](https://ollama.com) to be installed.
@@ -166,7 +170,7 @@ Yes, the advisor needs to run on a computer that's awake to check your system. A
 Your credentials are saved to `~/.franklinwh.json` on your own computer — readable only by you. Nothing is sent to any third party.
 
 **What utility rates does it use?**
-The app ships with SDG&E EV-TOU-5 rates. If you're on a different plan, you can edit `franklinwh_scraper/tou.py` to match your rates — the file is short and commented.
+The app ships with SDG&E EV-TOU-5 rates. If you're on a different plan, edit `franklinwh_scraper/tou.py` to match your rates — the file is short and well commented.
 
 **The predictions aren't accurate on day one — is that normal?**
 Yes. The advisor improves as it learns your home's usage patterns:
@@ -175,7 +179,7 @@ Yes. The advisor improves as it learns your home's usage patterns:
 - After a week: solar predictions are calibrated to your specific roof and panels
 
 **Something isn't working — where do I start?**
-Run `franklinwh doctor` — it checks every component and tells you exactly what's wrong.
+Run `python3 scrape.py doctor` — it checks every component and tells you exactly what's wrong.
 
 ---
 

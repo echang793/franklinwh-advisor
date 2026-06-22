@@ -10,10 +10,18 @@ from datetime import datetime, timedelta
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from .tou import on_peak_window, period_at, rate_at
+
 logger = logging.getLogger(__name__)
 
 _MAX_TURNS = 10   # conversation turns kept per chat
 _MODEL     = "claude-haiku-4-5-20251001"
+
+
+def _soc_bar(pct: float) -> str:
+    """10-block SoC progress bar: ███████░░░ 74%"""
+    filled = round(max(0.0, min(100.0, pct)) / 10)
+    return "█" * filled + "░" * (10 - filled) + f" {pct:.0f}%"
 
 _SYSTEM_PROMPT = """\
 You are an energy assistant for a home with a FranklinWH battery, solar panels, \
@@ -42,7 +50,6 @@ Be concise and practical. Use the system data block at the start of each message
 
 def build_context(stats, history, outlook, cfg) -> str:
     """Snapshot of current system state, injected as user-message context."""
-    from .tou import period_at, rate_at, on_peak_window
 
     now   = datetime.now()
     lines = [f"[System snapshot — {now.strftime('%-I:%M %p')}]"]
@@ -56,7 +63,7 @@ def build_context(stats, history, outlook, cfg) -> str:
             "0.00 kW"
         )
         lines += [
-            f"  Battery SoC:   {c.battery_soc_pct:.0f}%",
+            f"  Battery SoC:   {_soc_bar(c.battery_soc_pct)}",
             f"  Solar now:     {c.solar_production_kw:.2f} kW",
             f"  Home load:     {c.home_load_kw:.2f} kW",
             f"  Grid:          {grid_str}",
@@ -84,11 +91,10 @@ def build_context(stats, history, outlook, cfg) -> str:
             week_start = (now.date() - timedelta(days=6)).strftime("%Y-%m-%d")
             readings   = history.weekly_readings(week_start, today_str)
             if readings:
-                from .tou import rate_at as _r
                 from .history import integrate_intervals
                 imp = exp = 0.0
                 for dt, hours, grid_kw, _hk, _sk in integrate_intervals(readings):
-                    r = _r(dt)
+                    r = rate_at(dt)
                     if grid_kw > 0:
                         imp += grid_kw * hours * r
                     elif grid_kw < 0:
@@ -161,13 +167,26 @@ class TelegramChatBot:
                         self._send(chat_id,
                             "FranklinWH AI assistant\n\n"
                             "Ask me anything about your solar, battery, or energy costs.\n"
-                            "Example: \"Should I charge the car now?\" or \"Why is my battery low?\"\n\n"
+                            'Example: "Should I charge the car now?" or "Why is my battery low?"\n\n'
                             "/status   — current snapshot\n"
-                            "/forecast — solar & weather outlook\n"
+                            "/forecast — solar &amp; weather outlook\n"
                             "/history  — 7-day energy summary\n"
                             "/bill     — current billing cycle cost + projection\n"
                             "/tip      — best action right now\n"
+                            "/modes    — explain battery modes\n"
                             "/clear    — reset conversation history"
+                        )
+                        continue
+                    if text.lower() == "/modes":
+                        self._send(chat_id,
+                            "🔋 <b>FranklinWH Battery Modes</b>\n\n"
+                            "<b>Self-Consumption</b> (default)\n"
+                            "Solar charges battery first. Grid used only when battery is empty. Best for sunny days.\n\n"
+                            "<b>Emergency Backup</b>\n"
+                            "Battery charges from grid. Keeps battery full for outage protection or pre-peak charging.\n\n"
+                            "<b>Time-of-Use</b>\n"
+                            "Charges during cheap off-peak hours, discharges during expensive 4–9 pm on-peak.\n\n"
+                            "💡 Switch to Emergency Backup before 4 pm if SoC is below ~50%."
                         )
                         continue
                     if text.lower() == "/clear":
@@ -178,41 +197,41 @@ class TelegramChatBot:
                         threading.Thread(
                             target=self._send_status,
                             args=(chat_id,),
-                            daemon=True,
+                            daemon=False,
                         ).start()
                         continue
                     if text.lower() == "/forecast":
                         threading.Thread(
                             target=self._send_forecast,
                             args=(chat_id,),
-                            daemon=True,
+                            daemon=False,
                         ).start()
                         continue
                     if text.lower() == "/history":
                         threading.Thread(
                             target=self._send_history,
                             args=(chat_id,),
-                            daemon=True,
+                            daemon=False,
                         ).start()
                         continue
                     if text.lower() == "/bill":
                         threading.Thread(
                             target=self._send_bill,
                             args=(chat_id,),
-                            daemon=True,
+                            daemon=False,
                         ).start()
                         continue
                     if text.lower() == "/tip":
                         threading.Thread(
                             target=self._send_tip,
                             args=(chat_id,),
-                            daemon=True,
+                            daemon=False,
                         ).start()
                         continue
                     threading.Thread(
                         target=self._handle,
                         args=(chat_id, text),
-                        daemon=True,
+                        daemon=False,
                     ).start()
             except URLError:
                 time.sleep(5)
@@ -221,200 +240,220 @@ class TelegramChatBot:
                 time.sleep(5)
 
     def _send_status(self, chat_id: str) -> None:
-        with self._lock:
-            stats   = self._stats
-            store   = self._hist_store
-            outlook = self._outlook
-        if stats is None:
-            self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
-            return
-        self._send(chat_id, build_context(stats, store, outlook, self._cfg))
+        try:
+            with self._lock:
+                stats   = self._stats
+                store   = self._hist_store
+                outlook = self._outlook
+            if stats is None:
+                self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+                return
+            self._send(chat_id, build_context(stats, store, outlook, self._cfg))
+        except Exception as e:
+            logger.warning("_send_status error: %s", e)
+            self._send(chat_id, f"Error fetching status: {e}")
 
     def _send_forecast(self, chat_id: str) -> None:
-        with self._lock:
-            outlook     = self._outlook
-            stats       = self._stats
-            system_peak = self._system_peak_kw
-            perf_ratio  = self._perf_ratio
-        if outlook is None:
-            self._send(chat_id, "No weather data yet — try again in a moment.")
-            return
-        now  = datetime.now()
+        try:
+            with self._lock:
+                outlook     = self._outlook
+                stats       = self._stats
+                system_peak = self._system_peak_kw
+                perf_ratio  = self._perf_ratio
+            if outlook is None:
+                self._send(chat_id, "No weather data yet — try again in a moment.")
+                return
+            now  = datetime.now()
 
-        def _sky(ghi: float) -> str:
-            return "Sunny" if ghi >= 400 else ("Partly cloudy" if ghi >= 300 else "Cloudy")
+            def _sky(ghi: float) -> str:
+                return "Sunny" if ghi >= 400 else ("Partly cloudy" if ghi >= 300 else "Cloudy")
 
-        def _bar(ghi: float) -> str:
-            if ghi < 50:  return " "
-            if ghi < 150: return "▁"
-            if ghi < 250: return "▃"
-            if ghi < 380: return "▅"
-            if ghi < 530: return "▇"
-            return "█"
+            def _bar(ghi: float) -> str:
+                if ghi < 50:  return " "
+                if ghi < 150: return "▁"
+                if ghi < 250: return "▃"
+                if ghi < 380: return "▅"
+                if ghi < 530: return "▇"
+                return "█"
 
-        today    = now.date()
-        tomorrow = (now + timedelta(days=1)).date()
+            today    = now.date()
+            tomorrow = (now + timedelta(days=1)).date()
 
-        today_hrs = [h for h in outlook.hours if h.time.date() == today    and 6 <= h.time.hour <= 19]
-        tmrw_hrs  = [h for h in outlook.hours if h.time.date() == tomorrow and 6 <= h.time.hour <= 19]
+            today_hrs = [h for h in outlook.hours if h.time.date() == today    and 6 <= h.time.hour <= 19]
+            tmrw_hrs  = [h for h in outlook.hours if h.time.date() == tomorrow and 6 <= h.time.hour <= 19]
 
-        today_ghi = outlook.avg_ghi(12)
-        tmrw_ghi  = outlook.tomorrow_avg_ghi()
+            today_ghi = outlook.avg_ghi(12)
+            tmrw_ghi  = outlook.tomorrow_avg_ghi()
 
-        lines = [f"🌤️ Solar Forecast — {now.strftime('%a %b %-d')}"]
+            lines = [f"🌤️ Solar Forecast — {now.strftime('%a %b %-d')}"]
 
-        lines.append(f"\nToday: {_sky(today_ghi)} ({today_ghi:.0f} W/m²)")
-        if today_hrs:
-            lines.append(f"6a {''.join(_bar(h.ghi_wm2) for h in today_hrs)} 7p")
-        if system_peak:
-            today_kwh = round(outlook.today_generation_kwh(system_peak) * perf_ratio, 1)
-            lines.append(f"~{today_kwh:.1f} kWh predicted")
+            lines.append(f"\nToday: {_sky(today_ghi)} ({today_ghi:.0f} W/m²)")
+            if today_hrs:
+                lines.append(f"6a {''.join(_bar(h.ghi_wm2) for h in today_hrs)} 7p")
+            if system_peak:
+                today_kwh = round(outlook.today_generation_kwh(system_peak) * perf_ratio, 1)
+                lines.append(f"~{today_kwh:.1f} kWh predicted")
 
-        lines.append(f"\nTomorrow: {_sky(tmrw_ghi)} ({tmrw_ghi:.0f} W/m²)")
-        if tmrw_hrs:
-            lines.append(f"6a {''.join(_bar(h.ghi_wm2) for h in tmrw_hrs)} 7p")
-        if system_peak:
-            tmrw_kwh = outlook.tomorrow_generation_kwh(system_peak, perf_ratio)
-            lines.append(f"~{tmrw_kwh:.1f} kWh predicted")
-            if tmrw_ghi < 250:
-                lines.append("⚡ Dim tomorrow — consider Emergency Backup tonight.")
+            lines.append(f"\nTomorrow: {_sky(tmrw_ghi)} ({tmrw_ghi:.0f} W/m²)")
+            if tmrw_hrs:
+                lines.append(f"6a {''.join(_bar(h.ghi_wm2) for h in tmrw_hrs)} 7p")
+            if system_peak:
+                tmrw_kwh = outlook.tomorrow_generation_kwh(system_peak, perf_ratio)
+                lines.append(f"~{tmrw_kwh:.1f} kWh predicted")
+                if tmrw_ghi < 250:
+                    lines.append("⚡ Dim tomorrow — consider Emergency Backup tonight.")
 
-        if stats:
-            c = stats.current
-            lines.append(f"\nNow: Solar {c.solar_production_kw:.2f} kW  |  SoC {c.battery_soc_pct:.0f}%")
-        self._send(chat_id, "\n".join(lines))
+            if stats:
+                c = stats.current
+                lines.append(f"\nNow: Solar {c.solar_production_kw:.2f} kW  |  SoC {c.battery_soc_pct:.0f}%")
+            self._send(chat_id, "\n".join(lines))
+        except Exception as e:
+            logger.warning("_send_forecast error: %s", e)
+            self._send(chat_id, f"Error fetching forecast: {e}")
 
     def _send_history(self, chat_id: str) -> None:
-        with self._lock:
-            store = self._hist_store
-        if store is None:
-            self._send(chat_id, "No history data yet — start the advisor first.")
-            return
-        from .tou import rate_at
-        now        = datetime.now()
-        week_end   = now.date()
-        week_start = week_end - timedelta(days=6)
-        readings   = store.weekly_readings(
-            week_start.strftime("%Y-%m-%d"),
-            week_end.strftime("%Y-%m-%d"),
-        )
-        if not readings:
-            self._send(chat_id, "No history data for the past 7 days yet.")
-            return
-        from .history import integrate_intervals
-        import_cost   = 0.0
-        export_credit = 0.0
-        solar_kwh     = 0.0
-        for dt, hours, grid_kw, _home_kw, s_kw in integrate_intervals(readings):
-            r = rate_at(dt)
-            if grid_kw > 0:
-                import_cost   += grid_kw * hours * r
-            elif grid_kw < 0:
-                export_credit += -grid_kw * hours * r
-            solar_kwh += s_kw * hours
-        from .tou import base_service_cost
-        base_fee   = base_service_cost(7)
-        net        = import_cost - export_credit + base_fee
-        week_label = f"{week_start.strftime('%b %-d')}–{week_end.strftime('%b %-d')}"
-        self._send(chat_id,
-            f"📊 7-Day Energy — {week_label}\n"
-            f"Solar generated:     {solar_kwh:.1f} kWh\n"
-            f"Grid import cost:    ${import_cost:.2f}\n"
-            f"Grid export credit:  ${export_credit:.2f}\n"
-            f"Base service:        ${base_fee:.2f}\n"
-            f"Net cost:            ${net:.2f}"
-        )
+        try:
+            from pathlib import Path
+            from .history import HistoryStore, integrate_intervals
+            from .tou import rate_at, base_service_cost
+            db_path = Path(getattr(self._cfg, "output_dir", "output")) / "history.db"
+            if not db_path.exists():
+                self._send(chat_id, "No history database yet — has the advisor run at least once?")
+                return
+            now        = datetime.now()
+            week_end   = now.date()
+            week_start = week_end - timedelta(days=6)
+            with HistoryStore(db_path) as store:
+                readings = store.weekly_readings(
+                    week_start.strftime("%Y-%m-%d"),
+                    week_end.strftime("%Y-%m-%d"),
+                )
+                if not readings:
+                    self._send(chat_id, "No history data for the past 7 days yet.")
+                    return
+                import_cost   = 0.0
+                export_credit = 0.0
+                solar_kwh     = 0.0
+                for dt, hours, grid_kw, _home_kw, s_kw in integrate_intervals(readings):
+                    r = rate_at(dt)
+                    if grid_kw > 0:
+                        import_cost   += grid_kw * hours * r
+                    elif grid_kw < 0:
+                        export_credit += -grid_kw * hours * r
+                    solar_kwh += s_kw * hours
+            base_fee   = base_service_cost(7)
+            net        = import_cost - export_credit + base_fee
+            week_label = f"{week_start.strftime('%b %-d')}–{week_end.strftime('%b %-d')}"
+            self._send(chat_id,
+                f"📊 <b>7-Day Energy</b> — {week_label}\n"
+                f"Solar generated:     <b>{solar_kwh:.1f} kWh</b>\n"
+                f"Grid import cost:    <b>${import_cost:.2f}</b>\n"
+                f"Grid export credit:  <b>${export_credit:.2f}</b>\n"
+                f"Base service:        ${base_fee:.2f}\n"
+                f"Net cost:            <b>${net:.2f}</b>"
+            )
+        except Exception as e:
+            logger.warning("_send_history error: %s", e)
+            self._send(chat_id, f"Error fetching history: {e}")
 
     def _send_bill(self, chat_id: str) -> None:
-        with self._lock:
-            store = self._hist_store
-        if store is None:
-            self._send(chat_id, "No history data yet — start the advisor first.")
-            return
-        from .tou import rate_at
-        now         = datetime.now()
-        today       = now.strftime("%Y-%m-%d")
-        cycle_start = (now.date().replace(day=1) - timedelta(days=1)).replace(day=20)
-        days_so_far = (now.date() - cycle_start).days
-        if days_so_far < 1:
-            self._send(chat_id, "Billing cycle just started — not enough data yet.")
-            return
-        readings = store.weekly_readings(cycle_start.strftime("%Y-%m-%d"), today)
-        if not readings:
-            self._send(chat_id, "No readings for current billing cycle yet.")
-            return
-        from .history import integrate_intervals
-        import_cost   = 0.0
-        export_credit = 0.0
-        for dt, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(readings):
-            r = rate_at(dt)
-            if grid_kw > 0:
-                import_cost   += grid_kw * hours * r
-            elif grid_kw < 0:
-                export_credit += -grid_kw * hours * r
-        from .tou import base_service_cost
-        base_actual   = base_service_cost(days_so_far)
-        net_actual    = import_cost - export_credit + base_actual
-        daily_net     = net_actual / days_so_far
-        projected_net = daily_net * 30
-        projected_imp = import_cost / days_so_far * 30
-        projected_exp = export_credit / days_so_far * 30
-        projected_base = base_service_cost(30)
-        cycle_label   = f"{cycle_start.strftime('%b %-d')} – {now.date().strftime('%b %-d')}"
-        self._send(chat_id,
-            f"💡 Billing Cycle — {cycle_label} ({days_so_far} days)\n"
-            f"Grid import:  ${import_cost:.2f}\n"
-            f"Grid export:  ${export_credit:.2f}\n"
-            f"Base service: ${base_actual:.2f}\n"
-            f"Net so far:   ${net_actual:.2f}\n\n"
-            f"Projected full cycle (~30 days):\n"
-            f"  Import:  ${projected_imp:.2f}\n"
-            f"  Export:  ${projected_exp:.2f}\n"
-            f"  Base:    ${projected_base:.2f}\n"
-            f"  Net:     ${projected_net:.2f}  (${daily_net:.2f}/day avg)"
-        )
+        try:
+            from pathlib import Path
+            from .history import HistoryStore, integrate_intervals
+            from .tou import rate_at, base_service_cost
+            db_path = Path(getattr(self._cfg, "output_dir", "output")) / "history.db"
+            if not db_path.exists():
+                self._send(chat_id, "No history database yet — has the advisor run at least once?")
+                return
+            now         = datetime.now()
+            today       = now.strftime("%Y-%m-%d")
+            cycle_start = (now.date().replace(day=1) - timedelta(days=1)).replace(day=20)
+            days_so_far = (now.date() - cycle_start).days
+            if days_so_far < 1:
+                self._send(chat_id, "Billing cycle just started — not enough data yet.")
+                return
+            with HistoryStore(db_path) as store:
+                readings = store.weekly_readings(cycle_start.strftime("%Y-%m-%d"), today)
+            if not readings:
+                self._send(chat_id, "No readings for current billing cycle yet.")
+                return
+            import_cost   = 0.0
+            export_credit = 0.0
+            for dt, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(readings):
+                r = rate_at(dt)
+                if grid_kw > 0:
+                    import_cost   += grid_kw * hours * r
+                elif grid_kw < 0:
+                    export_credit += -grid_kw * hours * r
+            base_actual   = base_service_cost(days_so_far)
+            net_actual    = import_cost - export_credit + base_actual
+            daily_net     = net_actual / days_so_far
+            projected_net = daily_net * 30
+            projected_imp = import_cost / days_so_far * 30
+            projected_exp = export_credit / days_so_far * 30
+            projected_base = base_service_cost(30)
+            cycle_label   = f"{cycle_start.strftime('%b %-d')} – {now.date().strftime('%b %-d')}"
+            self._send(chat_id,
+                f"💡 <b>Billing Cycle</b> — {cycle_label} ({days_so_far} days)\n"
+                f"Grid import:  ${import_cost:.2f}\n"
+                f"Grid export:  ${export_credit:.2f}\n"
+                f"Base service: ${base_actual:.2f}\n"
+                f"Net so far:   <b>${net_actual:.2f}</b>\n\n"
+                f"Projected full cycle (~30 days):\n"
+                f"  Import:  ${projected_imp:.2f}\n"
+                f"  Export:  ${projected_exp:.2f}\n"
+                f"  Base:    ${projected_base:.2f}\n"
+                f"  Net:     <b>${projected_net:.2f}</b>  (${daily_net:.2f}/day avg)"
+            )
+        except Exception as e:
+            logger.warning("_send_bill error: %s", e)
+            self._send(chat_id, f"Error fetching billing data: {e}")
 
     def _send_tip(self, chat_id: str) -> None:
-        with self._lock:
-            stats   = self._stats
-            outlook = self._outlook
-        if stats is None:
-            self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
-            return
-        from .tou import TouPeriod, period_at, on_peak_window, rate_at
-        now    = datetime.now()
-        c      = stats.current
-        soc    = c.battery_soc_pct
-        solar  = c.solar_production_kw
-        grid   = c.grid_use_kw
-        period = period_at(now)
-        rate   = rate_at(now)
-        peak_start, _ = on_peak_window(now)
-        secs_to_peak  = (peak_start - now).total_seconds()
-        mins_to_peak  = int(secs_to_peak / 60) if secs_to_peak > 0 else 0
+        try:
+            with self._lock:
+                stats   = self._stats
+                outlook = self._outlook
+            if stats is None:
+                self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+                return
+            from .tou import TouPeriod
+            now    = datetime.now()
+            c      = stats.current
+            soc    = c.battery_soc_pct
+            solar  = c.solar_production_kw
+            grid   = c.grid_use_kw
+            period = period_at(now)
+            rate   = rate_at(now)
+            peak_start, _ = on_peak_window(now)
+            secs_to_peak  = (peak_start - now).total_seconds()
+            mins_to_peak  = int(secs_to_peak / 60) if secs_to_peak > 0 else 0
 
-        if period == TouPeriod.ON_PEAK and grid > 0.5:
-            msg = (f"⚠️ Importing {grid:.1f} kW during on-peak (${rate:.3f}/kWh).\n"
-                   f"Battery at {soc:.0f}% — reduce non-essential loads if possible.")
-        elif period == TouPeriod.ON_PEAK and soc < 20:
-            msg = (f"🔴 Battery critical ({soc:.0f}%) during peak.\n"
-                   f"Shed non-essential loads to extend backup duration.")
-        elif period == TouPeriod.ON_PEAK and soc >= 80:
-            msg = (f"🟢 Well positioned for on-peak — {soc:.0f}% SoC, "
-                   f"solar {solar:.1f} kW. No action needed.")
-        elif period in (TouPeriod.OFF_PEAK, TouPeriod.SUPER_OFF_PEAK) and soc < 30 and 0 < mins_to_peak < 120:
-            msg = (f"🟡 Battery at {soc:.0f}% with on-peak in {mins_to_peak // 60}h {mins_to_peak % 60}m.\n"
-                   f"Switch to Emergency Backup now to charge before 4 pm.")
-        elif period == TouPeriod.SUPER_OFF_PEAK and soc < 50 and solar < 1.0:
-            msg = (f"💡 Super off-peak now (cheapest rate: ${rate:.3f}/kWh).\n"
-                   f"Battery at {soc:.0f}%, solar low — good time for Emergency Backup.")
-        elif solar > 3.0 and soc >= 95:
-            msg = (f"🌞 Solar producing {solar:.1f} kW and battery full ({soc:.0f}%).\n"
-                   f"Self-Consumption mode is optimal — excess going to grid.")
-        else:
-            msg = (f"✅ All looks good — {soc:.0f}% SoC, {solar:.1f} kW solar, "
-                   f"grid {grid:+.1f} kW ({period.value.replace('_', ' ')}).")
-        self._send(chat_id, msg)
+            if period == TouPeriod.ON_PEAK and grid > 0.5:
+                msg = (f"⚠️ Importing <b>{grid:.1f} kW</b> during on-peak (${rate:.3f}/kWh).\n"
+                       f"Battery at <b>{soc:.0f}%</b> — reduce non-essential loads if possible.")
+            elif period == TouPeriod.ON_PEAK and soc < 20:
+                msg = (f"🔴 Battery critical (<b>{soc:.0f}%</b>) during peak.\n"
+                       f"Shed non-essential loads to extend backup duration.")
+            elif period == TouPeriod.ON_PEAK and soc >= 80:
+                msg = (f"🟢 Well positioned for on-peak — <b>{soc:.0f}% SoC</b>, "
+                       f"solar {solar:.1f} kW. No action needed.")
+            elif period in (TouPeriod.OFF_PEAK, TouPeriod.SUPER_OFF_PEAK) and soc < 30 and 0 < mins_to_peak < 120:
+                msg = (f"🟡 Battery at <b>{soc:.0f}%</b> with on-peak in {mins_to_peak // 60}h {mins_to_peak % 60}m.\n"
+                       f"Switch to Emergency Backup now to charge before 4 pm.")
+            elif period == TouPeriod.SUPER_OFF_PEAK and soc < 50 and solar < 1.0:
+                msg = (f"💡 Super off-peak now (cheapest rate: ${rate:.3f}/kWh).\n"
+                       f"Battery at <b>{soc:.0f}%</b>, solar low — good time for Emergency Backup.")
+            elif solar > 3.0 and soc >= 95:
+                msg = (f"🌞 Solar producing <b>{solar:.1f} kW</b> and battery full ({soc:.0f}%).\n"
+                       f"Self-Consumption mode is optimal — excess going to grid.")
+            else:
+                msg = (f"✅ All looks good — <b>{soc:.0f}% SoC</b>, {solar:.1f} kW solar, "
+                       f"grid {grid:+.1f} kW ({period.value.replace('_', ' ')}).")
+            self._send(chat_id, msg)
+        except Exception as e:
+            logger.warning("_send_tip error: %s", e)
+            self._send(chat_id, f"Error generating tip: {e}")
 
     def _handle(self, chat_id: str, text: str) -> None:
         try:
@@ -478,7 +517,7 @@ class TelegramChatBot:
 
     def _send(self, chat_id: str, text: str) -> None:
         url  = f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}/sendMessage"
-        data = json.dumps({"chat_id": chat_id, "text": text}).encode()
+        data = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode()
         req  = Request(url, data=data, headers={"Content-Type": "application/json"})
         try:
             urlopen(req, timeout=10)

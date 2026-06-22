@@ -132,25 +132,6 @@ class AccountClient:
             return self._get(path, params)
         return js
 
-    def _post_json(self, path: str, payload: Any, params: dict | None = None) -> Any:
-        self._ensure_token()
-        url = API_BASE + path
-        if params:
-            params = {**params, "gatewayId": self._gateway_for_params, "lang": "en_US"}
-        resp = self.session.post(
-            url,
-            params=params,
-            headers={"loginToken": self._token, "Content-Type": "application/json"},
-            data=json.dumps(payload) if not isinstance(payload, (str, bytes)) else payload,
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        js = resp.json()
-        if js.get("code") == 401:
-            self.login()
-            return self._post_json(path, payload, params)
-        return js
-
     # -------------------------------------------------------------- #
     # MQTT wrapper (real-time data)                                    #
     # -------------------------------------------------------------- #

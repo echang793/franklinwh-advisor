@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import smtplib
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from email.mime.text import MIMEText
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import requests
 
 from .advisor import Recommendation
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +108,7 @@ def notify_telegram(body: str, bot_token: str, chat_id: str) -> None:
         try:
             r = requests.post(
                 url,
-                json={"chat_id": chat_id, "text": body},
+                json={"chat_id": chat_id, "text": body, "parse_mode": "HTML"},
                 timeout=10,
             )
             if r.ok:

@@ -3,8 +3,6 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Optional
-
 import requests
 
 logger = logging.getLogger(__name__)
@@ -24,7 +22,7 @@ class GeoLocation:
     country: str
 
 
-def geocode(city: str, timeout: int = 10) -> Optional[GeoLocation]:
+def geocode(city: str, timeout: int = 10) -> GeoLocation | None:
     """Look up lat/lon for a city name. Returns None if not found."""
     resp = requests.get(GEOCODING_URL, params={
         "name": city, "count": 1, "language": "en", "format": "json",
@@ -56,8 +54,8 @@ class HourlyForecast:
 
     @property
     def panel_temp_c(self) -> float:
-        """NOCT model: panel runs ~25°C above ambient."""
-        return self.temp_c + 25.0
+        """NOCT model: panel runs ~20°C above ambient (conservative; well-ventilated roof mount)."""
+        return self.temp_c + 20.0
 
 
 @dataclass
