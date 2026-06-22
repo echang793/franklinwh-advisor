@@ -143,6 +143,14 @@ class HistoryStore:
 
     # ---------------------------------------------------------------- #
 
+    def slot_counts(self) -> dict[tuple[int, int], int]:
+        """Number of readings per (day_of_week, hour_of_day) slot."""
+        rows = self._conn.execute(
+            "SELECT day_of_week, hour_of_day, COUNT(*) FROM readings "
+            "GROUP BY day_of_week, hour_of_day"
+        ).fetchall()
+        return {(int(r[0]), int(r[1])): int(r[2]) for r in rows}
+
     def load_profile(self) -> LoadProfile:
         """Return average home load kW keyed by (day_of_week, hour_of_day)."""
         rows = self._conn.execute(
@@ -363,6 +371,42 @@ class HistoryStore:
         if prev is not None:
             _flush(prev[3])
         return samples
+
+    def total_discharge_kwh(self, start_date: str | None = None, end_date: str | None = None) -> float:
+        """Integrate total battery discharge kWh via trapezoidal rule over stored readings.
+
+        Returns energy drawn from the battery (positive value).  Caps time gaps
+        at 1 hour to avoid counting idle periods as discharge.
+        """
+        where = "WHERE battery_use_kw IS NOT NULL"
+        params: list[str] = []
+        if start_date:
+            where += " AND substr(timestamp,1,10) >= ?"
+            params.append(start_date)
+        if end_date:
+            where += " AND substr(timestamp,1,10) <= ?"
+            params.append(end_date)
+        rows = self._conn.execute(
+            f"SELECT timestamp, battery_use_kw FROM readings {where} ORDER BY timestamp",
+            params,
+        ).fetchall()
+        total = 0.0
+        for i in range(1, len(rows)):
+            try:
+                t0 = datetime.fromisoformat(rows[i - 1][0])
+                t1 = datetime.fromisoformat(rows[i][0])
+            except (ValueError, TypeError):
+                continue
+            hours = min(1.0, (t1 - t0).total_seconds() / 3600)
+            avg_kw = (rows[i - 1][1] + rows[i][1]) / 2
+            if avg_kw < 0:
+                total += -avg_kw * hours
+        return round(total, 1)
+
+    def first_reading_date(self) -> str | None:
+        """Return the earliest recorded timestamp, or None if no data."""
+        row = self._conn.execute("SELECT MIN(timestamp) FROM readings").fetchone()
+        return row[0][:10] if row and row[0] else None
 
     def close(self) -> None:
         self._conn.close()

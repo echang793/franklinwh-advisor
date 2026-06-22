@@ -28,7 +28,9 @@ from .history import HistoryStore, integrate_intervals
 from .notifier import (notify_imessage, notify_imessage_text, notify_log,
                        notify_macos, notify_telegram, fetch_telegram_chat_id, rec_to_text)
 from .predictor import predict
-from .tou import TouPeriod, base_service_cost, cheap_charge_deadline, period_at, rate_at
+from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
+                  export_rate_at, peak_export_hour, period_at, rate_at,
+                  rates_are_stale)
 from .scrapers import FAQScraper, ProductsScraper, SupportScraper
 from .weather import fetch_nws_storm_alerts, fetch_solar_outlook, geocode
 
@@ -101,12 +103,16 @@ def _save_last_mode(out: Path, mode: str) -> None:
 
 
 def _get_system_peak_kw(state: dict) -> float | None:
-    """Return calibrated system peak kW (median of sunny-day samples), or None if < 3 samples."""
+    """Return calibrated system peak kW (P75 of sunny-day samples), or None if < 3 samples.
+
+    P75 balances the two failure modes: P50 under-predicts on clear summer days,
+    P85 over-predicts because cloud-edge enhancement spikes inflate the top decile.
+    """
     samples = state.get("solar_cal_samples", [])
     if len(samples) < 3:
         return None
     s = sorted(samples)
-    return s[int(len(s) * 0.85)]  # P85 — median/P75 underestimate peak due to low-GHI transition noise
+    return s[int(len(s) * 0.75)]
 
 
 _GHI_CLOUDY_THRESHOLD = 300  # W/m² avg over 12h — below this = dim/cloudy day
@@ -206,25 +212,7 @@ def _alert_enabled(cfg: Config, name: str) -> bool:
         return True
     return name not in (cfg.disabled_alerts or [])
 
-# NEM evening export compensation ($/kWh) by month → {hour: rate}.
-# Only August and September have boosted evening export worth arbitraging;
-# every other month the export rate stays far below the on-peak import rate,
-# so the arbitrage advisor is inert outside these two months.
-# (Source: user's SDGE export schedule.)
-_EXPORT_RATES: dict[int, dict[int, float]] = {
-    8: {17: 0.907, 18: 1.022, 19: 0.920, 20: 0.996, 21: 0.895, 22: 0.885},
-    9: {17: 0.253, 18: 0.595, 19: 0.673, 20: 0.380, 21: 0.154, 22: 0.154},
-}
 
-
-def _peak_export_hour(month: int) -> tuple[int, float] | None:
-    """Highest-value export (hour, $/kWh) for the month, or None if not a
-    boosted export month. Aug → (18, 1.022), Sep → (19, 0.673)."""
-    rates = _EXPORT_RATES.get(month)
-    if not rates:
-        return None
-    hour = max(rates, key=rates.__getitem__)
-    return hour, rates[hour]
 
 
 def _precharge_plan(now: datetime, soc: float, tmrw_solar_kwh: float,
@@ -316,6 +304,43 @@ def _calibrate_solar(state: dict, solar_kw: float, outlook) -> None:
         state["solar_cal_samples"] = samples[-50:]
 
 
+def _calibrate_solar_hourly(state: dict, solar_kw: float, outlook, now: datetime) -> None:
+    """Track per-hour (actual / GHI-predicted) ratio for adaptive bias correction.
+
+    Accumulates rolling 30-sample median per clock-hour so the predictor learns
+    systematic patterns — morning shade, afternoon heat, inverter clipping — and
+    corrects for them automatically over time.
+    """
+    if not (outlook and solar_kw >= 0.2):
+        return
+    system_peak = _get_system_peak_kw(state)
+    if system_peak is None:
+        return
+    current_ghi = outlook.avg_ghi(1)
+    if current_ghi < 100:
+        return
+    predicted_kw = (current_ghi / 1000.0) * system_peak
+    if predicted_kw < 0.1:
+        return
+    ratio = round(solar_kw / predicted_kw, 3)
+    if 0.3 <= ratio <= 2.0:
+        key = f"solar_bias_h{now.hour}"
+        samples = state.get(key, [])
+        samples.append(ratio)
+        state[key] = samples[-30:]
+
+
+def _get_hourly_bias(state: dict) -> dict[int, float]:
+    """Return per-hour learned solar correction factors (median of samples, min 5)."""
+    import statistics
+    bias: dict[int, float] = {}
+    for h in range(24):
+        samples = state.get(f"solar_bias_h{h}", [])
+        if len(samples) >= 5:
+            bias[h] = statistics.median(samples)
+    return bias
+
+
 def _alert_morning_preview(
     state: dict, today: str, now: datetime, c,
     outlook, usage_forecast, store, cfg: Config | None = None,
@@ -337,13 +362,17 @@ def _alert_morning_preview(
         yesterday_ghi = state.get(f"predicted_avg_ghi_{yesterday}", 400.0)
         cloudy_day    = yesterday_ghi < _GHI_CLOUDY_THRESHOLD
         min_predicted = 0.5 if cloudy_day else 3.0
+        # Skip days where actual was less than 65% of prediction — indicates unexpected
+        # cloud cover that the GHI forecast missed entirely (not a model calibration signal).
+        _PR_MIN = 0.65
         if yest_pred >= min_predicted and yest_actual >= 0.3:
             ratio  = round(yest_actual / yest_pred, 3)
-            bucket = "perf_ratio_cloudy_samples" if cloudy_day else "perf_ratio_samples"
-            pr_samples = state.get(bucket, [])
-            pr_samples.append(ratio)
-            state[bucket] = pr_samples[-10:]  # shorter window — tracks recent accuracy, drops anomalous old days
-            state[f"daily_pr_{yesterday}"] = ratio
+            if ratio >= _PR_MIN:
+                bucket = "perf_ratio_cloudy_samples" if cloudy_day else "perf_ratio_samples"
+                pr_samples = state.get(bucket, [])
+                pr_samples.append(ratio)
+                state[bucket] = pr_samples[-30:]  # rolling 30-day window balances recency with stability
+            state[f"daily_pr_{yesterday}"] = ratio  # always record for accuracy display
             logger.info(
                 "PR update (%s): actual=%.1f predicted=%.1f ratio=%.3f ghi=%.0f",
                 "cloudy" if cloudy_day else "sunny",
@@ -372,7 +401,7 @@ def _alert_morning_preview(
         avg_ghi    = outlook.avg_ghi(12)
         cloudy_day = avg_ghi < _GHI_CLOUDY_THRESHOLD
         perf_ratio = _get_performance_ratio(state, cloudy=cloudy_day)
-        gen_kwh    = round(outlook.today_generation_kwh(system_peak_kw) * perf_ratio, 1)
+        gen_kwh    = round(outlook.today_generation_kwh(system_peak_kw, perf_ratio), 1)
         state[f"predicted_kwh_{today}"]     = gen_kwh
         state[f"predicted_avg_ghi_{today}"] = round(avg_ghi, 1)
 
@@ -525,7 +554,7 @@ def _alert_export_arbitrage(
 
     Advisory only — does not command the inverter.
     """
-    peak = _peak_export_hour(now.month)
+    peak = peak_export_hour(now.month)
     if peak is None:
         return None  # hard month gate — inert outside Aug/Sep
     peak_hour, peak_rate = peak
@@ -626,11 +655,10 @@ def _alert_eod_digest(
         if readings:
             import_cost = export_credit = 0.0
             for dt, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(readings):
-                r = rate_at(dt)
                 if grid_kw > 0:
-                    import_cost   += grid_kw * hours * r
+                    import_cost   += grid_kw * hours * rate_at(dt)
                 elif grid_kw < 0:
-                    export_credit += -grid_kw * hours * r
+                    export_credit += -grid_kw * hours * export_rate_at(dt)
             # Peak coverage is a per-reading count (fraction of 4-9 pm polls with
             # no real grid draw), independent of energy integration.
             peak_total = peak_no_grid = 0
@@ -692,12 +720,11 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
     sop_saved     = 0.0    # super off-peak hours
 
     for dt, hours, grid_kw, home_kw, _solar_kw in integrate_intervals(readings):
-        r      = rate_at(dt)
         period = period_at(dt)
         if grid_kw > 0:
-            import_cost   += grid_kw * hours * r
+            import_cost   += grid_kw * hours * rate_at(dt)
         elif grid_kw < 0:
-            export_credit += -grid_kw * hours * r
+            export_credit += -grid_kw * hours * export_rate_at(dt)
         # Energy served by battery+solar (not drawn from grid) × avoided rate
         batt_solar_kwh = max(0.0, home_kw - max(0.0, grid_kw)) * hours
         if period == TouPeriod.ON_PEAK:
@@ -729,18 +756,61 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
         avg_err = sum(abs(1.0 - pr) * 100 for pr in week_prs) / len(week_prs)
         accuracy_str = f"\nSolar forecast accuracy: ±{avg_err:.1f}% avg ({len(week_prs)} days)"
 
-    # Battery cycle count — read with get (not pop) so the key survives a crash
-    # between here and _save_peak_state; it is zeroed only after the sent marker
-    # is set, keeping the two writes in the same atomic state save.
-    cycles_week  = state.get("batt_cycles_this_week", 0)
-    total_cycles = state.get("batt_cycle_count", 0)
-    cycle_str    = ""
-    if total_cycles > 0 or cycles_week > 0:
-        pct_used = total_cycles / 6000 * 100
-        cycle_str = f"\nBattery cycles: {cycles_week:.1f} this week | {total_cycles:.1f} total ({pct_used:.1f}% of 6000 rated)"
+    # Battery cycle count — computed from discharge throughput in the history DB,
+    # more accurate than the SOC-trough method which only fires when SOC drops below 20%.
+    # Extrapolate backward if the DB doesn't cover the full system lifetime.
+    cycle_str = ""
+    if store is not None:
+        try:
+            discharge_kwh = store.total_discharge_kwh()
+            bat_cap       = cfg.battery_capacity_kwh
+            if bat_cap > 0 and discharge_kwh > 0:
+                db_cycles    = discharge_kwh / bat_cap
+                first_date   = store.first_reading_date()
+                # Estimate cycles for any period before the DB started
+                extra_cycles = 0.0
+                extra_note   = ""
+                if first_date:
+                    db_start    = datetime.strptime(first_date, "%Y-%m-%d")
+                    install_est = db_start  # fallback — no pre-DB data
+                    # Check if state has a known install date; otherwise assume Nov 2024
+                    install_str = state.get("install_date")
+                    if install_str:
+                        try:
+                            install_est = datetime.strptime(install_str, "%Y-%m-%d")
+                        except ValueError:
+                            pass
+                    else:
+                        # Default to Nov 1 2024 unless DB starts earlier
+                        default_install = datetime(2024, 11, 1)
+                        install_est     = min(db_start, default_install)
+                    missing_days = (db_start - install_est).days
+                    if missing_days > 7:
+                        db_days       = max(1, (now.date() - db_start.date()).days)
+                        rate_per_day  = db_cycles / db_days
+                        extra_cycles  = rate_per_day * missing_days
+                        extra_note    = f" (~{extra_cycles:.0f} extrapolated pre-{db_start.strftime('%b %Y')})"
+                total_cycles = db_cycles + extra_cycles
+                pct_used     = total_cycles / 6000 * 100
+                cycles_week  = state.get("batt_cycles_this_week", 0)
+                cycle_str    = (
+                    f"\nBattery cycles: {cycles_week:.1f} this week | "
+                    f"{total_cycles:.0f} total{extra_note} ({pct_used:.1f}% of 6000 rated)"
+                )
+        except Exception as e:
+            logger.debug("Battery cycle throughput calc failed: %s", e)
+            # Fallback to legacy SOC-trough counter
+            total_cycles = state.get("batt_cycle_count", 0)
+            if total_cycles > 0:
+                pct_used  = total_cycles / 6000 * 100
+                cycle_str = f"\nBattery cycles: {total_cycles:.1f} total ({pct_used:.1f}% of 6000 rated)"
+    state["batt_cycles_this_week"] = 0  # reset after sent marker
+
+    stale_note = ""
+    if rates_are_stale():
+        stale_note = "\n⚠️ TOU rates may be outdated (>180 days) — check tou.py."
 
     state["weekly_summary_sent"] = today
-    state["batt_cycles_this_week"] = 0  # reset after sent marker — both go into one atomic save
     logger.info("Weekly TOU summary sent for week ending %s", today)
     return (
         f"📊 FranklinWH Weekly Summary — {week_label}\n\n"
@@ -753,7 +823,7 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
         f"\nEst. savings from battery + solar:\n"
         f"  Peak (4–9 pm):    ${peak_saved:.2f}\n"
         f"  Super off-peak:   ${sop_saved:.2f}\n"
-        f"  Total saved:      ${total_saved:.2f}"
+        f"  Total saved:      ${total_saved:.2f}{stale_note}"
         f"{accuracy_str}{cycle_str}"
     )
 
@@ -792,11 +862,10 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store) -> str
     for dt, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(
         store.weekly_readings(cycle_start.strftime("%Y-%m-%d"), cycle_end.strftime("%Y-%m-%d"))
     ):
-        r = rate_at(dt)
         if grid_kw > 0:
-            import_cost   += grid_kw * hours * r
+            import_cost   += grid_kw * hours * rate_at(dt)
         elif grid_kw < 0:
-            export_credit += -grid_kw * hours * r
+            export_credit += -grid_kw * hours * export_rate_at(dt)
     days       = max(1, (cycle_end - cycle_start).days + 1)
     base_fee   = base_service_cost(days)
     net_cycle  = import_cost - export_credit + base_fee
@@ -1131,11 +1200,10 @@ def _alert_bill_projection(
     import_cost   = 0.0
     export_credit = 0.0
     for dt, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(readings):
-        r = rate_at(dt)
         if grid_kw > 0:
-            import_cost   += grid_kw * hours * r
+            import_cost   += grid_kw * hours * rate_at(dt)
         elif grid_kw < 0:
-            export_credit += -grid_kw * hours * r
+            export_credit += -grid_kw * hours * export_rate_at(dt)
 
     base_actual    = base_service_cost(days_so_far)
     net_actual     = import_cost - export_credit + base_actual
@@ -1284,6 +1352,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
     with _state_lock(out):
         state = _load_peak_state(out)
         _calibrate_solar(state, c.solar_production_kw, outlook)
+        _calibrate_solar_hourly(state, c.solar_production_kw, outlook, now)
         _track_battery_cycles(state, c)
         _candidates = [
             ("morning_preview",   lambda: _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store, cfg)),
@@ -2213,9 +2282,11 @@ def cmd_advise(
                 )
                 perf_ratio     = _get_performance_ratio(_peak_state, cloudy=cloudy_now)
                 avg_temp_c     = outlook.avg_temp_c(24) if outlook else 22.0
+                hourly_bias    = _get_hourly_bias(_peak_state)
                 usage_forecast = (
                     predict(history, 24, outlook=outlook, system_peak_kw=system_peak_kw,
-                            perf_ratio=perf_ratio, avg_temp_c=avg_temp_c)
+                            perf_ratio=perf_ratio, avg_temp_c=avg_temp_c,
+                            hourly_bias=hourly_bias)
                     if history.has_enough_data() else None
                 )
                 rec = recommend(

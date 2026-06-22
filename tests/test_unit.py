@@ -97,10 +97,10 @@ def test_capacity_samples(tmp_path):
 # ── CLI helpers ────────────────────────────────────────────────────────
 
 def test_peak_export_hour():
-    assert cli._peak_export_hour(8) == (18, 1.022)
-    assert cli._peak_export_hour(9) == (19, 0.673)
-    assert cli._peak_export_hour(7) is None
-    assert cli._peak_export_hour(12) is None
+    assert tou.peak_export_hour(8) == (18, 1.022)
+    assert tou.peak_export_hour(9) == (19, 0.673)
+    assert tou.peak_export_hour(7) is None
+    assert tou.peak_export_hour(12) is None
 
 
 def test_alert_enabled():

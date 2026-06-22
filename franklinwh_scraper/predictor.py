@@ -47,6 +47,7 @@ def predict(
     system_peak_kw: float | None = None,
     perf_ratio: float = 1.0,
     avg_temp_c: float = 22.0,
+    hourly_bias: dict[int, float] | None = None,
 ) -> UsageForecast:
     """
     Predict home load and solar production for the next `horizon_hours` hours.
@@ -54,7 +55,9 @@ def predict(
     Uses (day_of_week, hour_of_day) buckets from historical data.
     If outlook + system_peak_kw are provided, solar is weather-adjusted using
     GHI forecast instead of historical averages.
-    Confidence degrades with fewer data points.
+    hourly_bias: per-hour learned correction factors (actual/predicted) that
+    improve accuracy over time as real readings accumulate.
+    Confidence degrades with fewer data points per slot.
     """
     now        = datetime.now()
     season     = _current_season(now.month)
@@ -69,22 +72,31 @@ def predict(
         load_profile  = store.load_profile()
         solar_profile = store.solar_profile()
 
-    # Temperature-load scaling: +2.5% load per °C above 27°C (80°F) models AC draw.
-    # Only applied during waking hours (7am–11pm) when AC actually runs.
-    ac_temp_scale = 1.0 + 0.025 * max(0.0, avg_temp_c - 27.0)
+    slot_counts = store.slot_counts()
+
+    # Temperature-load scaling:
+    # +2.5% per °C above 27°C (AC draw, waking hours only)
+    # +2.0% per °C below 18°C (heat pump / resistive, all hours)
+    ac_temp_scale   = 1.0 + 0.025 * max(0.0, avg_temp_c - 27.0)
+    heat_temp_scale = 1.0 + 0.020 * max(0.0, 18.0 - avg_temp_c)
 
     predictions: list[HourPrediction] = []
 
     for h in range(horizon_hours):
         future = now + timedelta(hours=h)
-        slot = (future.weekday(), future.hour)
+        slot   = (future.weekday(), future.hour)
+        slot_n = slot_counts.get(slot, 0)
 
-        load_kw = load_profile.get(slot)
+        load_kw  = load_profile.get(slot)
+        direct_slot_hit = load_kw is not None
 
         # Weather-adjusted solar: GHI/1000 × system_peak_kw × perf_ratio corrects
         # for systematic GHI model bias learned from actual vs. predicted history.
+        # hourly_bias applies per-hour learned correction on top of perf_ratio.
         if outlook is not None and system_peak_kw is not None:
             solar_kw = max(0.0, outlook.ghi_at(future) / 1000.0 * system_peak_kw * perf_ratio)
+            if hourly_bias and future.hour in hourly_bias:
+                solar_kw *= hourly_bias[future.hour]
         else:
             solar_kw = solar_profile.get(slot, 0.0)
 
@@ -100,14 +112,21 @@ def predict(
                 if load_profile else 0.0
             )
             confidence = "none"
-        elif data_days >= 7:
+        elif not direct_slot_hit:
+            # Fell back to same-hour cross-day average — treat as low regardless of data_days
+            confidence = "low"
+        elif slot_n >= 8 and data_days >= 7:
             confidence = "high"
-        elif data_days >= 3:
+        elif slot_n >= 3 or data_days >= 3:
             confidence = "medium"
         else:
             confidence = "low"
 
-        temp_scale = ac_temp_scale if 7 <= future.hour < 23 else 1.0
+        # AC during waking hours; heating applies all hours
+        if 7 <= future.hour < 23:
+            temp_scale = ac_temp_scale * heat_temp_scale
+        else:
+            temp_scale = heat_temp_scale
         load_kw = load_kw * temp_scale
         predictions.append(HourPrediction(
             dt=future,
