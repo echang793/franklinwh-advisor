@@ -1363,18 +1363,17 @@ def _alert_multiday_cloudy_precharge(
     sp = _get_system_peak_kw(state)
     if sp is None:
         return None
-    from datetime import timedelta as _td
     cloudy = outlook.avg_ghi(48) < _GHI_CLOUDY_THRESHOLD
     if not cloudy:
         return None
     pr = _get_performance_ratio(state, cloudy=True)
     tmrw_kwh     = outlook.tomorrow_generation_kwh(sp, pr)
-    day2_date    = (now + _td(days=2)).date()
+    day2_date    = (now + timedelta(days=2)).date()
     day2_hours   = [h for h in outlook.hours if h.time.date() == day2_date]
+    from franklinwh_scraper.weather import _MIN_EFFICIENCY, _TEMP_COEFF
     day2_kwh = 0.0
     if day2_hours:
         for h in day2_hours:
-            from franklinwh_scraper.weather import _MIN_EFFICIENCY, _TEMP_COEFF
             eff = max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (h.panel_temp_c - 25.0))
             day2_kwh += h.ghi_wm2 / 1000.0 * sp * eff
         day2_kwh = round(day2_kwh * pr, 1)
