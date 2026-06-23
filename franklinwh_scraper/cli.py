@@ -1341,6 +1341,141 @@ def _alert_area_power_outage(state: dict, today: str, now: datetime, c, cfg: Con
     )
 
 
+def _alert_multiday_cloudy_precharge(
+    state: dict, today: str, now: datetime, c, outlook, cfg: Config
+) -> str | None:
+    """Fire when the next 2 days of solar are both poor and battery is below 65%.
+
+    Gives advance notice for multi-day grey stretches so the user can top up
+    during today's super-off-peak window instead of scrambling tomorrow.
+    """
+    if now.hour not in (7, 8, 9):
+        return None
+    week_key = now.strftime("%G-W%V")
+    if state.get("multiday_cloudy_week") == week_key:
+        return None
+    if outlook is None:
+        return None
+
+    soc     = c.battery_soc_pct
+    bat_cap = cfg.battery_capacity_kwh
+
+    sp = _get_system_peak_kw(state)
+    if sp is None:
+        return None
+    from datetime import timedelta as _td
+    cloudy = outlook.avg_ghi(48) < _GHI_CLOUDY_THRESHOLD
+    if not cloudy:
+        return None
+    pr = _get_performance_ratio(state, cloudy=True)
+    tmrw_kwh     = outlook.tomorrow_generation_kwh(sp, pr)
+    day2_date    = (now + _td(days=2)).date()
+    day2_hours   = [h for h in outlook.hours if h.time.date() == day2_date]
+    day2_kwh = 0.0
+    if day2_hours:
+        for h in day2_hours:
+            from franklinwh_scraper.weather import _MIN_EFFICIENCY, _TEMP_COEFF
+            eff = max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (h.panel_temp_c - 25.0))
+            day2_kwh += h.ghi_wm2 / 1000.0 * sp * eff
+        day2_kwh = round(day2_kwh * pr, 1)
+
+    two_day_solar = tmrw_kwh + day2_kwh
+    if two_day_solar >= bat_cap * 0.9 or soc >= 65.0:
+        return None
+
+    sop = rate_at(now.replace(hour=1, minute=0, second=0, microsecond=0))
+    state["multiday_cloudy_week"] = week_key
+    logger.info("Multi-day cloudy pre-charge alert: 2-day solar=%.1f kWh, SoC=%.0f%%",
+                two_day_solar, soc)
+    return (
+        f"☁️ <b>FranklinWH: 2-day cloudy stretch ahead</b>\n"
+        f"Tomorrow: ~{tmrw_kwh:.1f} kWh  |  Day after: ~{day2_kwh:.1f} kWh  "
+        f"(total ~{two_day_solar:.1f} kWh)\n"
+        f"🔋 {_soc_bar(soc)} — battery won't fully recover from solar alone.\n"
+        f"Charge to 80–90% now at super-off-peak (${sop:.2f}/kWh) before rates rise."
+    )
+
+
+def _alert_solar_surplus_overflow(
+    state: dict, today: str, now: datetime, c
+) -> str | None:
+    """Battery ~full before 2 pm super-off-peak ends → advise Time-of-Use export mode.
+
+    Triggers when solar is filling a near-full battery during cheap hours so the
+    user can switch to TOU mode and push surplus to the grid instead of clipping.
+    """
+    if not (10 <= now.hour < 14):
+        return None
+    if state.get("surplus_overflow_date") == today:
+        return None
+    soc = c.battery_soc_pct
+    if soc < 93.0:
+        return None
+    # Battery charging or holding — solar exceeds load
+    if c.battery_use_kw > 0.1 or c.solar_production_kw < c.home_load_kw:
+        return None
+    state["surplus_overflow_date"] = today
+    logger.info("Solar surplus overflow alert: SoC=%.0f%%, solar=%.2f kW", soc, c.solar_production_kw)
+    return (
+        f"☀️ <b>FranklinWH: Battery full — solar surplus available</b>\n"
+        f"🔋 {_soc_bar(soc)}  |  Solar {c.solar_production_kw:.2f} kW  |  "
+        f"Load {c.home_load_kw:.2f} kW\n"
+        f"Time: {now.strftime('%-I:%M %p')} — super-off-peak still active (until 2 pm).\n"
+        f"Consider switching to Time-of-Use mode to export surplus to grid."
+    )
+
+
+def _alert_solar_back_to_baseline(
+    state: dict, today: str, now: datetime
+) -> str | None:
+    """After a solar_degradation alert, confirm when PR recovers back within 3% of baseline."""
+    if now.hour not in (8, 9):
+        return None
+    # Only fire if a degradation alert has previously been sent
+    if not state.get("solar_degradation_alerted_week"):
+        return None
+    if state.get("solar_recovery_alerted_week") == now.strftime("%G-W%V"):
+        return None
+
+    cutoff_30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    cutoff_7  = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    all_pr:    list[float] = []
+    recent_pr: list[float] = []
+    for k, v in state.items():
+        if not k.startswith("daily_pr_"):
+            continue
+        date_str = k[len("daily_pr_"):]
+        if date_str < cutoff_30:
+            continue
+        try:
+            ratio = float(v)
+        except (TypeError, ValueError):
+            continue
+        all_pr.append(ratio)
+        if date_str >= cutoff_7:
+            recent_pr.append(ratio)
+
+    if len(all_pr) < 10 or len(recent_pr) < 4:
+        return None
+
+    def _med(lst: list[float]) -> float:
+        s = sorted(lst); return s[len(s) // 2]
+
+    baseline = _med(all_pr)
+    recent   = _med(recent_pr)
+    if baseline <= 0 or recent < baseline * 0.97:
+        return None  # still degraded or not enough recovery
+
+    week_key = now.strftime("%G-W%V")
+    state["solar_recovery_alerted_week"] = week_key
+    logger.info("Solar back-to-baseline: recent PR=%.3f baseline=%.3f", recent, baseline)
+    return (
+        f"✅ FranklinWH: Solar output back to normal\n"
+        f"7-day performance ratio {recent:.2f} is within 3% of 30-day baseline {baseline:.2f}.\n"
+        f"Previous degradation alert has resolved — panels appear clean and healthy."
+    )
+
+
 def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None, store=None) -> None:
     if not cfg.imessage_phone and not (cfg.telegram_bot_token and cfg.telegram_chat_id):
         return
@@ -1371,14 +1506,17 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("battery_full_cycle",lambda: _alert_battery_full_cycle(state, today, now, c)),
             ("fast_drain",        lambda: _alert_fast_drain(state, today, now, c)),
             ("not_charging",      lambda: _alert_not_charging(state, today, now, c)),
-            ("solar_degradation", lambda: _alert_solar_degradation(state, today, now)),
-            ("capacity_fade",     lambda: _alert_capacity_fade(state, today, now, store)),
-            ("peak_streak",       lambda: _alert_peak_streak(state, today, now)),
-            ("bill_projection",   lambda: _alert_bill_projection(state, today, now, store)),
-            ("heat_wave_prep",    lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),
-            ("storm_prep",        lambda: _alert_storm_prep(state, today, now, c, cfg)),
-            ("ev_charge_window",  lambda: _alert_ev_charge_window(state, today, now, c, cfg)),
-            ("area_power_outage", lambda: _alert_area_power_outage(state, today, now, c, cfg)),
+            ("solar_degradation",    lambda: _alert_solar_degradation(state, today, now)),
+            ("solar_back_to_baseline", lambda: _alert_solar_back_to_baseline(state, today, now)),
+            ("capacity_fade",        lambda: _alert_capacity_fade(state, today, now, store)),
+            ("peak_streak",          lambda: _alert_peak_streak(state, today, now)),
+            ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store)),
+            ("heat_wave_prep",       lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),
+            ("multiday_cloudy_precharge", lambda: _alert_multiday_cloudy_precharge(state, today, now, c, outlook, cfg)),
+            ("solar_surplus_overflow",    lambda: _alert_solar_surplus_overflow(state, today, now, c)),
+            ("storm_prep",           lambda: _alert_storm_prep(state, today, now, c, cfg)),
+            ("ev_charge_window",     lambda: _alert_ev_charge_window(state, today, now, c, cfg)),
+            ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
         ]
         to_send: list[str] = []
         for _name, _fn in _candidates:
@@ -1702,9 +1840,10 @@ def setup() -> None:
         ),
         (
             "Battery health",
-            "Full-charge events, capacity fade, solar degradation, heat wave & storm prep",
-            ["battery_full_cycle", "solar_degradation", "capacity_fade",
-             "peak_streak", "heat_wave_prep", "storm_prep"],
+            "Full-charge events, capacity fade, solar degradation, heat wave & storm prep, surplus export, 2-day cloudy warning",
+            ["battery_full_cycle", "solar_degradation", "solar_back_to_baseline",
+             "capacity_fade", "peak_streak", "heat_wave_prep", "storm_prep",
+             "multiday_cloudy_precharge", "solar_surplus_overflow"],
         ),
     ]
 
