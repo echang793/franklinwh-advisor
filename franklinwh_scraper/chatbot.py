@@ -263,11 +263,12 @@ class TelegramChatBot:
                             daemon=False,
                         ).start()
                         continue
-                    # /until <N> or "time to N%" or "how long until N%" — no AI needed
+                    # /until <N[%]> or natural language "until/time to/reach N%"
                     _um = re.search(
-                        r'/until\s+(\d+)'
-                        r'|(?:time\s+to|until|reach|when.*hit)\s+(\d+)\s*%'
-                        r'|how\s+long.{0,25}(\d+)\s*%',
+                        r'/until\s+(\d+)'          # /until 20
+                        r'|until\s+(\d+)\s*%'      # until 20%
+                        r'|time\s+to\s+(\d+)\s*%'  # time to 80%
+                        r'|reach\s+(\d+)\s*%',     # reach 50%
                         text.lower()
                     )
                     if _um:
