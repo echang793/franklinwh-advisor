@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timedelta
@@ -19,9 +20,32 @@ _MODEL     = "claude-haiku-4-5-20251001"
 
 
 def _soc_bar(pct: float) -> str:
-    """10-block SoC progress bar: ███████░░░ 74%"""
-    filled = round(max(0.0, min(100.0, pct)) / 10)
-    return "█" * filled + "░" * (10 - filled) + f" {pct:.0f}%"
+    """Color-coded 10-block SoC progress bar: 🟢 ████████░░ 85%"""
+    filled    = round(max(0.0, min(100.0, pct)) / 10)
+    indicator = "🟢" if pct >= 60 else ("🟡" if pct >= 30 else "🔴")
+    return f"{indicator} {'█' * filled}{'░' * (10 - filled)} {pct:.0f}%"
+
+def _time_to_pct(
+    current_soc: float, target_pct: float,
+    cap_kwh: float, batt_kw: float,
+) -> float | None:
+    if abs(batt_kw) < 0.1:
+        return None
+    delta_kwh      = (target_pct - current_soc) / 100.0 * cap_kwh
+    rate_kwh_per_h = -batt_kw
+    if rate_kwh_per_h == 0:
+        return None
+    hours = delta_kwh / rate_kwh_per_h
+    return hours if hours > 0 else None
+
+
+def _fmt_hours(hours: float) -> str:
+    h = int(hours)
+    m = round((hours - h) * 60)
+    if m == 60:
+        h += 1; m = 0
+    return f"{h}h {m}m" if h > 0 else f"{m}m"
+
 
 _SYSTEM_PROMPT = """\
 You are an energy assistant for a home with a FranklinWH battery, solar panels, \
@@ -62,14 +86,24 @@ def build_context(stats, history, outlook, cfg) -> str:
             f"{c.grid_use_kw:.2f} kW (exporting)"  if c.grid_use_kw < 0 else
             "0.00 kW"
         )
+        cap = getattr(cfg, "battery_capacity_kwh", 13.6)
+        tte = _time_to_pct(c.battery_soc_pct, 0.0, cap, c.battery_use_kw)
+        ttf = _time_to_pct(c.battery_soc_pct, 100.0, cap, c.battery_use_kw)
+        batt_rate = (f"charging at {abs(c.battery_use_kw):.1f} kW" if c.battery_use_kw < -0.1
+                     else f"discharging at {c.battery_use_kw:.1f} kW" if c.battery_use_kw > 0.1
+                     else "idle")
         lines += [
-            f"  Battery SoC:   {_soc_bar(c.battery_soc_pct)}",
+            f"  Battery SoC:   {_soc_bar(c.battery_soc_pct)} ({batt_rate})",
             f"  Solar now:     {c.solar_production_kw:.2f} kW",
             f"  Home load:     {c.home_load_kw:.2f} kW",
             f"  Grid:          {grid_str}",
             f"  Grid status:   {c.grid_status}",
             f"  Today solar:   {t.solar_kwh:.1f} kWh",
         ]
+        if tte is not None:
+            lines.append(f"  Time to empty: ~{_fmt_hours(tte)}")
+        if ttf is not None:
+            lines.append(f"  Time to full:  ~{_fmt_hours(ttf)}")
 
     period     = period_at(now)
     rate       = rate_at(now)
@@ -174,6 +208,7 @@ class TelegramChatBot:
                             "/bill     — current billing cycle cost + projection\n"
                             "/tip      — best action right now\n"
                             "/modes    — explain battery modes\n"
+                            "/until N  — time to reach N% SoC at current rate\n"
                             "/clear    — reset conversation history"
                         )
                         continue
@@ -225,6 +260,21 @@ class TelegramChatBot:
                         threading.Thread(
                             target=self._send_tip,
                             args=(chat_id,),
+                            daemon=False,
+                        ).start()
+                        continue
+                    # /until <N> or "time to N%" or "how long until N%" — no AI needed
+                    _um = re.search(
+                        r'/until\s+(\d+)'
+                        r'|(?:time\s+to|until|reach|when.*hit)\s+(\d+)\s*%'
+                        r'|how\s+long.{0,25}(\d+)\s*%',
+                        text.lower()
+                    )
+                    if _um:
+                        _tgt = int(next(g for g in _um.groups() if g is not None))
+                        threading.Thread(
+                            target=self._send_until,
+                            args=(chat_id, _tgt),
                             daemon=False,
                         ).start()
                         continue
@@ -514,6 +564,47 @@ class TelegramChatBot:
         history.append({"role": "assistant", "content": reply})
         self._convos[chat_id] = history[-(_MAX_TURNS * 2):]
         return reply
+
+    def _send_until(self, chat_id: str, target_pct: int) -> None:
+        """Respond to /until N — estimated time to reach target SoC at current rate."""
+        try:
+            with self._lock:
+                stats = self._stats
+            if stats is None:
+                self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+                return
+            c   = stats.current
+            cap = getattr(self._cfg, "battery_capacity_kwh", 13.6)
+            soc = c.battery_soc_pct
+            batt_kw = c.battery_use_kw
+            if not (0 <= target_pct <= 100):
+                self._send(chat_id, "Target must be 0–100%.")
+                return
+            hours = _time_to_pct(soc, float(target_pct), cap, batt_kw)
+            if hours is None:
+                if abs(batt_kw) < 0.1:
+                    self._send(chat_id,
+                        f"🔋 Battery is idle ({soc:.0f}% SoC, {batt_kw:+.2f} kW) — can't estimate time to {target_pct}%.")
+                else:
+                    direction = "charging" if batt_kw < 0 else "discharging"
+                    self._send(chat_id,
+                        f"🔋 Battery is {direction} ({soc:.0f}% → {batt_kw:+.1f} kW) — "
+                        f"{target_pct}% is in the wrong direction.")
+                return
+            eta     = datetime.now() + timedelta(hours=hours)
+            eta_str = eta.strftime("%-I:%M %p")
+            rate_str = (f"+{abs(batt_kw):.1f} kW charging" if batt_kw < 0
+                        else f"{batt_kw:.1f} kW discharging")
+            direction = "up to" if target_pct > soc else "down to"
+            self._send(chat_id,
+                f"🔋 Battery at <b>{soc:.0f}%</b> — {direction} <b>{target_pct}%</b>\n"
+                f"Rate: {rate_str}  ·  Cap: {cap:.0f} kWh\n"
+                f"Est: <b>{_fmt_hours(hours)}</b> (~{eta_str})\n"
+                f"<i>Rate based on current load — solar and load changes will affect actual time.</i>"
+            )
+        except Exception as e:
+            logger.warning("_send_until error: %s", e)
+            self._send(chat_id, f"Error: {e}")
 
     def _send(self, chat_id: str, text: str) -> None:
         url  = f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}/sendMessage"

@@ -125,6 +125,34 @@ def _soc_bar(pct: float) -> str:
     return f"{indicator} {'█' * filled}{'░' * (10 - filled)} {pct:.0f}%"
 
 
+def _time_to_pct(
+    current_soc: float, target_pct: float,
+    cap_kwh: float, batt_kw: float,
+) -> float | None:
+    """Hours to reach target_pct at current charge/discharge rate.
+
+    batt_kw > 0 = discharging; batt_kw < 0 = charging.
+    Returns None when idle or target already passed.
+    """
+    if abs(batt_kw) < 0.1:
+        return None
+    delta_kwh      = (target_pct - current_soc) / 100.0 * cap_kwh
+    rate_kwh_per_h = -batt_kw  # positive when charging (SoC rising)
+    if rate_kwh_per_h == 0:
+        return None
+    hours = delta_kwh / rate_kwh_per_h
+    return hours if hours > 0 else None
+
+
+def _fmt_hours(hours: float) -> str:
+    """'2h 14m' or '34m' from a fractional hour count."""
+    h = int(hours)
+    m = round((hours - h) * 60)
+    if m == 60:
+        h += 1; m = 0
+    return f"{h}h {m}m" if h > 0 else f"{m}m"
+
+
 def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
     """Return empirical PR (actual / predicted daily kWh) for sunny or cloudy days.
 
@@ -442,12 +470,23 @@ def _alert_morning_preview(
         solar_est       = "Solar forecast unavailable"
         peak_window_str = ""
 
+    from .tou import on_peak_window as _opw, rate_at as _rat
+    _ps, _pe = _opw(now)
+    if now < _ps:
+        _m = int((_ps - now).total_seconds() / 60)
+        _rate_cdown = f"\n⏰ On-peak starts in {_m // 60}h {_m % 60}m — ${_rat(now.replace(hour=17)):.2f}/kWh"
+    elif now < _pe:
+        _m = int((_pe - now).total_seconds() / 60)
+        _rate_cdown = f"\n⏰ On-peak ends in {_m // 60}h {_m % 60}m"
+    else:
+        _rate_cdown = ""
+
     state["morning_preview_date"] = today
     logger.info("Morning preview alert sent for %s", today)
     return (
         f"☀️ <b>FranklinWH: Good morning!</b>\n"
         f"🔋 {_soc_bar(soc)}  ·  Solar: <b>{solar_kw:.2f} kW</b>\n"
-        f"{solar_est}{peak_window_str}"
+        f"{solar_est}{peak_window_str}{_rate_cdown}"
     )
 
 
@@ -478,7 +517,9 @@ def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c) -> str | None:
         f"🟡 <b>FranklinWH: Battery low at {now.strftime('%-I:%M %p')}</b>\n"
         f"🔋 {_soc_bar(c.battery_soc_pct)} — grid import risk during 4–9 pm peak\n"
         f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW\n"
-        f"Consider switching to Emergency Backup to charge before peak."
+        + (_fmt_hours(_t := _time_to_pct(c.battery_soc_pct, 0.0, _BATTERY_CAPACITY_KWH, c.battery_use_kw))
+           and f"⏱ ~{_fmt_hours(_t)} to empty · " or "")
+        + f"Consider switching to Emergency Backup to charge before peak."
     )
 
 
@@ -694,6 +735,8 @@ def _alert_eod_digest(
         f"<code>Solar:    {t.solar_kwh:.1f} kWh\n"
         f"Grid in:  {t.grid_load_kwh:.1f} kWh\n"
         f"Grid out: {t.grid_export_kwh:.1f} kWh\n"
+        f"Batt chg: {t.battery_charge_kwh:.1f} kWh\n"
+        f"Batt dis: {t.battery_discharge_kwh:.1f} kWh\n"
         f"Home:     {t.home_use_kwh:.1f} kWh</code>{self_suff_str}{peak_cov_str}{tou_str}\n"
         f"<code>─────────────────────</code>\n"
         f"🔋 {_soc_bar(soc)}{backup_str}{soc_6am_str}{solar_delta_str}{precharge_str}"
@@ -929,10 +972,14 @@ def _alert_grid_down(state: dict, today: str, now: datetime, c, cfg: Config) -> 
     state["grid_down_soc"]          = c.battery_soc_pct
     logger.info("Grid-down alert sent for %s", today)
     conservation = _conservation_advice(c.battery_soc_pct, c.home_load_kw, cfg.battery_capacity_kwh)
+    gen_str = (f"\n🔌 Generator: {c.generator_production_kw:.2f} kW running"
+               if c.generator_enabled and c.generator_production_kw > 0.1 else "")
+    tte = _time_to_pct(c.battery_soc_pct, 0.0, cfg.battery_capacity_kwh, c.battery_use_kw)
+    tte_str = f"\n⏱ ~{_fmt_hours(tte)} to empty at current load" if tte is not None else ""
     return (
         f"🔴 <b>FranklinWH: GRID DOWN at {now.strftime('%-I:%M %p')}</b>\n"
         f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Load <b>{c.home_load_kw:.2f} kW</b>\n"
-        f"Solar {c.solar_production_kw:.2f} kW{conservation}"
+        f"Solar {c.solar_production_kw:.2f} kW{gen_str}{tte_str}{conservation}"
     )
 
 
@@ -1022,11 +1069,13 @@ def _alert_fast_drain(state: dict, today: str, now: datetime, c) -> str | None:
                 if drain_rate >= 8.0 and c.battery_soc_pct < 35.0 and state.get("fast_drain_alerted_date") != today:
                     state["fast_drain_alerted_date"] = today
                     logger.info("Fast drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
+                    _tte_fd = _time_to_pct(c.battery_soc_pct, 0.0, _BATTERY_CAPACITY_KWH, c.battery_use_kw)
+                    _tte_fd_s = f"\n⏱ ~{_fmt_hours(_tte_fd)} to empty" if _tte_fd is not None else ""
                     body = (
                         f"⚡ <b>FranklinWH: Battery draining fast — {drain_rate:.0f}%/hr</b>\n"
                         f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Load <b>{c.home_load_kw:.2f} kW</b>  ·  "
                         f"Solar {c.solar_production_kw:.2f} kW\n"
-                        f"Time: {now.strftime('%-I:%M %p')}"
+                        f"Time: {now.strftime('%-I:%M %p')}{_tte_fd_s}"
                     )
         except (ValueError, TypeError):
             pass
