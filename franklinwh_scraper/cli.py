@@ -119,9 +119,10 @@ _GHI_CLOUDY_THRESHOLD = 300  # W/m² avg over 12h — below this = dim/cloudy da
 
 
 def _soc_bar(pct: float) -> str:
-    """10-block SoC progress bar: ███████░░░ 74%"""
-    filled = round(max(0.0, min(100.0, pct)) / 10)
-    return "█" * filled + "░" * (10 - filled) + f" {pct:.0f}%"
+    """10-block SoC progress bar with color indicator: 🟢 ████████░░ 74%"""
+    filled    = round(max(0.0, min(100.0, pct)) / 10)
+    indicator = "🟢" if pct >= 60 else ("🟡" if pct >= 30 else "🔴")
+    return f"{indicator} {'█' * filled}{'░' * (10 - filled)} {pct:.0f}%"
 
 
 def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
@@ -445,7 +446,7 @@ def _alert_morning_preview(
     logger.info("Morning preview alert sent for %s", today)
     return (
         f"☀️ <b>FranklinWH: Good morning!</b>\n"
-        f"🔋 {_soc_bar(soc)}  |  Solar: <b>{solar_kw:.2f} kW</b>\n"
+        f"🔋 {_soc_bar(soc)}  ·  Solar: <b>{solar_kw:.2f} kW</b>\n"
         f"{solar_est}{peak_window_str}"
     )
 
@@ -459,8 +460,8 @@ def _alert_grid_import(state: dict, today: str, now: datetime, c) -> str | None:
     logger.info("Peak grid-import alert sent for %s", today)
     return (
         f"⚠️ <b>FranklinWH: Grid import during peak (4–9 pm)</b>\n"
-        f"🔋 {_soc_bar(c.battery_soc_pct)}  |  Grid <b>+{c.grid_use_kw:.2f} kW</b>  |  "
-        f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW\n"
+        f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Grid <b>+{c.grid_use_kw:.2f} kW</b>  ·  "
+        f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW\n"
         f"Time: {now.strftime('%-I:%M %p')}"
     )
 
@@ -476,7 +477,7 @@ def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c) -> str | None:
     return (
         f"🟡 <b>FranklinWH: Battery low at {now.strftime('%-I:%M %p')}</b>\n"
         f"🔋 {_soc_bar(c.battery_soc_pct)} — grid import risk during 4–9 pm peak\n"
-        f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW\n"
+        f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW\n"
         f"Consider switching to Emergency Backup to charge before peak."
     )
 
@@ -490,9 +491,9 @@ def _alert_eb_ready(state: dict, today: str, now: datetime, c) -> str | None:
     state["eb_80pct_alerted_date"] = today
     logger.info("EB 80%% SoC alert sent for %s (%.0f%%)", today, c.battery_soc_pct)
     return (
-        f"🟢 FranklinWH: Battery at {c.battery_soc_pct:.0f}% — Emergency Backup target reached\n"
+        f"🟢 <b>FranklinWH: Battery at {c.battery_soc_pct:.0f}% — Emergency Backup target reached</b>\n"
         f"Time: {now.strftime('%-I:%M %p')} — battery ready before 4 pm peak\n"
-        f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW\n"
+        f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW\n"
         f"You can now switch modes if needed."
     )
 
@@ -506,8 +507,8 @@ def _alert_low_morning_solar(state: dict, today: str, now: datetime, c) -> str |
     state["low_solar_morning_date"] = today
     logger.info("Low morning solar alert sent for %s (%.2f kW)", today, c.solar_production_kw)
     return (
-        f"☁️ FranklinWH: Low solar at {now.strftime('%-I:%M %p')} — cloudy day ahead\n"
-        f"Solar {c.solar_production_kw:.2f} kW  |  SoC {c.battery_soc_pct:.0f}%  |  Load {c.home_load_kw:.2f} kW\n"
+        f"☁️ <b>FranklinWH: Low solar at {now.strftime('%-I:%M %p')} — cloudy day ahead</b>\n"
+        f"Solar {c.solar_production_kw:.2f} kW  ·  SoC {c.battery_soc_pct:.0f}%  ·  Load {c.home_load_kw:.2f} kW\n"
         f"Consider conserving battery early — less solar charging expected today."
     )
 
@@ -523,10 +524,10 @@ def _alert_solar_stopped(state: dict, today: str, now: datetime, c) -> str | Non
     state["solar_stopped_date"] = today
     logger.info("Solar stopped alert sent for %s (%.2f→%.2f kW)", today, last_solar, c.solar_production_kw)
     return (
-        f"🔴 FranklinWH: Solar dropped mid-day — possible issue\n"
+        f"🔴 <b>FranklinWH: Solar dropped mid-day — possible issue</b>\n"
         f"Was {last_solar:.2f} kW → now {c.solar_production_kw:.2f} kW "
         f"at {now.strftime('%-I:%M %p')}\n"
-        f"SoC {c.battery_soc_pct:.0f}%  |  Check inverter or cloud cover."
+        f"SoC {c.battery_soc_pct:.0f}%  ·  Check inverter or cloud cover."
     )
 
 
@@ -539,9 +540,9 @@ def _alert_low_noon_soc(state: dict, today: str, now: datetime, c) -> str | None
     state["low_noon_soc_date"] = today
     logger.info("Low noon SoC alert sent for %s (%.0f%%)", today, c.battery_soc_pct)
     return (
-        f"🟡 FranklinWH: Battery still low at noon — only {c.battery_soc_pct:.0f}% SoC\n"
+        f"🟡 <b>FranklinWH: Battery still low at noon — only {c.battery_soc_pct:.0f}% SoC</b>\n"
         f"Solar {c.solar_production_kw:.2f} kW available but battery hasn't recovered\n"
-        f"Time: {now.strftime('%-I:%M %p')}  |  Load {c.home_load_kw:.2f} kW\n"
+        f"Time: {now.strftime('%-I:%M %p')}  ·  Load {c.home_load_kw:.2f} kW\n"
         f"Check battery mode — may need manual intervention."
     )
 
@@ -590,7 +591,7 @@ def _alert_export_arbitrage(
     logger.info("Export arbitrage alert: %.1f kWh @ $%.3f = $%.2f at %s",
                 exportable_kwh, peak_rate, credit, hour_label)
     return (
-        f"💰 FranklinWH: Peak export opportunity today\n"
+        f"💰 <b>FranklinWH: Peak export opportunity today</b>\n"
         f"Battery {soc:.0f}% — hold and export ~{exportable_kwh:.1f} kWh to grid at "
         f"{hour_label} (${peak_rate:.3f}/kWh) ≈ ${credit:.2f} credit\n"
         f"That's the day's highest export rate this month. Recharge afterward from solar."
@@ -694,6 +695,7 @@ def _alert_eod_digest(
         f"Grid consumed:    {t.grid_load_kwh:.1f} kWh\n"
         f"Grid exported:    {t.grid_export_kwh:.1f} kWh\n"
         f"Home used:        {t.home_use_kwh:.1f} kWh{self_suff_str}{peak_cov_str}{tou_str}\n"
+        f"<code>─────────────────────</code>\n"
         f"🔋 {_soc_bar(soc)}{backup_str}{soc_6am_str}{solar_delta_str}{precharge_str}"
     )
 
@@ -815,15 +817,15 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
     return (
         f"📊 FranklinWH Weekly Summary — {week_label}\n\n"
         f"Grid cost (EV-TOU-5 rates):\n"
-        f"  Imported:     ${import_cost:.2f}\n"
+        f"<code>  Imported:     ${import_cost:.2f}\n"
         f"  Exported:     ${export_credit:.2f} (est.)\n"
         f"  Base service: ${base_fee:.2f}\n"
-        f"  Net cost:     ${net_cost:.2f}\n"
+        f"  Net cost:     ${net_cost:.2f}</code>\n"
         f"{avg_cost_str}"
         f"\nEst. savings from battery + solar:\n"
-        f"  Peak (4–9 pm):    ${peak_saved:.2f}\n"
+        f"<code>  Peak (4–9 pm):    ${peak_saved:.2f}\n"
         f"  Super off-peak:   ${sop_saved:.2f}\n"
-        f"  Total saved:      ${total_saved:.2f}{stale_note}"
+        f"  Total saved:      ${total_saved:.2f}</code>{stale_note}"
         f"{accuracy_str}{cycle_str}"
     )
 
@@ -873,11 +875,11 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store) -> str
     direction  = "net consumer (you owe)" if annual >= 0 else "net exporter (building credit)"
     trueup_str = (
         f"\n\nNEM true-up (est.):\n"
-        f"  Import:       ${import_cost:.2f}\n"
+        f"<code>  Import:       ${import_cost:.2f}\n"
         f"  Export:       ${export_credit:.2f}\n"
         f"  Base service: ${base_fee:.2f}\n"
         f"  Net:          ${net_cycle:+.2f} this cycle\n"
-        f"  ~${annual:+.0f}/yr at this rate — {direction}"
+        f"  ~${annual:+.0f}/yr at this rate — {direction}</code>"
     )
 
     state["monthly_summary_date"] = today
@@ -886,17 +888,17 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store) -> str
         f"📅 FranklinWH Billing Cycle — {cur_label}\n"
         f"vs prior cycle ({prev_label})\n\n"
         f"Solar generated:\n"
-        f"  This:  {cur.solar_kwh:.1f} kWh{_mdelta(cur.solar_kwh, prev.solar_kwh)}\n"
-        f"  Prior: {prev.solar_kwh:.1f} kWh\n\n"
+        f"<code>  This:  {cur.solar_kwh:.1f} kWh{_mdelta(cur.solar_kwh, prev.solar_kwh)}\n"
+        f"  Prior: {prev.solar_kwh:.1f} kWh</code>\n\n"
         f"Grid imported:\n"
-        f"  This:  {cur.grid_import_kwh:.1f} kWh{_mdelta(cur.grid_import_kwh, prev.grid_import_kwh)}\n"
-        f"  Prior: {prev.grid_import_kwh:.1f} kWh\n\n"
+        f"<code>  This:  {cur.grid_import_kwh:.1f} kWh{_mdelta(cur.grid_import_kwh, prev.grid_import_kwh)}\n"
+        f"  Prior: {prev.grid_import_kwh:.1f} kWh</code>\n\n"
         f"Grid exported:\n"
-        f"  This:  {cur.grid_export_kwh:.1f} kWh{_mdelta(cur.grid_export_kwh, prev.grid_export_kwh)}\n"
-        f"  Prior: {prev.grid_export_kwh:.1f} kWh\n\n"
+        f"<code>  This:  {cur.grid_export_kwh:.1f} kWh{_mdelta(cur.grid_export_kwh, prev.grid_export_kwh)}\n"
+        f"  Prior: {prev.grid_export_kwh:.1f} kWh</code>\n\n"
         f"Home used:\n"
-        f"  This:  {cur.home_load_kwh:.1f} kWh{_mdelta(cur.home_load_kwh, prev.home_load_kwh)}\n"
-        f"  Prior: {prev.home_load_kwh:.1f} kWh{sparse_note}"
+        f"<code>  This:  {cur.home_load_kwh:.1f} kWh{_mdelta(cur.home_load_kwh, prev.home_load_kwh)}\n"
+        f"  Prior: {prev.home_load_kwh:.1f} kWh</code>{sparse_note}"
         f"{trueup_str}"
     )
 
@@ -930,7 +932,7 @@ def _alert_grid_down(state: dict, today: str, now: datetime, c, cfg: Config) -> 
     conservation = _conservation_advice(c.battery_soc_pct, c.home_load_kw, cfg.battery_capacity_kwh)
     return (
         f"🔴 <b>FranklinWH: GRID DOWN at {now.strftime('%-I:%M %p')}</b>\n"
-        f"🔋 {_soc_bar(c.battery_soc_pct)}  |  Load <b>{c.home_load_kw:.2f} kW</b>\n"
+        f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Load <b>{c.home_load_kw:.2f} kW</b>\n"
         f"Solar {c.solar_production_kw:.2f} kW{conservation}"
     )
 
@@ -952,12 +954,12 @@ def _alert_grid_restored(state: dict, now: datetime, c, cfg: Config) -> str | No
     kwh_used     = round(soc_used / 100 * cfg.battery_capacity_kwh, 1)
     dur_str      = (f"{duration_min / 60:.1f}h" if duration_min >= 60
                     else f"{duration_min:.0f} min")
-    kwh_str      = f"  |  ~{kwh_used:.1f} kWh used from battery" if kwh_used > 0.1 else ""
+    kwh_str      = f"  ·  ~{kwh_used:.1f} kWh used from battery" if kwh_used > 0.1 else ""
     logger.info("Grid-restored alert: outage lasted %s", dur_str)
     return (
         f"🟢 <b>FranklinWH: GRID RESTORED at {now.strftime('%-I:%M %p')}</b>\n"
         f"Outage lasted <b>{dur_str}</b>{kwh_str}\n"
-        f"🔋 {_soc_bar(c.battery_soc_pct)}  |  Solar {c.solar_production_kw:.2f} kW"
+        f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Solar {c.solar_production_kw:.2f} kW"
     )
 
 
@@ -969,7 +971,7 @@ def _alert_battery_full_cycle(state: dict, today: str, now: datetime, c) -> str 
         return (
             f"🔋 FranklinWH: Battery fully charged — {c.battery_soc_pct:.0f}% SoC\n"
             f"Time: {now.strftime('%-I:%M %p')}\n"
-            f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW"
+            f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW"
         )
     if full_state == "watching_for_discharge" and c.battery_soc_pct < 90.0:
         state["full_charge_state"] = "watching_for_full"
@@ -979,7 +981,7 @@ def _alert_battery_full_cycle(state: dict, today: str, now: datetime, c) -> str 
             return (
                 f"🔋 FranklinWH: Battery no longer full — {c.battery_soc_pct:.0f}% SoC\n"
                 f"Time: {now.strftime('%-I:%M %p')}\n"
-                f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW"
+                f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW"
             )
         logger.info("Battery discharged below 90%% — outside 3–7 pm window, suppressed")
     return None
@@ -1023,7 +1025,7 @@ def _alert_fast_drain(state: dict, today: str, now: datetime, c) -> str | None:
                     logger.info("Fast drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
                     body = (
                         f"⚡ <b>FranklinWH: Battery draining fast — {drain_rate:.0f}%/hr</b>\n"
-                        f"🔋 {_soc_bar(c.battery_soc_pct)}  |  Load <b>{c.home_load_kw:.2f} kW</b>  |  "
+                        f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Load <b>{c.home_load_kw:.2f} kW</b>  ·  "
                         f"Solar {c.solar_production_kw:.2f} kW\n"
                         f"Time: {now.strftime('%-I:%M %p')}"
                     )
@@ -1049,9 +1051,9 @@ def _alert_not_charging(state: dict, today: str, now: datetime, c) -> str | None
     state["not_charging_date"] = today
     logger.info("Not-charging alert sent for %s (solar=%.2f kW, load=%.2f kW, batt=%.2f kW)", today, c.solar_production_kw, c.home_load_kw, c.battery_use_kw)
     return (
-        f"⚠️ FranklinWH: Battery not charging despite strong solar\n"
-        f"Solar {c.solar_production_kw:.2f} kW  |  Load {c.home_load_kw:.2f} kW  |  "
-        f"Battery {c.battery_use_kw:+.2f} kW  |  SoC {c.battery_soc_pct:.0f}%\n"
+        f"⚠️ <b>FranklinWH: Battery not charging despite strong solar</b>\n"
+        f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW  ·  "
+        f"Battery {c.battery_use_kw:+.2f} kW  ·  SoC {c.battery_soc_pct:.0f}%\n"
         f"Time: {now.strftime('%-I:%M %p')} — check battery mode or inverter."
     )
 
@@ -1098,7 +1100,7 @@ def _alert_solar_degradation(state: dict, today: str, now: datetime) -> str | No
     logger.info("Solar degradation alert: baseline PR=%.3f recent PR=%.3f drop=%.1f%%",
                 baseline, recent, drop_pct)
     return (
-        f"⚠️ FranklinWH: Solar output trending down\n"
+        f"⚠️ <b>FranklinWH: Solar output trending down</b>\n"
         f"7-day performance ratio: {recent:.2f} vs 30-day baseline {baseline:.2f} "
         f"({drop_pct:.0f}% drop)\n"
         f"This may indicate panel soiling, shading, or inverter efficiency loss.\n"
@@ -1141,7 +1143,7 @@ def _alert_capacity_fade(state: dict, today: str, now: datetime, store) -> str |
     logger.info("Capacity-fade alert: recent %.1f kWh vs baseline %.1f kWh (%.0f%%)",
                 recent_cap, base_cap, fade_pct)
     return (
-        f"🔋 FranklinWH: Possible battery capacity fade\n"
+        f"🔋 <b>FranklinWH: Possible battery capacity fade</b>\n"
         f"Effective usable capacity ~{recent_cap:.1f} kWh recently vs ~{base_cap:.1f} kWh baseline "
         f"({fade_pct:.0f}% lower)\n"
         f"From {len(recent)} recent / {len(base)} baseline discharge runs. "
@@ -1171,7 +1173,7 @@ def _alert_peak_streak(state: dict, today: str, now: datetime) -> str | None:
     logger.info("Peak-coverage streak alert: 3 consecutive days under 50%%")
     lines = "\n".join(f"  {d}: {p:.0f}%" for d, p in reversed(low_days))
     return (
-        f"⚠️ FranklinWH: Battery running short at peak for 3 days in a row\n"
+        f"⚠️ <b>FranklinWH: Battery running short at peak for 3 days in a row</b>\n"
         f"{lines}\n"
         f"Battery may not be reaching 4 pm with enough charge. "
         f"Consider charging earlier or checking whether EB mode is being triggered in time."
@@ -1220,15 +1222,15 @@ def _alert_bill_projection(
     return (
         f"💡 FranklinWH: Billing cycle projection\n"
         f"Cycle so far ({cycle_label}, {days_so_far} days):\n"
-        f"  Grid import:  ${import_cost:.2f}\n"
+        f"<code>  Grid import:  ${import_cost:.2f}\n"
         f"  Grid export:  ${export_credit:.2f}\n"
         f"  Base service: ${base_actual:.2f}\n"
-        f"  Net cost:     ${net_actual:.2f}\n\n"
+        f"  Net cost:     ${net_actual:.2f}</code>\n\n"
         f"Projected full cycle (~30 days):\n"
-        f"  Import:  ${projected_imp:.2f}\n"
+        f"<code>  Import:  ${projected_imp:.2f}\n"
         f"  Export:  ${projected_exp:.2f}\n"
         f"  Base:    ${projected_base:.2f}\n"
-        f"  Net:     ${projected_net:.2f}  (${daily_net:.2f}/day avg)"
+        f"  Net:     ${projected_net:.2f}  (${daily_net:.2f}/day avg)</code>"
     )
 
 
@@ -1255,7 +1257,7 @@ def _alert_heat_wave_prep(state: dict, today: str, now: datetime, c, outlook) ->
         f"Battery at {soc:.0f}% — well positioned. Monitor peak-hour load tomorrow."
     )
     return (
-        f"🌡️ FranklinWH: Heat wave tomorrow — {max_temp_f:.0f}°F forecast\n"
+        f"🌡️ <b>FranklinWH: Heat wave tomorrow — {max_temp_f:.0f}°F forecast</b>\n"
         f"Expect higher AC load and grid risk during 4–9 pm on-peak.\n"
         f"{action}"
     )
@@ -1282,7 +1284,7 @@ def _alert_ev_charge_window(state: dict, today: str, now: datetime, c, cfg: Conf
                      f"vs ${kwh * onp:.2f} on-peak (save ${save:.2f}).")
     logger.info("EV charge window alert sent for %s", today)
     return (
-        f"🔌 FranklinWH: Best EV charging window tonight\n"
+        f"🔌 <b>FranklinWH: Best EV charging window tonight</b>\n"
         f"Charge midnight–6 AM (super-off-peak, ${sop:.2f}/kWh) — cheapest of the day. "
         f"Avoid 4–9 PM on-peak (${onp:.2f}/kWh).{cost_line}"
     )
@@ -1305,7 +1307,7 @@ def _alert_storm_prep(state: dict, today: str, now: datetime, c, cfg: Config) ->
     state["storm_prep_date"] = today
     logger.info("Storm prep alert: %s", ", ".join(events))
     return (
-        f"⛈️ FranklinWH: Weather alert — {events[0]}\n"
+        f"⛈️ <b>FranklinWH: Weather alert — {events[0]}</b>\n"
         f"Battery at {c.battery_soc_pct:.0f}%. Consider charging to 100% tonight "
         f"(Emergency Backup) so you have full backup if the grid goes down."
     )
@@ -1335,7 +1337,7 @@ def _alert_area_power_outage(state: dict, today: str, now: datetime, c, cfg: Con
     else:
         status_line = "Your grid still reads normal — battery ready if it drops."
     return (
-        f"⚡ Area power outage detected nearby (via {source})\n"
+        f"⚡ <b>Area power outage detected nearby (via {source})</b>\n"
         f"Detected: {ts}\n"
         f"{status_line}{conservation}"
     )
@@ -1388,7 +1390,7 @@ def _alert_multiday_cloudy_precharge(
                 two_day_solar, soc)
     return (
         f"☁️ <b>FranklinWH: 2-day cloudy stretch ahead</b>\n"
-        f"Tomorrow: ~{tmrw_kwh:.1f} kWh  |  Day after: ~{day2_kwh:.1f} kWh  "
+        f"Tomorrow: ~{tmrw_kwh:.1f} kWh  ·  Day after: ~{day2_kwh:.1f} kWh  "
         f"(total ~{two_day_solar:.1f} kWh)\n"
         f"🔋 {_soc_bar(soc)} — battery won't fully recover from solar alone.\n"
         f"Charge to 80–90% now at super-off-peak (${sop:.2f}/kWh) before rates rise."
@@ -1417,7 +1419,7 @@ def _alert_solar_surplus_overflow(
     logger.info("Solar surplus overflow alert: SoC=%.0f%%, solar=%.2f kW", soc, c.solar_production_kw)
     return (
         f"☀️ <b>FranklinWH: Battery full — solar surplus available</b>\n"
-        f"🔋 {_soc_bar(soc)}  |  Solar {c.solar_production_kw:.2f} kW  |  "
+        f"🔋 {_soc_bar(soc)}  ·  Solar {c.solar_production_kw:.2f} kW  ·  "
         f"Load {c.home_load_kw:.2f} kW\n"
         f"Time: {now.strftime('%-I:%M %p')} — super-off-peak still active (until 2 pm).\n"
         f"Consider switching to Time-of-Use mode to export surplus to grid."
@@ -1469,7 +1471,7 @@ def _alert_solar_back_to_baseline(
     state["solar_recovery_alerted_week"] = week_key
     logger.info("Solar back-to-baseline: recent PR=%.3f baseline=%.3f", recent, baseline)
     return (
-        f"✅ FranklinWH: Solar output back to normal\n"
+        f"✅ <b>FranklinWH: Solar output back to normal</b>\n"
         f"7-day performance ratio {recent:.2f} is within 3% of 30-day baseline {baseline:.2f}.\n"
         f"Previous degradation alert has resolved — panels appear clean and healthy."
     )

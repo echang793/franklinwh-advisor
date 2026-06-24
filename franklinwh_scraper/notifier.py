@@ -30,13 +30,13 @@ def rec_to_text(rec: Recommendation) -> str:
     if rec.needs_action:
         action = rec.mode.value.replace("_", " ").upper()
         return (
-            f"{emoji} FranklinWH: Switch to {action}\n"
+            f"<b>{emoji} FranklinWH: Switch to {action}</b>\n"
             f"{rec.reason}\n"
             f"SoC {rec.details.get('soc_pct', 0):.0f}%  "
             f"Solar {rec.details.get('solar_kw', 0):.1f}kW  "
             f"Grid {rec.details.get('grid_use_kw', 0):+.1f}kW"
         )
-    return f"{emoji} FranklinWH: Battery OK — {rec.reason}"
+    return f"<b>{emoji} FranklinWH: Battery OK</b> — {rec.reason}"
 
 
 def notify_macos(rec: Recommendation) -> None:
