@@ -672,8 +672,8 @@ def _alert_eod_digest(
     if usage_forecast and usage_forecast.hours and usage_forecast.confidence != "none":
         tomorrow_7am  = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
         night_net_kwh = sum(p.net_kw for p in usage_forecast.hours if now <= p.dt < tomorrow_7am)
-        pred_soc_6am  = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
-        soc_6am_str   = f"\n🌅 Predicted SoC @ 7 am: ~{pred_soc_6am:.0f}%"
+        pred_soc_7am  = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
+        soc_6am_str   = f"\n🌅 Predicted SoC @ 7 am: ~{pred_soc_7am:.0f}%"
 
     precharge_str = ""
     if outlook:
