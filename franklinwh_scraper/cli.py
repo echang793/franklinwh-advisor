@@ -1553,7 +1553,6 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("monthly_summary",   lambda: _alert_monthly_summary(state, today, now, store)),
             ("grid_down",         lambda: _alert_grid_down(state, today, now, c, cfg)),
             ("grid_restored",     lambda: _alert_grid_restored(state, now, c, cfg)),
-            ("battery_full_cycle",lambda: _alert_battery_full_cycle(state, today, now, c)),
             ("fast_drain",        lambda: _alert_fast_drain(state, today, now, c)),
             ("not_charging",      lambda: _alert_not_charging(state, today, now, c)),
             ("solar_degradation",    lambda: _alert_solar_degradation(state, today, now)),
@@ -1891,7 +1890,7 @@ def setup() -> None:
         (
             "Battery health",
             "Full-charge events, capacity fade, solar degradation, heat wave & storm prep, surplus export, 2-day cloudy warning",
-            ["battery_full_cycle", "solar_degradation", "solar_back_to_baseline",
+            ["solar_degradation", "solar_back_to_baseline",
              "capacity_fade", "peak_streak", "heat_wave_prep", "storm_prep",
              "multiday_cloudy_precharge", "solar_surplus_overflow"],
         ),
