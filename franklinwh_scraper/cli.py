@@ -410,9 +410,9 @@ def _alert_morning_preview(
         cloudy_samples = state.get("perf_ratio_cloudy_samples", [])
         sunny_samples  = state.get("perf_ratio_samples", [])
         if cloudy_day and len(cloudy_samples) >= 3:
-            pr_note = f"cloudy PR={perf_ratio:.2f}"
+            pr_note = f"cloudy eff={perf_ratio:.2f}"
         elif not cloudy_day and len(sunny_samples) >= 3:
-            pr_note = f"PR={perf_ratio:.2f}"
+            pr_note = f"eff={perf_ratio:.2f}"
         else:
             pr_note = cal_note
         solar_est = f"~{gen_kwh:.1f} kWh predicted ({sky}, {pr_note})"
@@ -435,7 +435,7 @@ def _alert_morning_preview(
             end      = (peak_hrs[-1].time + timedelta(hours=1)).strftime("%-I%p").lower()
             peak_hr  = max(peak_hrs, key=lambda h: h.ghi_wm2)
             peak_at  = peak_hr.time.strftime("%-I%p").lower()
-            peak_window_str = f"\nBest solar: {start}–{end} (peak ~{peak_at})"
+            peak_window_str = f"\n🕐 Best solar: {start}–{end} (peak ~{peak_at})"
         else:
             peak_window_str = ""
     else:
@@ -613,7 +613,7 @@ def _alert_eod_digest(
     backup_str = ""
     if c.home_load_kw > 0.1:
         backup_h   = soc / 100 * bat_cap / c.home_load_kw
-        backup_str = f"\nEst. backup now: ~{backup_h:.1f} hr at current load"
+        backup_str = f"\n⏱ Backup: ~{backup_h:.1f} hr at current load"
 
     solar_delta_str = ""
     predicted_kwh   = state.get(f"predicted_kwh_{today}")
@@ -621,10 +621,10 @@ def _alert_eod_digest(
         delta_kwh = t.solar_kwh - predicted_kwh
         sign      = "+" if delta_kwh >= 0 else ""
         solar_delta_str = (
-            f"\n\nSolar forecast vs actual:\n"
-            f"  Predicted:  {predicted_kwh:.1f} kWh\n"
-            f"  Actual:     {t.solar_kwh:.1f} kWh\n"
-            f"  Delta:      {sign}{delta_kwh:.1f} kWh ({sign}{delta_kwh / predicted_kwh * 100:.0f}%)"
+            f"\n🎯 Solar forecast vs actual:\n"
+            f"<code>  Predicted: {predicted_kwh:.1f} kWh\n"
+            f"  Actual:    {t.solar_kwh:.1f} kWh\n"
+            f"  Delta:     {sign}{delta_kwh:.1f} kWh ({sign}{delta_kwh / predicted_kwh * 100:.0f}%)</code>"
         )
 
     soc_6am_str = ""
@@ -632,7 +632,7 @@ def _alert_eod_digest(
         tomorrow_6am  = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
         night_net_kwh = sum(p.net_kw for p in usage_forecast.hours if now <= p.dt < tomorrow_6am)
         pred_soc_6am  = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
-        soc_6am_str   = f"\nPredicted SoC @ 6 am: ~{pred_soc_6am:.0f}%"
+        soc_6am_str   = f"\n🌅 Predicted SoC @ 6 am: ~{pred_soc_6am:.0f}%"
 
     precharge_str = ""
     if outlook:
@@ -675,8 +675,8 @@ def _alert_eod_digest(
             base_fee = base_service_cost(1)
             net = import_cost - export_credit + base_fee
             tou_str = (
-                f"\nEst. grid cost today:  ${import_cost:.2f} import  "
-                f"${export_credit:.2f} export  +${base_fee:.2f} base  (net ${net:.2f})"
+                f"\n💰 Grid cost: ${import_cost:.2f} in  ·  ${export_credit:.2f} out  ·  "
+                f"+${base_fee:.2f} base  →  net ${net:.2f}"
             )
             if peak_total > 0:
                 pct = peak_no_grid / peak_total * 100
@@ -691,10 +691,10 @@ def _alert_eod_digest(
     logger.info("End-of-day digest sent for %s", today)
     return (
         f"📊 <b>FranklinWH Daily Summary — {now.strftime('%a %b %-d')}</b>\n"
-        f"Solar generated:  <b>{t.solar_kwh:.1f} kWh</b>\n"
-        f"Grid consumed:    {t.grid_load_kwh:.1f} kWh\n"
-        f"Grid exported:    {t.grid_export_kwh:.1f} kWh\n"
-        f"Home used:        {t.home_use_kwh:.1f} kWh{self_suff_str}{peak_cov_str}{tou_str}\n"
+        f"<code>Solar:    {t.solar_kwh:.1f} kWh\n"
+        f"Grid in:  {t.grid_load_kwh:.1f} kWh\n"
+        f"Grid out: {t.grid_export_kwh:.1f} kWh\n"
+        f"Home:     {t.home_use_kwh:.1f} kWh</code>{self_suff_str}{peak_cov_str}{tou_str}\n"
         f"<code>─────────────────────</code>\n"
         f"🔋 {_soc_bar(soc)}{backup_str}{soc_6am_str}{solar_delta_str}{precharge_str}"
     )
@@ -756,7 +756,7 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
     accuracy_str = ""
     if len(week_prs) >= 3:
         avg_err = sum(abs(1.0 - pr) * 100 for pr in week_prs) / len(week_prs)
-        accuracy_str = f"\nSolar forecast accuracy: ±{avg_err:.1f}% avg ({len(week_prs)} days)"
+        accuracy_str = f"\n🎯 Solar forecast accuracy: ±{avg_err:.1f}% avg ({len(week_prs)} days)"
 
     # Battery cycle count — computed from discharge throughput in the history DB,
     # more accurate than the SOC-trough method which only fires when SOC drops below 20%.
@@ -796,7 +796,7 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
                 pct_used     = total_cycles / 6000 * 100
                 cycles_week  = state.get("batt_cycles_this_week", 0)
                 cycle_str    = (
-                    f"\nBattery cycles: {cycles_week:.1f} this week | "
+                    f"\nBattery cycles: {cycles_week:.1f} this week  ·  "
                     f"{total_cycles:.0f} total{extra_note} ({pct_used:.1f}% of 6000 rated)"
                 )
         except Exception as e:
@@ -805,7 +805,7 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
             total_cycles = state.get("batt_cycle_count", 0)
             if total_cycles > 0:
                 pct_used  = total_cycles / 6000 * 100
-                cycle_str = f"\nBattery cycles: {total_cycles:.1f} total ({pct_used:.1f}% of 6000 rated)"
+                cycle_str = f"\n🔋 Battery cycles: {total_cycles:.1f} total ({pct_used:.1f}% of 6000 rated)"
     state["batt_cycles_this_week"] = 0  # reset after sent marker
 
     stale_note = ""
@@ -916,9 +916,8 @@ def _conservation_advice(soc: float, load_kw: float, bat_cap: float) -> str:
     ess_load  = max(0.2, load_kw * 0.4)
     ess_h     = avail_kwh / ess_load
     return (
-        f"\nBackup: ~{cur_h:.1f} hr at current {load_kw:.1f} kW — "
-        f"cut to essentials (~{ess_load:.1f} kW) for ~{ess_h:.1f} hr.\n"
-        f"Turn off AC, EV charging, dryer, and pool pump to extend runtime."
+        f"\n⏱ Backup: ~{cur_h:.1f} hr now  ·  ~{ess_h:.1f} hr at essentials (~{ess_load:.1f} kW)\n"
+        f"Conserve: turn off AC, EV, dryer, pool pump."
     )
 
 
