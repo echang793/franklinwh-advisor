@@ -25,8 +25,9 @@ from .config import Config, load as load_config, save as save_config
 from .exporters import export_csv, export_json
 
 from .history import HistoryStore, integrate_intervals
-from .notifier import (notify_imessage, notify_imessage_text, notify_log,
-                       notify_macos, notify_telegram, fetch_telegram_chat_id, rec_to_text)
+from .notifier import (notify_email, notify_imessage, notify_imessage_text, notify_log,
+                       notify_macos, notify_telegram, notify_webhook,
+                       fetch_telegram_chat_id, rec_to_text)
 from .predictor import predict
 from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
                   export_rate_at, peak_export_hour, period_at, rate_at,
@@ -668,12 +669,12 @@ def _alert_eod_digest(
             f"  Delta:     {sign}{delta_kwh:.1f} kWh ({sign}{delta_kwh / predicted_kwh * 100:.0f}%)</code>"
         )
 
-    soc_6am_str = ""
+    soc_7am_str = ""
     if usage_forecast and usage_forecast.hours and usage_forecast.confidence != "none":
         tomorrow_7am  = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
         night_net_kwh = sum(p.net_kw for p in usage_forecast.hours if now <= p.dt < tomorrow_7am)
         pred_soc_7am  = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
-        soc_6am_str   = f"\n🌅 Predicted SoC @ 7 am: ~{pred_soc_7am:.0f}%"
+        soc_7am_str   = f"\n🌅 Predicted SoC @ 7 am: ~{pred_soc_7am:.0f}%"
 
     precharge_str = ""
     if outlook:
@@ -739,7 +740,7 @@ def _alert_eod_digest(
         f"Batt dis: {t.battery_discharge_kwh:.1f} kWh\n"
         f"Home:     {t.home_use_kwh:.1f} kWh</code>{self_suff_str}{peak_cov_str}{tou_str}\n"
         f"<code>─────────────────────</code>\n"
-        f"🔋 {_soc_bar(soc)}{backup_str}{soc_6am_str}{solar_delta_str}{precharge_str}"
+        f"🔋 {_soc_bar(soc)}{backup_str}{soc_7am_str}{solar_delta_str}{precharge_str}"
     )
 
 
@@ -773,9 +774,9 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store) -> str 
         # Energy served by battery+solar (not drawn from grid) × avoided rate
         batt_solar_kwh = max(0.0, home_kw - max(0.0, grid_kw)) * hours
         if period == TouPeriod.ON_PEAK:
-            peak_saved += batt_solar_kwh * r
+            peak_saved += batt_solar_kwh * rate_at(dt)
         elif period == TouPeriod.SUPER_OFF_PEAK:
-            sop_saved  += batt_solar_kwh * r
+            sop_saved  += batt_solar_kwh * rate_at(dt)
 
     base_fee    = base_service_cost(7)
     net_cost    = import_cost - export_credit + base_fee
