@@ -519,7 +519,7 @@ def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c) -> str | None:
         f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW\n"
         + (_fmt_hours(_t := _time_to_pct(c.battery_soc_pct, 0.0, _BATTERY_CAPACITY_KWH, c.battery_use_kw))
            and f"⏱ ~{_fmt_hours(_t)} to empty · " or "")
-        + f"Consider switching to Emergency Backup to charge before peak."
+        + "Consider switching to Emergency Backup to charge before peak."
     )
 
 
@@ -670,10 +670,10 @@ def _alert_eod_digest(
 
     soc_6am_str = ""
     if usage_forecast and usage_forecast.hours and usage_forecast.confidence != "none":
-        tomorrow_6am  = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
-        night_net_kwh = sum(p.net_kw for p in usage_forecast.hours if now <= p.dt < tomorrow_6am)
+        tomorrow_7am  = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
+        night_net_kwh = sum(p.net_kw for p in usage_forecast.hours if now <= p.dt < tomorrow_7am)
         pred_soc_6am  = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
-        soc_6am_str   = f"\n🌅 Predicted SoC @ 6 am: ~{pred_soc_6am:.0f}%"
+        soc_6am_str   = f"\n🌅 Predicted SoC @ 7 am: ~{pred_soc_6am:.0f}%"
 
     precharge_str = ""
     if outlook:
