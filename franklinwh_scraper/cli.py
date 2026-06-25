@@ -454,10 +454,10 @@ def _alert_morning_preview(
         bat_cap = cfg.battery_capacity_kwh if cfg else _BATTERY_CAPACITY_KWH
         solar_est += _precharge_plan(now, soc, tmrw_kwh, bat_cap)
 
-        # Peak solar window — relative threshold (30% of day's peak, min 150 W/m²)
+        # Peak solar window — relative threshold (50% of day's peak, min 200 W/m²)
         today_hrs = [h for h in outlook.hours if h.time.date() == now.date()]
         day_peak_ghi = max((h.ghi_wm2 for h in today_hrs), default=0.0)
-        ghi_thresh = max(150.0, day_peak_ghi * 0.30)
+        ghi_thresh = max(200.0, day_peak_ghi * 0.50)
         peak_hrs = [h for h in today_hrs if h.ghi_wm2 >= ghi_thresh]
         if peak_hrs:
             start    = peak_hrs[0].time.strftime("%-I%p").lower()
@@ -471,23 +471,12 @@ def _alert_morning_preview(
         solar_est       = "Solar forecast unavailable"
         peak_window_str = ""
 
-    from .tou import on_peak_window as _opw, rate_at as _rat
-    _ps, _pe = _opw(now)
-    if now < _ps:
-        _m = int((_ps - now).total_seconds() / 60)
-        _rate_cdown = f"\n⏰ On-peak starts in {_m // 60}h {_m % 60}m — ${_rat(now.replace(hour=17)):.2f}/kWh"
-    elif now < _pe:
-        _m = int((_pe - now).total_seconds() / 60)
-        _rate_cdown = f"\n⏰ On-peak ends in {_m // 60}h {_m % 60}m"
-    else:
-        _rate_cdown = ""
-
     state["morning_preview_date"] = today
     logger.info("Morning preview alert sent for %s", today)
     return (
         f"☀️ <b>FranklinWH: Good morning!</b>\n"
         f"🔋 {_soc_bar(soc)}  ·  Solar: <b>{solar_kw:.2f} kW</b>\n"
-        f"{solar_est}{peak_window_str}{_rate_cdown}"
+        f"{solar_est}{peak_window_str}"
     )
 
 
