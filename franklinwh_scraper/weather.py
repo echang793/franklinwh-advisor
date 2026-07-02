@@ -1,6 +1,7 @@
 """Solar irradiance + cloud cover forecast via Open-Meteo (free, no API key)."""
 
 import logging
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import requests
@@ -203,7 +204,7 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
         except Exception as exc:
             last_exc = exc
             if attempt < retries - 1:
-                _time.sleep(min(60, 5 * 2 ** attempt))
+                _time.sleep(min(60, 5 * 2 ** attempt) * (0.5 + random.random()))
     else:
         raise last_exc  # type: ignore[misc]
     js = resp.json()

@@ -151,8 +151,8 @@ def fetch_telegram_chat_id(bot_token: str, retries: int = 3, wait: int = 3) -> s
                 msg = cq.get("message") if cq else None
                 if msg and "chat" in msg:
                     return str(msg["chat"]["id"])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("getUpdates attempt %d failed: %s", attempt + 1, e)
         if attempt < retries - 1:
             time.sleep(wait)
     return None

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from .format_utils import fmt_hours, soc_bar, time_to_pct
 from .tou import on_peak_window, period_at, rate_at
 
 logger = logging.getLogger(__name__)
@@ -19,32 +20,9 @@ _MAX_TURNS = 10   # conversation turns kept per chat
 _MODEL     = "claude-haiku-4-5-20251001"
 
 
-def _soc_bar(pct: float) -> str:
-    """Color-coded 10-block SoC progress bar: 🟢 ████████░░ 85%"""
-    filled    = round(max(0.0, min(100.0, pct)) / 10)
-    indicator = "🟢" if pct >= 60 else ("🟡" if pct >= 30 else "🔴")
-    return f"{indicator} {'█' * filled}{'░' * (10 - filled)} {pct:.0f}%"
-
-def _time_to_pct(
-    current_soc: float, target_pct: float,
-    cap_kwh: float, batt_kw: float,
-) -> float | None:
-    if abs(batt_kw) < 0.1:
-        return None
-    delta_kwh      = (target_pct - current_soc) / 100.0 * cap_kwh
-    rate_kwh_per_h = -batt_kw
-    if rate_kwh_per_h == 0:
-        return None
-    hours = delta_kwh / rate_kwh_per_h
-    return hours if hours > 0 else None
-
-
-def _fmt_hours(hours: float) -> str:
-    h = int(hours)
-    m = round((hours - h) * 60)
-    if m == 60:
-        h += 1; m = 0
-    return f"{h}h {m}m" if h > 0 else f"{m}m"
+_soc_bar     = soc_bar
+_time_to_pct = time_to_pct
+_fmt_hours   = fmt_hours
 
 
 _SYSTEM_PROMPT = """\

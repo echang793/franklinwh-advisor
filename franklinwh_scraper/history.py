@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from .account import Stats
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = Path("output/history.db")
 
@@ -198,6 +201,35 @@ class HistoryStore:
             (date_str,),
         ).fetchone()
         return round(float(row[0]), 2) if row and row[0] is not None else 0.0
+
+    def daily_battery_kwh(self, date_str: str) -> tuple[float, float]:
+        """Return (charge_kwh, discharge_kwh) for a calendar date via trapezoidal integration.
+
+        battery_use_kw > 0 = discharging, < 0 = charging.
+        Returns (0.0, 0.0) if no readings exist for that date.
+        """
+        rows = self._conn.execute(
+            "SELECT timestamp, battery_use_kw FROM readings "
+            "WHERE substr(timestamp,1,10)=? ORDER BY timestamp",
+            (date_str,),
+        ).fetchall()
+        chg = dis = 0.0
+        for i in range(1, len(rows)):
+            t1, b1 = rows[i - 1]
+            t2, b2 = rows[i]
+            try:
+                dt_h = (
+                    datetime.fromisoformat(t2) - datetime.fromisoformat(t1)
+                ).total_seconds() / 3600
+            except ValueError:
+                logger.warning("Skipping interval with bad timestamp: %r → %r", t1, t2)
+                continue
+            avg = (b1 + b2) / 2
+            if avg > 0:
+                dis += avg * dt_h
+            else:
+                chg += -avg * dt_h
+        return round(chg, 2), round(dis, 2)
 
     def recent_avg_load(self, hours: int = 2) -> float | None:
         """Average home load over the last N hours of recorded data."""

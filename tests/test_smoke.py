@@ -7,7 +7,7 @@ from datetime import datetime
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from franklinwh_scraper import cli, notifier
+from franklinwh_scraper import alerts, notifier
 from franklinwh_scraper.config import Config
 from franklinwh_scraper.history import HistoryStore
 
@@ -28,34 +28,34 @@ def _fake_stats(**cur_over):
 def test_dispatch_runs_clean(tmp_path, monkeypatch):
     """Full dispatch list executes for every alert without raising."""
     sent = []
-    monkeypatch.setattr(cli, "_send_alert", lambda b, c, urgent=False: sent.append(b))
-    monkeypatch.setattr(cli, "fetch_nws_storm_alerts", lambda lat, lon: [])
+    monkeypatch.setattr(alerts, "_send_alert", lambda b, c, urgent=False: sent.append(b))
+    monkeypatch.setattr(alerts, "fetch_nws_storm_alerts", lambda lat, lon: [])
 
     store = HistoryStore(tmp_path / "h.db")
     cfg = Config(telegram_bot_token="x", telegram_chat_id="y",
                  ev_charging=True, lat=33.0, lon=-117.0)
     # Should not raise regardless of time-of-day gating
-    cli._check_peak_alerts(_fake_stats(), cfg, tmp_path, store=store)
+    alerts._check_peak_alerts(_fake_stats(), cfg, tmp_path, store=store)
 
 
 def test_alert_export_arbitrage_renders():
     cfg = Config(battery_capacity_kwh=13.6)
     c = _fake_stats(battery_soc_pct=95.0).current
     # August noon, high SoC → fires
-    msg = cli._alert_export_arbitrage({}, "2026-08-15", datetime(2026, 8, 15, 12), c, cfg, None)
+    msg = alerts._alert_export_arbitrage({}, "2026-08-15", datetime(2026, 8, 15, 12), c, cfg, None)
     assert msg and "export" in msg.lower()
     # July → inert
-    assert cli._alert_export_arbitrage({}, "2026-07-15", datetime(2026, 7, 15, 12), c, cfg, None) is None
+    assert alerts._alert_export_arbitrage({}, "2026-07-15", datetime(2026, 7, 15, 12), c, cfg, None) is None
 
 
 def test_ev_charge_window():
     c = _fake_stats().current
     cfg = Config(ev_charging=True, ev_kwh_per_session=40)
-    msg = cli._alert_ev_charge_window({}, "2026-06-12", datetime(2026, 6, 12, 20, 30), c, cfg)
+    msg = alerts._alert_ev_charge_window({}, "2026-06-12", datetime(2026, 6, 12, 20, 30), c, cfg)
     assert msg and "EV" in msg
     # disabled
-    assert cli._alert_ev_charge_window({}, "2026-06-12", datetime(2026, 6, 12, 20, 30),
-                                       c, Config(ev_charging=False)) is None
+    assert alerts._alert_ev_charge_window({}, "2026-06-12", datetime(2026, 6, 12, 20, 30),
+                                          c, Config(ev_charging=False)) is None
 
 
 def test_notifiers_graceful_when_unconfigured():
@@ -65,4 +65,4 @@ def test_notifiers_graceful_when_unconfigured():
 
 
 def test_ping_healthcheck_noop():
-    cli._ping_healthcheck(Config())  # no url → no raise
+    alerts._ping_healthcheck(Config())  # no url → no raise

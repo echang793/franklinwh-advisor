@@ -86,11 +86,17 @@ def load() -> Config:
     if overrides["password"]: cfg.password = overrides["password"]
     if overrides["gateway"]:  cfg.gateway  = overrides["gateway"]
     if overrides["lat"]:
-        try: cfg.lat = float(overrides["lat"])
-        except ValueError: pass
+        try:
+            cfg.lat = float(overrides["lat"])
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "Ignoring invalid FRANKLINWH_LAT=%r", overrides["lat"])
     if overrides["lon"]:
-        try: cfg.lon = float(overrides["lon"])
-        except ValueError: pass
+        try:
+            cfg.lon = float(overrides["lon"])
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "Ignoring invalid FRANKLINWH_LON=%r", overrides["lon"])
 
     return cfg
 

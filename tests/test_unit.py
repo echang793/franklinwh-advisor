@@ -8,10 +8,9 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from franklinwh_scraper import tou
+from franklinwh_scraper import alerts, tou
 from franklinwh_scraper.history import HistoryStore, integrate_intervals
 from franklinwh_scraper.config import Config
-from franklinwh_scraper import cli
 
 
 # ── TOU ───────────────────────────────────────────────────────────────
@@ -105,20 +104,50 @@ def test_peak_export_hour():
 
 def test_alert_enabled():
     cfg = Config()
-    assert cli._alert_enabled(cfg, "morning_preview")
+    assert alerts._alert_enabled(cfg, "morning_preview")
     cfg.disabled_alerts = ["morning_preview"]
-    assert not cli._alert_enabled(cfg, "morning_preview")
+    assert not alerts._alert_enabled(cfg, "morning_preview")
     # always-on can't be disabled
     cfg.disabled_alerts = ["grid_down", "fast_drain"]
-    assert cli._alert_enabled(cfg, "grid_down")
-    assert cli._alert_enabled(cfg, "fast_drain")
+    assert alerts._alert_enabled(cfg, "grid_down")
+    assert alerts._alert_enabled(cfg, "fast_drain")
+
+
+def test_safe_float():
+    assert alerts._safe_float("1.5") == 1.5
+    assert alerts._safe_float(2) == 2.0
+    assert alerts._safe_float("garbage") is None
+    assert alerts._safe_float(None) is None
+    assert alerts._safe_float([1]) is None
+
+
+def test_get_401_does_not_recurse_forever(monkeypatch):
+    """Persistent API-level 401 must raise after one re-login, not recurse."""
+    from franklinwh_scraper.account import AccountClient
+
+    client = AccountClient("a@b.c", "pw")
+    client._token = "stale"
+    monkeypatch.setattr(client, "login", lambda: setattr(client, "_token", "fresh"))
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"code": 401, "message": "expired"}
+
+    calls = []
+    monkeypatch.setattr(client.session, "get", lambda *a, **kw: calls.append(1) or _Resp())
+    with pytest.raises(ConnectionError):
+        client._get("some/path")
+    assert len(calls) == 2  # original + one retry, then raise
 
 
 def test_precharge_plan():
     # dim tomorrow + low SoC + morning → recommend
-    out = cli._precharge_plan(datetime(2026, 1, 15, 10), 40.0, 2.0, 13.6)
+    out = alerts._precharge_plan(datetime(2026, 1, 15, 10), 40.0, 2.0, 13.6)
     assert "Pre-charge" in out
     # ample solar → empty
-    assert cli._precharge_plan(datetime(2026, 1, 15, 10), 40.0, 30.0, 13.6) == ""
+    assert alerts._precharge_plan(datetime(2026, 1, 15, 10), 40.0, 30.0, 13.6) == ""
     # high SoC → empty
-    assert cli._precharge_plan(datetime(2026, 1, 15, 10), 90.0, 2.0, 13.6) == ""
+    assert alerts._precharge_plan(datetime(2026, 1, 15, 10), 90.0, 2.0, 13.6) == ""

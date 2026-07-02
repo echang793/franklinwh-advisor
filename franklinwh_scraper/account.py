@@ -114,7 +114,7 @@ class AccountClient:
     # HTTP helpers                                                     #
     # -------------------------------------------------------------- #
 
-    def _get(self, path: str, params: dict | None = None) -> Any:
+    def _get(self, path: str, params: dict | None = None, _retried: bool = False) -> Any:
         self._ensure_token()
         if params is None:
             params = {}
@@ -128,8 +128,10 @@ class AccountClient:
         resp.raise_for_status()
         js = resp.json()
         if js.get("code") == 401:
+            if _retried:
+                raise ConnectionError(f"Still unauthorized after re-login: {js.get('message')}")
             self.login()
-            return self._get(path, params)
+            return self._get(path, params, _retried=True)
         return js
 
     # -------------------------------------------------------------- #
@@ -158,7 +160,7 @@ class AccountClient:
         })
         return envelope.replace('"DATA"', raw)
 
-    def _mqtt_send(self, payload: str, gateway: str) -> Any:
+    def _mqtt_send(self, payload: str, gateway: str, _retried: bool = False) -> Any:
         self._ensure_token()
         url = API_BASE + "hes-gateway/terminal/sendMqtt"
         resp = self.session.post(
@@ -171,13 +173,16 @@ class AccountClient:
         resp.raise_for_status()
         js = resp.json()
         if js.get("code") == 401:
+            if _retried:
+                raise ConnectionError(f"Still unauthorized after re-login: {js.get('message')}")
             self.login()
-            return self._mqtt_send(payload, gateway)
+            return self._mqtt_send(payload, gateway, _retried=True)
         if js.get("code") == 102:
             raise TimeoutError(f"Device timeout: {js.get('message')}")
         if js.get("code") == 136:
             raise ConnectionError(f"Gateway offline: {js.get('message')}")
-        assert js.get("code") == 200, f"MQTT error {js.get('code')}: {js.get('message')}"
+        if js.get("code") != 200:
+            raise RuntimeError(f"MQTT error {js.get('code')}: {js.get('message')}")
         return js
 
     # -------------------------------------------------------------- #
