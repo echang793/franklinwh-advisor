@@ -58,6 +58,14 @@ def test_ev_charge_window():
                                           c, Config(ev_charging=False)) is None
 
 
+def test_low_soc_1pm_idle_battery_no_crash():
+    """Zeroed API stats (idle battery, SoC < 40) must not raise int(None)."""
+    c = _fake_stats(battery_soc_pct=0.0, battery_use_kw=0.0,
+                    solar_production_kw=0.0, home_load_kw=0.0).current
+    msg = alerts._alert_low_soc_1pm({}, "2026-07-02", datetime(2026, 7, 2, 13, 40), c)
+    assert msg is not None and "to empty" not in msg
+
+
 def test_notifiers_graceful_when_unconfigured():
     cfg = Config()  # no smtp, no webhook
     notifier.notify_email("test", cfg)          # no-op, no raise

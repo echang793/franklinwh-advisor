@@ -406,12 +406,13 @@ def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c) -> str | None:
         return None
     state["low_soc_1pm_alerted_date"] = today
     logger.info("Low 1 pm SoC alert sent for %s (%.0f%%)", today, c.battery_soc_pct)
+    tte = _time_to_pct(c.battery_soc_pct, 0.0, _BATTERY_CAPACITY_KWH, c.battery_use_kw)
+    tte_str = f"⏱ ~{_fmt_hours(tte)} to empty · " if tte is not None else ""
     return (
         f"🟡 <b>FranklinWH: Battery low at {now.strftime('%-I:%M %p')}</b>\n"
         f"🔋 {_soc_bar(c.battery_soc_pct)} — grid import risk during 4–9 pm peak\n"
         f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW\n"
-        + (_fmt_hours(_t := _time_to_pct(c.battery_soc_pct, 0.0, _BATTERY_CAPACITY_KWH, c.battery_use_kw))
-           and f"⏱ ~{_fmt_hours(_t)} to empty · " or "")
+        + tte_str
         + "Consider switching to Emergency Backup to charge before peak."
     )
 
