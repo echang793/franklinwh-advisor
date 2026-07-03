@@ -1496,6 +1496,25 @@ def _alert_solar_back_to_baseline(
     )
 
 
+def _alert_tou_rates_stale(state: dict, today: str, now: datetime) -> str | None:
+    """One-time critical alert the first time TOU rates cross the 180-day staleness
+    threshold — previously this only surfaced as a buried note in the weekly summary,
+    easy to miss for months while cost estimates silently drift."""
+    if not rates_are_stale(now.date()):
+        return None
+    if state.get("tou_stale_alerted"):
+        return None
+    state["tou_stale_alerted"] = today
+    logger.info("TOU rates stale alert sent for %s", today)
+    return (
+        "⚠️ <b>FranklinWH: TOU rates may be outdated</b>\n"
+        "It's been over 180 days since the rate schedule in tou.py was last updated. "
+        "SDG&E typically revises rates ~twice a year — check their current EV-TOU-5 "
+        "schedule and update _RATES / _RATES_EFFECTIVE_DATE in tou.py if it changed.\n"
+        "Cost estimates and export-arbitrage timing may be off until this is refreshed."
+    )
+
+
 def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None, store=None) -> None:
     if not cfg.imessage_phone and not (cfg.telegram_bot_token and cfg.telegram_chat_id):
         return
@@ -1536,6 +1555,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("storm_prep",           lambda: _alert_storm_prep(state, today, now, c, cfg)),
             ("ev_charge_window",     lambda: _alert_ev_charge_window(state, today, now, c, cfg)),
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
+            ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
         ]
         to_send: list[str] = []
         for _name, _fn in _candidates:

@@ -9,6 +9,10 @@ from .history import HistoryStore
 
 _SEASON_MIN_DAYS = 21  # need at least this many days in season for seasonal profile
 
+_RECENT_WINDOW_DAYS      = 21   # trailing window for the recency-weighted blend
+_RECENT_BLEND_WEIGHT     = 0.65  # weight on the recent window once it has enough samples
+_RECENT_MIN_SLOT_SAMPLES = 3     # min recent-window readings for a slot before blending it in
+
 
 def _current_season(month: int) -> str:
     if month in (3, 4, 5):
@@ -71,6 +75,28 @@ def predict(
     else:
         load_profile  = store.load_profile()
         solar_profile = store.solar_profile()
+
+    # Blend in a recency-weighted profile per slot so a sustained recent change
+    # (new EV, HVAC swap) shows up in days rather than being diluted by months
+    # of older seasonal/all-time data — same idea as the solar-forecast EWMA fix.
+    recent_counts = store.recent_slot_counts(_RECENT_WINDOW_DAYS)
+    recent_load   = store.recent_load_profile(_RECENT_WINDOW_DAYS)
+    recent_solar  = store.recent_solar_profile(_RECENT_WINDOW_DAYS)
+    for slot, n in recent_counts.items():
+        if n < _RECENT_MIN_SLOT_SAMPLES:
+            continue
+        if slot in recent_load:
+            baseline = load_profile.get(slot)
+            load_profile[slot] = (
+                _RECENT_BLEND_WEIGHT * recent_load[slot] + (1 - _RECENT_BLEND_WEIGHT) * baseline
+                if baseline is not None else recent_load[slot]
+            )
+        if slot in recent_solar:
+            baseline = solar_profile.get(slot)
+            solar_profile[slot] = (
+                _RECENT_BLEND_WEIGHT * recent_solar[slot] + (1 - _RECENT_BLEND_WEIGHT) * baseline
+                if baseline is not None else recent_solar[slot]
+            )
 
     slot_counts = store.slot_counts()
 

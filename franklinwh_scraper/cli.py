@@ -1155,6 +1155,61 @@ def cmd_history(ctx: click.Context, out: str | None) -> None:
             click.echo(f"  {label}  {bar}  {avg:.2f} kW")
 
 
+@grp_account.command("accuracy")
+@click.option("--out", "-o", default=None)
+@click.pass_context
+def cmd_accuracy(ctx: click.Context, out: str | None) -> None:
+    """Show solar-forecast accuracy trend by week (how close predicted kWh was to actual)."""
+    cfg     = ctx.obj["config"]
+    out     = out or cfg.output_dir
+    outdir  = Path(out)
+    state   = _load_peak_state(outdir)
+
+    daily_pr = {
+        k[len("daily_pr_"):]: v
+        for k, v in state.items()
+        if k.startswith("daily_pr_") and v is not None
+    }
+    if not daily_pr:
+        raise click.ClickException(
+            "No accuracy data yet — it accumulates once mornings preview against "
+            "the prior day's actual solar output."
+        )
+
+    _header("Solar Forecast Accuracy")
+
+    by_week: dict[str, list[float]] = {}
+    for date_str, ratio in daily_pr.items():
+        try:
+            iso_year, iso_week, _ = datetime.strptime(date_str, "%Y-%m-%d").isocalendar()
+        except ValueError:
+            continue
+        by_week.setdefault(f"{iso_year}-W{iso_week:02d}", []).append(ratio)
+
+    weeks = sorted(by_week)
+    click.echo(click.style("  Week        Days   Mean err%   Trend", bold=True))
+    _hr()
+    prior_errs: list[float] = []
+    for wk in weeks:
+        ratios   = by_week[wk]
+        errs     = [abs(1.0 - r) * 100 for r in ratios]
+        mean_err = sum(errs) / len(errs)
+        trend    = ""
+        if prior_errs:
+            prior_mean = sum(prior_errs) / len(prior_errs)
+            delta = mean_err - prior_mean
+            if abs(delta) >= 1.0:
+                trend = f"({'+' if delta > 0 else ''}{delta:.1f} vs prior 4wk avg)"
+        click.echo(f"  {wk}   {len(ratios):>4}   {mean_err:>7.1f}%   {trend}")
+        prior_errs = (prior_errs + errs)[-4 * 7:]  # rolling ~4-week window of daily samples
+
+    all_errs = [abs(1.0 - r) * 100 for r in daily_pr.values()]
+    within_5 = sum(1 for e in all_errs if e <= 5.0)
+    click.echo()
+    _info(f"Overall: {len(all_errs)} day(s), mean error {sum(all_errs)/len(all_errs):.1f}%, "
+          f"{within_5}/{len(all_errs)} within 5%")
+
+
 # ── Shared helpers ────────────────────────────────────────────────────
 
 def _print_recommendation(rec, stats, usage_forecast=None, location="") -> None:

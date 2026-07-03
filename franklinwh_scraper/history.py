@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS readings (
     battery_use_kw   REAL    NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_slot ON readings(day_of_week, hour_of_day);
+CREATE INDEX IF NOT EXISTS idx_timestamp ON readings(timestamp);
 """
 
 # Per-column migrations for pre-existing DBs. Each runs in its own try/except
@@ -48,6 +49,16 @@ LoadProfile = dict[tuple[int, int], float]
 # Gaps longer than this cap are clamped so multi-hour outages aren't integrated
 # as continuous power.
 _MAX_INTEGRATION_GAP_H = 1.0
+
+
+def _next_day(date_str: str) -> str:
+    """'2026-07-02' -> '2026-07-03' — half-open upper bound for a timestamp range.
+
+    ISO8601 timestamp strings sort lexicographically, so `timestamp >= start
+    AND timestamp < _next_day(end)` lets SQLite use a plain index on the
+    timestamp column, unlike `substr(timestamp,1,10) = ?` which can't.
+    """
+    return (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def integrate_intervals(
@@ -184,8 +195,8 @@ class HistoryStore:
         """
         rows = self._conn.execute(
             "SELECT timestamp, grid_use_kw, home_load_kw, solar_kw FROM readings "
-            "WHERE substr(timestamp,1,10)=? ORDER BY timestamp",
-            (date_str,),
+            "WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+            (date_str, _next_day(date_str)),
         ).fetchall()
         return round(sum(s * hours for _dt, hours, _g, _h, s in integrate_intervals(rows)), 2)
 
@@ -197,8 +208,8 @@ class HistoryStore:
         of how many polls were missed.  Returns 0.0 if no rows or column missing.
         """
         row = self._conn.execute(
-            "SELECT MAX(solar_total_kwh) FROM readings WHERE substr(timestamp,1,10)=?",
-            (date_str,),
+            "SELECT MAX(solar_total_kwh) FROM readings WHERE timestamp >= ? AND timestamp < ?",
+            (date_str, _next_day(date_str)),
         ).fetchone()
         return round(float(row[0]), 2) if row and row[0] is not None else 0.0
 
@@ -210,8 +221,8 @@ class HistoryStore:
         """
         rows = self._conn.execute(
             "SELECT timestamp, battery_use_kw FROM readings "
-            "WHERE substr(timestamp,1,10)=? ORDER BY timestamp",
-            (date_str,),
+            "WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+            (date_str, _next_day(date_str)),
         ).fetchall()
         chg = dis = 0.0
         for i in range(1, len(rows)):
@@ -295,29 +306,73 @@ class HistoryStore:
         ).fetchall()
         return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
 
+    def recent_load_profile(self, days: int) -> LoadProfile:
+        """Average home load kW keyed by (day_of_week, hour_of_day) over the trailing N days.
+
+        Weights a sustained recent change (new EV, HVAC swap) far more heavily
+        than an all-time or seasonal average would, at the cost of more noise
+        per slot — callers should blend with a longer baseline, not use alone.
+        """
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        rows = self._conn.execute(
+            """
+            SELECT day_of_week, hour_of_day, AVG(home_load_kw)
+            FROM readings
+            WHERE timestamp >= ?
+            GROUP BY day_of_week, hour_of_day
+            """,
+            (cutoff,),
+        ).fetchall()
+        return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
+
+    def recent_solar_profile(self, days: int) -> LoadProfile:
+        """Average solar production kW keyed by (day_of_week, hour_of_day) over the trailing N days."""
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        rows = self._conn.execute(
+            """
+            SELECT day_of_week, hour_of_day, AVG(solar_kw)
+            FROM readings
+            WHERE timestamp >= ?
+            GROUP BY day_of_week, hour_of_day
+            """,
+            (cutoff,),
+        ).fetchall()
+        return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
+
+    def recent_slot_counts(self, days: int) -> dict[tuple[int, int], int]:
+        """Number of readings per (day_of_week, hour_of_day) slot in the trailing N days."""
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        rows = self._conn.execute(
+            "SELECT day_of_week, hour_of_day, COUNT(*) FROM readings "
+            "WHERE timestamp >= ? GROUP BY day_of_week, hour_of_day",
+            (cutoff,),
+        ).fetchall()
+        return {(int(r[0]), int(r[1])): int(r[2]) for r in rows}
+
     def period_totals(self, start_date: str, end_date: str) -> MonthlyTotals:
         """Aggregate energy totals for an arbitrary date range (inclusive YYYY-MM-DD).
 
         Useful for billing-cycle summaries that don't align with calendar months.
         Solar uses MAX(solar_total_kwh) per day; grid/load integrated from instantaneous kW.
         """
+        end_exclusive = _next_day(end_date)
         solar_rows = self._conn.execute(
             """
             SELECT substr(timestamp,1,10), MAX(solar_total_kwh)
             FROM readings
-            WHERE substr(timestamp,1,10) >= ? AND substr(timestamp,1,10) <= ?
+            WHERE timestamp >= ? AND timestamp < ?
             GROUP BY substr(timestamp,1,10)
             """,
-            (start_date, end_date),
+            (start_date, end_exclusive),
         ).fetchall()
         solar_kwh      = round(sum(r[1] for r in solar_rows if r[1] is not None), 1)
         days_with_data = len(solar_rows)
 
         kw_rows = self._conn.execute(
             "SELECT timestamp, grid_use_kw, home_load_kw, solar_kw FROM readings "
-            "WHERE substr(timestamp,1,10) >= ? AND substr(timestamp,1,10) <= ? "
+            "WHERE timestamp >= ? AND timestamp < ? "
             "ORDER BY timestamp",
-            (start_date, end_date),
+            (start_date, end_exclusive),
         ).fetchall()
         grid_import_kwh = grid_export_kwh = home_load_kwh = 0.0
         for _dt, hours, grid_kw, home_kw, _solar in integrate_intervals(kw_rows):
@@ -345,9 +400,9 @@ class HistoryStore:
         """Return (timestamp, grid_use_kw, home_load_kw, solar_kw) for a date range."""
         rows = self._conn.execute(
             "SELECT timestamp, grid_use_kw, home_load_kw, solar_kw FROM readings "
-            "WHERE substr(timestamp,1,10) >= ? AND substr(timestamp,1,10) <= ? "
+            "WHERE timestamp >= ? AND timestamp < ? "
             "ORDER BY timestamp",
-            (start_date, end_date),
+            (start_date, _next_day(end_date)),
         ).fetchall()
         return [(r[0], float(r[1]), float(r[2]), float(r[3])) for r in rows]
 
@@ -365,9 +420,9 @@ class HistoryStore:
         """
         rows = self._conn.execute(
             "SELECT timestamp, battery_use_kw, grid_use_kw, battery_soc FROM readings "
-            "WHERE substr(timestamp,1,10) >= ? AND substr(timestamp,1,10) <= ? "
+            "WHERE timestamp >= ? AND timestamp < ? "
             "ORDER BY timestamp",
-            (start_date, end_date),
+            (start_date, _next_day(end_date)),
         ).fetchall()
 
         samples: list[float] = []
@@ -413,11 +468,11 @@ class HistoryStore:
         where = "WHERE battery_use_kw IS NOT NULL"
         params: list[str] = []
         if start_date:
-            where += " AND substr(timestamp,1,10) >= ?"
+            where += " AND timestamp >= ?"
             params.append(start_date)
         if end_date:
-            where += " AND substr(timestamp,1,10) <= ?"
-            params.append(end_date)
+            where += " AND timestamp < ?"
+            params.append(_next_day(end_date))
         rows = self._conn.execute(
             f"SELECT timestamp, battery_use_kw FROM readings {where} ORDER BY timestamp",
             params,

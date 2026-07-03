@@ -2,15 +2,16 @@
 
 import pathlib
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from franklinwh_scraper import alerts, tou
+from franklinwh_scraper import alerts, notifier, tou
 from franklinwh_scraper.history import HistoryStore, integrate_intervals
 from franklinwh_scraper.config import Config
+from franklinwh_scraper.predictor import predict
 
 
 # ── TOU ───────────────────────────────────────────────────────────────
@@ -78,7 +79,6 @@ def test_capacity_samples(tmp_path):
     db = HistoryStore(tmp_path / "h.db")
     base = datetime(2026, 5, 1, 18, 0)
     soc = 100.0
-    from datetime import timedelta
     for i in range(9):  # 100→60% over 4h at 1.36 kW (13.6 kWh battery)
         ts = (base + timedelta(minutes=30 * i)).isoformat()
         db._conn.execute(
@@ -91,6 +91,58 @@ def test_capacity_samples(tmp_path):
     db._conn.commit()
     samples = db.capacity_samples("2026-05-01", "2026-05-02")
     assert samples and 13.0 < samples[0] < 14.5
+
+
+def test_predict_blends_recent_load_over_baseline(tmp_path):
+    """A sustained recent load change should pull the forecast toward it,
+    not get diluted by months of older, lower baseline readings."""
+    db = HistoryStore(tmp_path / "h.db")
+    future = datetime.now() + timedelta(hours=1)
+    slot_dow, slot_hour = future.weekday(), future.hour
+
+    def _insert(ts: datetime, load_kw: float):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts.isoformat(), slot_dow, slot_hour, load_kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+        )
+
+    # Old baseline: low load, far outside the 21-day recency window.
+    for i in range(10):
+        _insert(datetime.now() - timedelta(days=60 + i), 2.0)
+    # Recent: sustained higher load (e.g. a new EV charging in this slot).
+    for i in range(5):
+        _insert(datetime.now() - timedelta(days=1 + i), 8.0)
+    db._conn.commit()
+
+    forecast = predict(db, horizon_hours=2)
+    hour_pred = next(p for p in forecast.hours if p.dt.hour == slot_hour)
+    # Blend is 0.65 recent + 0.35 baseline = 5.9; must be well above the
+    # 2.0 baseline alone, proving the recent window pulled it up.
+    assert hour_pred.predicted_load_kw > 5.0
+
+
+def test_day_range_query_boundaries(tmp_path):
+    """Regression guard for the substr(timestamp) -> timestamp range rewrite:
+    a reading exactly at midnight of the day *after* end_date must be excluded,
+    and one at 23:59:59 of end_date must be included."""
+    db = HistoryStore(tmp_path / "h.db")
+    rows = [
+        ("2026-05-01T00:00:00", 1.0),
+        ("2026-05-02T23:59:59", 2.0),
+        ("2026-05-03T00:00:00", 3.0),  # must be excluded — day after end_date
+    ]
+    for ts, kw in rows:
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts, 0, 0, kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+        )
+    db._conn.commit()
+    result = db.weekly_readings("2026-05-01", "2026-05-02")
+    assert [r[0] for r in result] == ["2026-05-01T00:00:00", "2026-05-02T23:59:59"]
 
 
 # ── CLI helpers ────────────────────────────────────────────────────────
@@ -187,3 +239,43 @@ def test_calibrate_solar_accepts_consistent_step_change():
         alerts._calibrate_solar(state, solar_kw=4.55, outlook=outlook)  # ratio 6.5
     assert len(state["solar_cal_samples"]) == 13
     assert state["solar_cal_pending"] == []
+
+
+def test_tou_rates_stale_alert_fires_once():
+    stale_now = datetime(2026, 8, 1)  # well past 180 days from tou._RATES_EFFECTIVE_DATE
+    state: dict = {}
+    msg = alerts._alert_tou_rates_stale(state, "2026-08-01", stale_now)
+    assert msg is not None and "outdated" in msg
+    assert state["tou_stale_alerted"] == "2026-08-01"
+    # Second call same/later day must not re-fire.
+    assert alerts._alert_tou_rates_stale(state, "2026-08-02", stale_now) is None
+
+
+def test_tou_rates_stale_alert_silent_when_fresh():
+    fresh_now = datetime(2026, 2, 1)  # well within 180 days
+    assert alerts._alert_tou_rates_stale({}, "2026-02-01", fresh_now) is None
+
+
+def test_with_retry_gives_up_after_attempts(monkeypatch):
+    monkeypatch.setattr(notifier.time, "sleep", lambda s: None)
+    calls = []
+
+    def _always_fails():
+        calls.append(1)
+        raise ConnectionError("down")
+
+    notifier._with_retry(_always_fails, "test channel", attempts=3, base_delay=0)
+    assert len(calls) == 3
+
+
+def test_with_retry_stops_on_first_success(monkeypatch):
+    monkeypatch.setattr(notifier.time, "sleep", lambda s: None)
+    calls = []
+
+    def _succeeds_second_try():
+        calls.append(1)
+        if len(calls) < 2:
+            raise ConnectionError("transient")
+
+    notifier._with_retry(_succeeds_second_try, "test channel", attempts=3, base_delay=0)
+    assert len(calls) == 2

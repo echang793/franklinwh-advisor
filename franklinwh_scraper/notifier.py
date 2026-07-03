@@ -101,6 +101,26 @@ def notify_imessage_text(body: str, phone: str) -> None:
         logger.warning("osascript not available (not macOS?)")
 
 
+def _with_retry(fn, label: str, attempts: int = 3, base_delay: float = 2.0) -> None:
+    """Retry a zero-arg callable on any exception, with linear backoff.
+
+    Email/webhook failures (SMTP hiccup, transient network error) used to be
+    single-attempt and silently dropped — this gives them the same resilience
+    Telegram already had, and escalates to ERROR once retries are exhausted so
+    a lost alert is actually discoverable in advisor.log instead of buried at
+    WARNING level.
+    """
+    for attempt in range(attempts):
+        try:
+            fn()
+            return
+        except Exception as e:
+            logger.warning("%s failed (attempt %d/%d): %s", label, attempt + 1, attempts, e)
+            if attempt < attempts - 1:
+                time.sleep(base_delay)
+    logger.error("%s failed after %d attempts — alert may be lost", label, attempts)
+
+
 def notify_telegram(body: str, bot_token: str, chat_id: str) -> None:
     """Send a Telegram message via the Bot API (cross-platform, free)."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -125,11 +145,10 @@ def notify_telegram(body: str, bot_token: str, chat_id: str) -> None:
 
 def notify_ha_webhook(url: str, data: dict) -> None:
     """POST a JSON state payload to a Home Assistant webhook URL."""
-    try:
+    def _send():
         requests.post(url, json=data, timeout=5)
         logger.debug("HA webhook posted to %s", url)
-    except Exception as e:
-        logger.warning("HA webhook failed: %s", e)
+    _with_retry(_send, "HA webhook")
 
 
 def fetch_telegram_chat_id(bot_token: str, retries: int = 3, wait: int = 3) -> str | None:
@@ -167,7 +186,8 @@ def notify_email(body: str, cfg: "Config") -> None:
     """Send alert via SMTP email. Uses STARTTLS on cfg.smtp_port (default 587)."""
     if not (cfg.smtp_host and cfg.email_to):
         return
-    try:
+
+    def _send():
         subject = body.splitlines()[0][:60] if body else "FranklinWH Alert"
         msg = MIMEText(body, "plain")
         msg["Subject"] = subject
@@ -180,15 +200,16 @@ def notify_email(body: str, cfg: "Config") -> None:
                 s.login(cfg.smtp_user, cfg.smtp_password)
             s.sendmail(msg["From"], [cfg.email_to], msg.as_string())
         logger.debug("Email sent to %s", cfg.email_to)
-    except Exception as e:
-        logger.warning("Email notification failed: %s", e)
+
+    _with_retry(_send, "Email notification")
 
 
 def notify_webhook(body: str, urgent: bool, cfg: "Config") -> None:
     """POST alert as JSON to cfg.webhook_url (Slack, Discord, custom endpoint, etc.)."""
     if not cfg.webhook_url:
         return
-    try:
+
+    def _send():
         requests.post(
             cfg.webhook_url,
             json={
@@ -199,5 +220,5 @@ def notify_webhook(body: str, urgent: bool, cfg: "Config") -> None:
             timeout=10,
         )
         logger.debug("Webhook posted to %s", cfg.webhook_url)
-    except Exception as e:
-        logger.warning("Webhook notification failed: %s", e)
+
+    _with_retry(_send, "Webhook notification")
