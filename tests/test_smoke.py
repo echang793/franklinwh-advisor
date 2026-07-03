@@ -3,13 +3,14 @@
 import pathlib
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from franklinwh_scraper import alerts, notifier
 from franklinwh_scraper.config import Config
 from franklinwh_scraper.history import HistoryStore
+from franklinwh_scraper.weather import HourlyForecast, SolarOutlook
 
 
 def _fake_stats(**cur_over):
@@ -21,6 +22,7 @@ def _fake_stats(**cur_over):
         setattr(cur, k, v)
     tot = types.SimpleNamespace(
         solar_kwh=30.0, grid_load_kwh=0.1, grid_export_kwh=5.0, home_use_kwh=25.0,
+        battery_charge_kwh=8.0, battery_discharge_kwh=7.0,
     )
     return types.SimpleNamespace(current=cur, totals=tot)
 
@@ -64,6 +66,25 @@ def test_low_soc_1pm_idle_battery_no_crash():
                     solar_production_kw=0.0, home_load_kw=0.0).current
     msg = alerts._alert_low_soc_1pm({}, "2026-07-02", datetime(2026, 7, 2, 13, 40), c)
     assert msg is not None and "to empty" not in msg
+
+
+def test_eod_digest_includes_tomorrow_solar(tmp_path):
+    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+    tomorrow = now + timedelta(days=1)
+    hours = [
+        HourlyForecast(
+            time=tomorrow.replace(hour=h, minute=0, second=0, microsecond=0),
+            direct_radiation_wm2=500.0, diffuse_radiation_wm2=100.0,
+            cloud_cover_pct=10.0, temp_c=25.0, wind_speed_ms=2.0,
+        )
+        for h in range(6, 20)
+    ]
+    outlook = SolarOutlook(hours=hours)
+    state = {"solar_cal_samples": [4.0, 4.2, 3.9]}  # >=3 samples so system peak is calibrated
+    cfg = Config(battery_capacity_kwh=13.6)
+    stats = _fake_stats()
+    msg = alerts._alert_eod_digest(state, now.strftime("%Y-%m-%d"), now, stats, cfg, outlook, None)
+    assert msg is not None and "Tomorrow's solar" in msg
 
 
 def test_notifiers_graceful_when_unconfigured():

@@ -589,14 +589,16 @@ def _alert_eod_digest(
         pred_soc_7am  = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
         soc_7am_str   = f"\n🌅 Predicted SoC @ 7 am: ~{pred_soc_7am:.0f}%"
 
-    precharge_str = ""
+    precharge_str  = ""
+    tmrw_solar_str = ""
     if outlook:
         sp = _get_system_peak_kw(state)
         if sp:
             cloudy   = outlook.tomorrow_avg_ghi() < _GHI_CLOUDY_THRESHOLD
             pr       = _get_performance_ratio(state, cloudy=cloudy)
             tmrw_kwh = outlook.tomorrow_generation_kwh(sp, pr)
-            precharge_str = _precharge_plan(now, soc, tmrw_kwh, bat_cap)
+            precharge_str  = _precharge_plan(now, soc, tmrw_kwh, bat_cap)
+            tmrw_solar_str = f"\n☀️ Tomorrow's solar: ~{tmrw_kwh:.1f} kWh ({'cloudy' if cloudy else 'sunny'})"
 
     self_suff_str = ""
 
@@ -665,7 +667,7 @@ def _alert_eod_digest(
         f"Batt dis: {batt_dis_kwh:.1f} kWh\n"
         f"Home:     {home_kwh:.1f} kWh</code>{self_suff_str}{peak_cov_str}{tou_str}\n"
         f"<code>─────────────────────</code>\n"
-        f"🔋 {_soc_bar(soc)}{backup_str}{soc_7am_str}{solar_delta_str}{precharge_str}"
+        f"🔋 {_soc_bar(soc)}{backup_str}{soc_7am_str}{solar_delta_str}{tmrw_solar_str}{precharge_str}"
     )
 
 
