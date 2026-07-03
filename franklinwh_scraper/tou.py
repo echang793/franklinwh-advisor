@@ -42,8 +42,10 @@ _ON_PEAK_START = 16  # 4 pm
 _ON_PEAK_END   = 21  # 9 pm
 
 # SDG&E EV-TOU-5 fixed Basic Service Fee — charged per day regardless of usage.
-# ~$16/month ÷ 30. Verify against your bill; update if SDG&E changes it.
-BASE_SERVICE_DAILY = 0.53
+# Per SDG&E's official "1-1-26 Schedule EV-TOU-5 Total Rates Table" tariff filing
+# (sdge.com/sites/default/files/regulatory/), the Base Services Charge is
+# $0.79343/day. Verify against your bill; update if SDG&E changes it.
+BASE_SERVICE_DAILY = 0.79343
 
 # NEM 3.0 / Net Billing Tariff export credit rates ($/kWh).
 # Aug/Sep have boosted evening export rates worth modeling; all other months
