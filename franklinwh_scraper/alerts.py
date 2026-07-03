@@ -49,29 +49,40 @@ _time_to_pct = time_to_pct
 _fmt_hours   = fmt_hours
 
 
+_PR_EWMA_ALPHA = 0.35  # weight on newest sample — tracks multi-day cloud regime
+                       # shifts (e.g. marine layer persisting for a week) faster
+                       # than a flat median of the whole rolling window.
+
+
+def _ewma(samples: list[float]) -> float:
+    est = samples[0]
+    for v in samples[1:]:
+        est = _PR_EWMA_ALPHA * v + (1 - _PR_EWMA_ALPHA) * est
+    return est
+
+
 def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
     """Return empirical PR (actual / predicted daily kWh) for sunny or cloudy days.
 
     Separate buckets prevent the sunny-day bias (hot panels, lower efficiency)
     from distorting cloudy-day forecasts where panels run cooler.
     Falls back to sunny PR × 1.10 until 3 cloudy-day samples accumulate.
+    Samples are stored oldest-first, so the EWMA weights the most recent day
+    most heavily.
     """
     if cloudy:
         samples = [v for v in state.get("perf_ratio_cloudy_samples", []) if v <= 1.4]
         if len(samples) < 3:
             sunny = [v for v in state.get("perf_ratio_samples", []) if v <= 1.4]
             if len(sunny) >= 3:
-                s = sorted(sunny)
-                return max(s[len(s) // 2] * 1.10, 0.60)
+                return max(_ewma(sunny) * 1.10, 0.60)
             return 0.85  # reasonable prior: cloudy panels run cooler
-        s = sorted(samples)
-        return max(s[len(s) // 2], 0.55)
+        return max(_ewma(samples), 0.55)
     else:
         samples = [v for v in state.get("perf_ratio_samples", []) if v <= 1.4]
         if len(samples) < 3:
             return 1.0
-        s = sorted(samples)
-        return max(s[len(s) // 2], 0.60)
+        return max(_ewma(samples), 0.60)
 
 
 # ── Weather forecast cache (30-min TTL) ──────────────────────────────
@@ -226,16 +237,45 @@ def _state_lock(out: Path):
 # State mutations happen inside each function; caller saves state once at end.
 
 def _calibrate_solar(state: dict, solar_kw: float, outlook) -> None:
+    """Record a (solar_kw / GHI) sample used to estimate system peak kW.
+
+    A single noisy reading (sensor glitch, a cloud edge the coarse hourly GHI
+    missed) shouldn't be able to swing the peak-kW estimate that scales every
+    downstream prediction. Once >=10 samples exist, reject a new sample that's
+    far from the recent trailing median — unless 3 consecutive rejects agree
+    with each other, which means it's a real step-change (panel cleaning,
+    shading removed) rather than one-off noise, and gets accepted as a block.
+    """
     if not (outlook and solar_kw >= 1.0):
         return
     current_ghi = outlook.avg_ghi(1)
     if current_ghi < 600:  # raised from 400 — only calibrate during clearly sunny conditions
         return
     sample = round(solar_kw / (current_ghi / 1000.0), 2)
-    if 0.5 <= sample <= 25.0:
-        samples = state.get("solar_cal_samples", [])
-        samples.append(sample)
-        state["solar_cal_samples"] = samples[-50:]
+    if not (0.5 <= sample <= 25.0):
+        return
+
+    samples = state.get("solar_cal_samples", [])
+    pending = state.get("solar_cal_pending", [])
+
+    if len(samples) >= 10:
+        recent_median = statistics.median(samples[-10:])
+        if recent_median > 0 and not (0.5 * recent_median <= sample <= 1.75 * recent_median):
+            pending = (pending + [sample])[-3:]
+            if len(pending) == 3 and (max(pending) - min(pending)) / statistics.mean(pending) <= 0.15:
+                logger.info(
+                    "Accepted solar calibration step-change: %.2f -> ~%.2f",
+                    recent_median, statistics.mean(pending),
+                )
+                samples.extend(pending)
+                state["solar_cal_samples"] = samples[-50:]
+                pending = []
+            state["solar_cal_pending"] = pending
+            return
+
+    state["solar_cal_pending"] = []
+    samples.append(sample)
+    state["solar_cal_samples"] = samples[-50:]
 
 
 def _calibrate_solar_hourly(state: dict, solar_kw: float, outlook, now: datetime) -> None:
@@ -334,7 +374,8 @@ def _alert_morning_preview(
         avg_ghi    = outlook.avg_ghi(12)
         cloudy_day = avg_ghi < _GHI_CLOUDY_THRESHOLD
         perf_ratio = _get_performance_ratio(state, cloudy=cloudy_day)
-        gen_kwh    = round(outlook.today_generation_kwh(system_peak_kw, perf_ratio), 1)
+        hourly_bias = _get_hourly_bias(state)
+        gen_kwh    = round(outlook.today_generation_kwh(system_peak_kw, perf_ratio, hourly_bias), 1)
         state[f"predicted_kwh_{today}"]     = gen_kwh
         state[f"predicted_avg_ghi_{today}"] = round(avg_ghi, 1)
 
@@ -352,7 +393,7 @@ def _alert_morning_preview(
         # Tomorrow forecast
         tmrw_ghi = outlook.tomorrow_avg_ghi()
         tmrw_sky = "Sunny" if tmrw_ghi >= 400 else ("Partly cloudy" if tmrw_ghi >= _GHI_CLOUDY_THRESHOLD else "Cloudy")
-        tmrw_kwh = outlook.tomorrow_generation_kwh(system_peak_kw, perf_ratio)
+        tmrw_kwh = outlook.tomorrow_generation_kwh(system_peak_kw, perf_ratio, hourly_bias)
         solar_est += f"\nTomorrow: {tmrw_sky} — ~{tmrw_kwh:.1f} kWh"
         bat_cap = cfg.battery_capacity_kwh if cfg else _BATTERY_CAPACITY_KWH
         solar_est += _precharge_plan(now, soc, tmrw_kwh, bat_cap)
@@ -596,7 +637,7 @@ def _alert_eod_digest(
         if sp:
             cloudy   = outlook.tomorrow_avg_ghi() < _GHI_CLOUDY_THRESHOLD
             pr       = _get_performance_ratio(state, cloudy=cloudy)
-            tmrw_kwh = outlook.tomorrow_generation_kwh(sp, pr)
+            tmrw_kwh = outlook.tomorrow_generation_kwh(sp, pr, _get_hourly_bias(state))
             precharge_str  = _precharge_plan(now, soc, tmrw_kwh, bat_cap)
             tmrw_solar_str = f"\n☀️ Tomorrow's solar: ~{tmrw_kwh:.1f} kWh ({'cloudy' if cloudy else 'sunny'})"
 
@@ -1347,7 +1388,7 @@ def _alert_multiday_cloudy_precharge(
     if not cloudy:
         return None
     pr = _get_performance_ratio(state, cloudy=True)
-    tmrw_kwh     = outlook.tomorrow_generation_kwh(sp, pr)
+    tmrw_kwh     = outlook.tomorrow_generation_kwh(sp, pr, _get_hourly_bias(state))
     day2_date    = (now + timedelta(days=2)).date()
     day2_hours   = [h for h in outlook.hours if h.time.date() == day2_date]
     from franklinwh_scraper.weather import _MIN_EFFICIENCY, _TEMP_COEFF

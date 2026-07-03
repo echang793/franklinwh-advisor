@@ -101,13 +101,23 @@ class SolarOutlook:
         ]
         return max((h.ghi_wm2 for h in today), default=0.0)
 
-    def today_generation_kwh(self, system_peak_kw: float, perf_ratio: float = 1.0) -> float:
-        """Estimate today's total solar generation in kWh with temperature derating."""
+    def today_generation_kwh(
+        self, system_peak_kw: float, perf_ratio: float = 1.0,
+        hourly_bias: dict[int, float] | None = None,
+    ) -> float:
+        """Estimate today's total solar generation in kWh with temperature derating.
+
+        hourly_bias: per-clock-hour learned correction (actual/predicted) that
+        captures systematic within-day shape errors — morning shade, inverter
+        clipping near solar noon — that a single flat perf_ratio can't.
+        """
         now = datetime.now()
         today_hours = [h for h in self.hours if h.time.date() == now.date()]
         total_kwh = 0.0
         for h in today_hours:
             eff = max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (h.panel_temp_c - 25.0))
+            if hourly_bias:
+                eff *= hourly_bias.get(h.time.hour, 1.0)
             total_kwh += h.ghi_wm2 / 1000.0 * system_peak_kw * eff
         return round(total_kwh * perf_ratio, 1)
 
@@ -142,8 +152,16 @@ class SolarOutlook:
             return 22.0
         return sum(h.temp_c for h in window) / len(window)
 
-    def tomorrow_generation_kwh(self, system_peak_kw: float, perf_ratio: float = 1.0) -> float:
-        """Estimate tomorrow's total solar generation in kWh with temperature derating."""
+    def tomorrow_generation_kwh(
+        self, system_peak_kw: float, perf_ratio: float = 1.0,
+        hourly_bias: dict[int, float] | None = None,
+    ) -> float:
+        """Estimate tomorrow's total solar generation in kWh with temperature derating.
+
+        hourly_bias: per-clock-hour learned correction (actual/predicted) that
+        captures systematic within-day shape errors — morning shade, inverter
+        clipping near solar noon — that a single flat perf_ratio can't.
+        """
         now = datetime.now()
         tomorrow = (now + timedelta(days=1)).date()
         total_kwh = 0.0
@@ -151,6 +169,8 @@ class SolarOutlook:
             if h.time.date() != tomorrow:
                 continue
             eff = max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (h.panel_temp_c - 25.0))
+            if hourly_bias:
+                eff *= hourly_bias.get(h.time.hour, 1.0)
             total_kwh += h.ghi_wm2 / 1000.0 * system_peak_kw * eff
         return round(total_kwh * perf_ratio, 1)
 

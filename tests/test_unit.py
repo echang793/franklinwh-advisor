@@ -151,3 +151,39 @@ def test_precharge_plan():
     assert alerts._precharge_plan(datetime(2026, 1, 15, 10), 40.0, 30.0, 13.6) == ""
     # high SoC → empty
     assert alerts._precharge_plan(datetime(2026, 1, 15, 10), 90.0, 2.0, 13.6) == ""
+
+
+def test_performance_ratio_ewma_tracks_recent_regime():
+    """A shift to a new multi-day regime should pull the estimate toward
+    the recent samples faster than a flat median of the whole history would."""
+    state = {"perf_ratio_samples": [1.15, 1.14, 1.18, 1.12] + [0.80, 0.82, 0.79]}
+    ratio = alerts._get_performance_ratio(state, cloudy=False)
+    flat_median = sorted(state["perf_ratio_samples"])[len(state["perf_ratio_samples"]) // 2]
+    assert ratio < flat_median  # pulled toward the newer, lower samples
+
+
+def test_performance_ratio_falls_back_below_3_samples():
+    assert alerts._get_performance_ratio({}, cloudy=False) == 1.0
+    assert alerts._get_performance_ratio({}, cloudy=True) == 0.85
+
+
+def test_calibrate_solar_rejects_single_outlier():
+    import types
+    outlook = types.SimpleNamespace(avg_ghi=lambda h: 700.0)
+    state = {"solar_cal_samples": [3.8] * 10}
+    # A single wildly different reading (sensor glitch) must not swing the pool.
+    alerts._calibrate_solar(state, solar_kw=8.0, outlook=outlook)  # ratio ~11.4, way off
+    assert len(state["solar_cal_samples"]) == 10
+    assert state["solar_cal_pending"] == [pytest.approx(11.43)]
+
+
+def test_calibrate_solar_accepts_consistent_step_change():
+    import types
+    outlook = types.SimpleNamespace(avg_ghi=lambda h: 700.0)
+    state = {"solar_cal_samples": [2.5] * 10}
+    # Three consecutive, mutually-consistent readings well above the old
+    # baseline (panels cleaned, shading removed) should be accepted as real.
+    for _ in range(3):
+        alerts._calibrate_solar(state, solar_kw=4.55, outlook=outlook)  # ratio 6.5
+    assert len(state["solar_cal_samples"]) == 13
+    assert state["solar_cal_pending"] == []
