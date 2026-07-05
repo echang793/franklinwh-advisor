@@ -208,17 +208,24 @@ class AccountClient:
         data_area = self._mqtt_send(payload, gateway)["result"]["dataArea"]
         return json.loads(data_area)
 
-    def get_stats(self, gateway: str) -> Stats:
+    def get_stats(self, gateway: str, _empty_retries: int = 2) -> Stats:
         """Get instantaneous + daily total stats for a gateway."""
         info = self.get_composite_info(gateway)
         data = info.get("runtimeData") or {}
         if not data:
-            # A transient gateway/API glitch can return an empty runtimeData
-            # payload. Every field below defaults to 0.0 if we proceed, which
-            # fabricates a fake "solar/battery/load all zero" reading that
-            # trips false alerts (e.g. "solar dropped mid-day") and pollutes
-            # history. Raise so this poll is treated like any other failed
-            # poll (retried, not recorded) instead of injected as real data.
+            # getDeviceCompositeInfo(refreshFlag=1) forces a live query to the
+            # gateway hardware — if the gateway doesn't answer in time, the API
+            # returns success with an empty runtimeData payload (a device
+            # handshake timing hiccup, not an account/API outage — the mobile
+            # app looks fine because it isn't forcing a live refresh). A short
+            # retry absorbs this instead of failing the whole poll cycle.
+            # Every field below defaults to 0.0 if we proceed with empty data,
+            # which fabricates a fake "solar/battery/load all zero" reading
+            # that trips false alerts (e.g. "solar dropped mid-day") and
+            # pollutes history — so still raise if retries are exhausted.
+            if _empty_retries > 0:
+                time.sleep(3)
+                return self.get_stats(gateway, _empty_retries=_empty_retries - 1)
             raise ConnectionError(f"Empty runtimeData from API for gateway {gateway}")
 
         # grid status

@@ -198,12 +198,28 @@ def test_get_401_does_not_recurse_forever(monkeypatch):
 def test_get_stats_rejects_empty_runtime_data(monkeypatch):
     """An empty runtimeData payload (transient gateway glitch) must raise,
     not fabricate a fake all-zero reading that trips false alerts."""
+    from franklinwh_scraper import account as account_module
     from franklinwh_scraper.account import AccountClient
 
     client = AccountClient("a@b.c", "pw")
+    monkeypatch.setattr(account_module.time, "sleep", lambda *_: None)
     monkeypatch.setattr(client, "get_composite_info", lambda gateway: {"runtimeData": {}})
     with pytest.raises(ConnectionError):
         client.get_stats("gw1")
+
+
+def test_get_stats_retries_through_transient_empty_runtime_data(monkeypatch):
+    """A brief gateway handshake timeout (empty runtimeData) should be
+    retried and recovered instead of failing the whole poll immediately."""
+    from franklinwh_scraper import account as account_module
+    from franklinwh_scraper.account import AccountClient
+
+    client = AccountClient("a@b.c", "pw")
+    monkeypatch.setattr(account_module.time, "sleep", lambda *_: None)
+    responses = [{"runtimeData": {}}, {"runtimeData": {}}, {"runtimeData": {"p_sun": 1.5}}]
+    monkeypatch.setattr(client, "get_composite_info", lambda gateway: responses.pop(0))
+    stats = client.get_stats("gw1")
+    assert stats.current.solar_production_kw == 1.5
 
 
 def test_precharge_plan():
