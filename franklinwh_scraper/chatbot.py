@@ -16,8 +16,9 @@ from .tou import on_peak_window, period_at, rate_at
 
 logger = logging.getLogger(__name__)
 
-_MAX_TURNS = 10   # conversation turns kept per chat
-_MODEL     = "claude-haiku-4-5-20251001"
+_MAX_TURNS   = 10   # conversation turns kept per chat
+_MODEL       = "claude-haiku-4-5-20251001"
+_DAILY_CALL_CAP = 50  # max chatbot API calls per day (single-user home app)
 
 
 _soc_bar     = soc_bar
@@ -147,6 +148,23 @@ class TelegramChatBot:
         self._outlook         = None
         self._system_peak_kw: float | None = None
         self._perf_ratio: float = 1.0
+        self._call_count_date: str = ""
+        self._call_count: int = 0
+
+    def _is_authorized(self, chat_id: str) -> bool:
+        """True if chat_id is the configured owner, or no owner is configured."""
+        return not self._cfg.telegram_chat_id or chat_id == self._cfg.telegram_chat_id
+
+    def _under_daily_cap(self) -> bool:
+        """True and increments the counter if today's call budget isn't exhausted."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today != self._call_count_date:
+            self._call_count_date = today
+            self._call_count = 0
+        if self._call_count >= _DAILY_CALL_CAP:
+            return False
+        self._call_count += 1
+        return True
 
     def update_state(self, stats, history_store, outlook,
                      system_peak_kw: float | None = None,
@@ -173,6 +191,11 @@ class TelegramChatBot:
                         continue
                     text    = (msg.get("text") or "").strip()
                     chat_id = str(msg["chat"]["id"])
+                    if not self._is_authorized(chat_id):
+                        # Drop silently — replying would confirm the bot exists
+                        # to a stranger who isn't the configured owner.
+                        logger.debug("Ignoring message from unauthorized chat_id %s", chat_id)
+                        continue
                     if not text:
                         continue
                     if text.lower() in ("/start", "/help"):
@@ -490,6 +513,9 @@ class TelegramChatBot:
                 stats   = self._stats
                 store   = self._hist_store
                 outlook = self._outlook
+            if not self._under_daily_cap():
+                self._send(chat_id, f"Daily question limit ({_DAILY_CALL_CAP}) reached — try again tomorrow.")
+                return
             ctx    = build_context(stats, store, outlook, self._cfg)
             backend = getattr(self._cfg, "chat_backend", "anthropic")
             if backend == "ollama":

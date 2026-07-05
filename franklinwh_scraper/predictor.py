@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .history import HistoryStore
+from .tou import _is_holiday
 
 _SEASON_MIN_DAYS = 21  # need at least this many days in season for seasonal profile
 
@@ -110,7 +111,11 @@ def predict(
 
     for h in range(horizon_hours):
         future = now + timedelta(hours=h)
-        slot   = (future.weekday(), future.hour)
+        # Holidays behave like Sundays (SDG&E TOU already treats them this way,
+        # see tou.py) — bucket under Sunday's weekday index instead of the
+        # actual weekday so a holiday's load doesn't dilute weekday profiles.
+        weekday = 6 if _is_holiday(future) else future.weekday()
+        slot   = (weekday, future.hour)
         slot_n = slot_counts.get(slot, 0)
 
         load_kw  = load_profile.get(slot)

@@ -2,13 +2,15 @@
 
 import pathlib
 import sys
+import time
 from datetime import datetime, timedelta
 
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from franklinwh_scraper import alerts, notifier, tou
+from franklinwh_scraper import alerts, notifier, predictor, tou
+from franklinwh_scraper.chatbot import TelegramChatBot
 from franklinwh_scraper.history import HistoryStore, integrate_intervals
 from franklinwh_scraper.config import Config
 from franklinwh_scraper.predictor import predict
@@ -306,3 +308,94 @@ def test_with_retry_stops_on_first_success(monkeypatch):
 
     notifier._with_retry(_succeeds_second_try, "test channel", attempts=3, base_delay=0)
     assert len(calls) == 2
+
+
+def _bot(chat_id: str = "owner-1") -> TelegramChatBot:
+    cfg = Config()
+    cfg.telegram_chat_id = chat_id
+    return TelegramChatBot(cfg, "fake-api-key")
+
+
+def test_chatbot_allowlist_rejects_foreign_chat_id():
+    bot = _bot("owner-1")
+    assert bot._is_authorized("owner-1") is True
+    assert bot._is_authorized("stranger-2") is False
+
+
+def test_chatbot_allowlist_allows_owner_chat_id():
+    bot = _bot("")  # no owner configured — allow everyone (back-compat)
+    assert bot._is_authorized("anyone") is True
+
+
+def test_chatbot_daily_cap_blocks_after_limit(monkeypatch):
+    bot = _bot()
+    monkeypatch.setattr("franklinwh_scraper.chatbot._DAILY_CALL_CAP", 3)
+    assert [bot._under_daily_cap() for _ in range(3)] == [True, True, True]
+    assert bot._under_daily_cap() is False
+
+
+def test_chatbot_daily_cap_resets_on_new_day(monkeypatch):
+    bot = _bot()
+    monkeypatch.setattr("franklinwh_scraper.chatbot._DAILY_CALL_CAP", 1)
+    assert bot._under_daily_cap() is True
+    assert bot._under_daily_cap() is False
+    bot._call_count_date = "2000-01-01"  # simulate yesterday
+    assert bot._under_daily_cap() is True
+
+
+def test_weather_stale_alert_fires_once(monkeypatch):
+    monkeypatch.setitem(alerts._outlook_cache, "fetched_at", time.time() - 4 * 3600)
+    state: dict = {}
+    now = datetime.now()
+    msg = alerts._alert_weather_stale(state, now.strftime("%Y-%m-%d"), now)
+    assert msg is not None and "stale" in msg
+    assert state["weather_stale_alerted"] is True
+    assert alerts._alert_weather_stale(state, now.strftime("%Y-%m-%d"), now) is None
+
+
+def test_weather_stale_alert_silent_when_fresh(monkeypatch):
+    monkeypatch.setitem(alerts._outlook_cache, "fetched_at", time.time() - 60)
+    now = datetime.now()
+    assert alerts._alert_weather_stale({}, now.strftime("%Y-%m-%d"), now) is None
+
+
+def test_weather_stale_alert_clears_after_fresh_fetch(monkeypatch):
+    now = datetime.now()
+    state = {"weather_stale_alerted": True}
+    monkeypatch.setitem(alerts._outlook_cache, "fetched_at", time.time() - 60)
+    assert alerts._alert_weather_stale(state, now.strftime("%Y-%m-%d"), now) is None
+    assert state["weather_stale_alerted"] is False
+
+
+def test_predict_treats_holiday_as_sunday_slot(tmp_path, monkeypatch):
+    """A holiday's load should be bucketed under Sunday's slot, not its
+    actual weekday, matching how tou.py already treats holidays as Sunday."""
+    db = HistoryStore(tmp_path / "h.db")
+    holiday = datetime(2026, 12, 25, 12, 0, 0)  # Christmas, a Friday in 2026
+    assert holiday.weekday() == 4
+
+    def _insert(day_of_week: int, load_kw: float):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (holiday.isoformat(), day_of_week, holiday.hour, load_kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+        )
+
+    # Sunday-slot readings (what the holiday SHOULD match).
+    for _ in range(5):
+        _insert(6, 9.0)
+    # Friday-slot readings (what it would match without holiday awareness).
+    for _ in range(5):
+        _insert(4, 1.0)
+    db._conn.commit()
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return holiday
+
+    monkeypatch.setattr(predictor, "datetime", _FakeDatetime)
+    forecast = predict(db, horizon_hours=1)
+
+    assert forecast.hours[0].predicted_load_kw > 5.0  # matched Sunday (9.0), not Friday (1.0)

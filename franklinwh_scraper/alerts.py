@@ -1515,6 +1515,32 @@ def _alert_tou_rates_stale(state: dict, today: str, now: datetime) -> str | None
     )
 
 
+_WEATHER_STALE_HOURS = 3  # age of served cache before we warn the forecast is stuck
+
+
+def _alert_weather_stale(state: dict, today: str, now: datetime) -> str | None:
+    """One-time alert when the cached weather forecast has gone stale because
+    fetch_solar_outlook has been failing repeatedly — otherwise this fails
+    silently forever per _fetch_outlook_cached's stale-cache fallback, and
+    solar predictions quietly run on old data."""
+    fetched_at = _outlook_cache.get("fetched_at")
+    if fetched_at is None:
+        return None
+    age_hours = (time.time() - fetched_at) / 3600
+    if age_hours < _WEATHER_STALE_HOURS:
+        state["weather_stale_alerted"] = False  # fresh fetch succeeded — allow re-firing later
+        return None
+    if state.get("weather_stale_alerted"):
+        return None
+    state["weather_stale_alerted"] = True
+    logger.info("Weather staleness alert sent for %s (age %.1fh)", today, age_hours)
+    return (
+        f"⚠️ <b>FranklinWH: Weather forecast stale</b>\n"
+        f"Open-Meteo hasn't returned fresh data in over {age_hours:.0f}h — solar "
+        f"predictions and forecasts are running on old data until this recovers."
+    )
+
+
 def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None, store=None) -> None:
     if not cfg.imessage_phone and not (cfg.telegram_bot_token and cfg.telegram_chat_id):
         return
@@ -1556,6 +1582,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("ev_charge_window",     lambda: _alert_ev_charge_window(state, today, now, c, cfg)),
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
+            ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),
         ]
         to_send: list[str] = []
         for _name, _fn in _candidates:
