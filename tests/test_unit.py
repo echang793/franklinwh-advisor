@@ -195,6 +195,17 @@ def test_get_401_does_not_recurse_forever(monkeypatch):
     assert len(calls) == 2  # original + one retry, then raise
 
 
+def test_get_stats_rejects_empty_runtime_data(monkeypatch):
+    """An empty runtimeData payload (transient gateway glitch) must raise,
+    not fabricate a fake all-zero reading that trips false alerts."""
+    from franklinwh_scraper.account import AccountClient
+
+    client = AccountClient("a@b.c", "pw")
+    monkeypatch.setattr(client, "get_composite_info", lambda gateway: {"runtimeData": {}})
+    with pytest.raises(ConnectionError):
+        client.get_stats("gw1")
+
+
 def test_precharge_plan():
     # dim tomorrow + low SoC + morning → recommend
     out = alerts._precharge_plan(datetime(2026, 1, 15, 10), 40.0, 2.0, 13.6)

@@ -212,6 +212,14 @@ class AccountClient:
         """Get instantaneous + daily total stats for a gateway."""
         info = self.get_composite_info(gateway)
         data = info.get("runtimeData") or {}
+        if not data:
+            # A transient gateway/API glitch can return an empty runtimeData
+            # payload. Every field below defaults to 0.0 if we proceed, which
+            # fabricates a fake "solar/battery/load all zero" reading that
+            # trips false alerts (e.g. "solar dropped mid-day") and pollutes
+            # history. Raise so this poll is treated like any other failed
+            # poll (retried, not recorded) instead of injected as real data.
+            raise ConnectionError(f"Empty runtimeData from API for gateway {gateway}")
 
         # grid status
         offgrid = data.get("offgridreason")
