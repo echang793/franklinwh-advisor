@@ -148,6 +148,7 @@ class TelegramChatBot:
         self._outlook         = None
         self._system_peak_kw: float | None = None
         self._perf_ratio: float = 1.0
+        self._usage_forecast = None
         self._call_count_date: str = ""
         self._call_count: int = 0
 
@@ -168,13 +169,15 @@ class TelegramChatBot:
 
     def update_state(self, stats, history_store, outlook,
                      system_peak_kw: float | None = None,
-                     perf_ratio: float = 1.0) -> None:
+                     perf_ratio: float = 1.0,
+                     usage_forecast=None) -> None:
         with self._lock:
             self._stats          = stats
             self._hist_store     = history_store
             self._outlook        = outlook
             self._system_peak_kw = system_peak_kw
             self._perf_ratio     = perf_ratio
+            self._usage_forecast = usage_forecast
 
     def run(self) -> None:
         logger.info("Telegram chatbot started")
@@ -277,6 +280,16 @@ class TelegramChatBot:
                         threading.Thread(
                             target=self._send_until,
                             args=(chat_id, _tgt),
+                            daemon=False,
+                        ).start()
+                        continue
+                    # /willmake <H> — will the battery make it H hours without grid import?
+                    _wm = re.search(r'/willmake\s+(\d+)|will\s+i\s+make\s+it\s+(\d+)\s*h', text.lower())
+                    if _wm:
+                        _hrs = int(next(g for g in _wm.groups() if g is not None))
+                        threading.Thread(
+                            target=self._send_projection,
+                            args=(chat_id, _hrs),
                             daemon=False,
                         ).start()
                         continue
@@ -609,6 +622,58 @@ class TelegramChatBot:
             )
         except Exception as e:
             logger.warning("_send_until error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
+    def _send_projection(self, chat_id: str, hours_ahead: int) -> None:
+        """Respond to /willmake H — project SoC forward using the solar+load
+        forecast (not just the current battery rate) and report whether the
+        battery stays above 0% without grid import through that window."""
+        try:
+            with self._lock:
+                stats    = self._stats
+                forecast = self._usage_forecast
+            if stats is None:
+                self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+                return
+            if forecast is None or forecast.confidence == "none":
+                self._send(chat_id, "Not enough usage history yet for a forecast-based projection.")
+                return
+            if not (1 <= hours_ahead <= 24):
+                self._send(chat_id, "Projection window must be 1-24 hours.")
+                return
+
+            cap = getattr(self._cfg, "battery_capacity_kwh", 13.6)
+            c   = stats.current
+            soc = c.battery_soc_pct
+            kwh = soc / 100.0 * cap
+
+            now     = datetime.now()
+            horizon = now + timedelta(hours=hours_ahead)
+            min_soc = soc
+            min_at  = now
+            for h in forecast.hours:
+                if h.dt <= now or h.dt > horizon:
+                    continue
+                kwh = max(0.0, min(cap, kwh + h.predicted_solar_kw - h.predicted_load_kw))
+                pct = kwh / cap * 100.0
+                if pct < min_soc:
+                    min_soc, min_at = pct, h.dt
+
+            end_pct = kwh / cap * 100.0
+            will_make_it = min_soc > 0.0
+            verdict = (
+                f"✅ Should make it — projected SoC stays above <b>{min_soc:.0f}%</b>"
+                if will_make_it else
+                f"⚠️ Projected to hit <b>0%</b> around {min_at.strftime('%-I:%M %p')} — grid import likely"
+            )
+            self._send(chat_id,
+                f"🔮 Projection: next {hours_ahead}h (using solar+load forecast)\n"
+                f"{verdict}\n"
+                f"Now: <b>{soc:.0f}%</b>  →  {horizon.strftime('%-I:%M %p')}: ~<b>{end_pct:.0f}%</b>\n"
+                f"<i>{forecast.confidence.title()} confidence, {forecast.data_days}d data — actual weather/load will vary.</i>"
+            )
+        except Exception as e:
+            logger.warning("_send_projection error: %s", e)
             self._send(chat_id, f"Error: {e}")
 
     def _send(self, chat_id: str, text: str) -> None:

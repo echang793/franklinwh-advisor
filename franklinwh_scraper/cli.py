@@ -1016,7 +1016,8 @@ def cmd_advise(
                 )
 
                 if _chatbot is not None:
-                    _chatbot.update_state(stats, history, outlook, system_peak_kw, perf_ratio)
+                    _chatbot.update_state(stats, history, outlook, system_peak_kw, perf_ratio,
+                                          usage_forecast=usage_forecast)
 
                 # Home Assistant webhook state push
                 if getattr(cfg, "ha_webhook_url", ""):

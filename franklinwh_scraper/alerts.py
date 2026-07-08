@@ -536,9 +536,11 @@ def _alert_export_arbitrage(
         return None  # hard month gate — inert outside Aug/Sep
     peak_hour, peak_rate = peak
 
-    # Fire late-morning/early-afternoon so the user has lead time before the
-    # export hour, once solar has had a chance to fill the battery.
-    if now.hour not in (11, 12, 13) or state.get("export_arb_date") == today:
+    # Fire late-morning through mid-afternoon so the user has lead time before
+    # the export hour, once solar has had a chance to fill the battery. Window
+    # extends to 3 pm to catch SoC crossing 85% late (e.g. cloudy morning that
+    # clears by early afternoon) — still once-per-day gated.
+    if now.hour not in (11, 12, 13, 14, 15) or state.get("export_arb_date") == today:
         return None
 
     soc = c.battery_soc_pct
@@ -1029,7 +1031,13 @@ def _track_battery_cycles(state: dict, c) -> None:
 
 
 def _alert_fast_drain(state: dict, today: str, now: datetime, c) -> str | None:
-    """Always updates last_soc/last_soc_time for rate tracking."""
+    """Always updates last_soc/last_soc_time for rate tracking.
+
+    Two tiers: a critical alert below 35% SoC (unchanged), and a lower-urgency
+    "unusual drain" alert at any SoC — catches an EV plugged in or AC left on
+    while there's still plenty of lead time to act, instead of only firing
+    once the battery is already low.
+    """
     prev_soc      = state.get("last_soc")
     prev_soc_time = state.get("last_soc_time")
     body = None
@@ -1040,6 +1048,7 @@ def _alert_fast_drain(state: dict, today: str, now: datetime, c) -> str | None:
                 drain_rate = (prev_soc - c.battery_soc_pct) / elapsed_h
                 if drain_rate >= 8.0 and c.battery_soc_pct < 35.0 and state.get("fast_drain_alerted_date") != today:
                     state["fast_drain_alerted_date"] = today
+                    state.pop("unusual_drain_streak", None)
                     logger.info("Fast drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
                     _tte_fd = _time_to_pct(c.battery_soc_pct, 0.0, _BATTERY_CAPACITY_KWH, c.battery_use_kw)
                     _tte_fd_s = f"\n⏱ ~{_fmt_hours(_tte_fd)} to empty" if _tte_fd is not None else ""
@@ -1049,6 +1058,22 @@ def _alert_fast_drain(state: dict, today: str, now: datetime, c) -> str | None:
                         f"Solar {c.solar_production_kw:.2f} kW\n"
                         f"Time: {now.strftime('%-I:%M %p')}{_tte_fd_s}"
                     )
+                elif drain_rate >= 6.0 and c.battery_soc_pct >= 35.0:
+                    # Require 2 consecutive polls over threshold to avoid noise
+                    # from a single momentary load spike.
+                    streak = state.get("unusual_drain_streak", 0) + 1
+                    state["unusual_drain_streak"] = streak
+                    if streak >= 2 and state.get("unusual_drain_alerted_date") != today:
+                        state["unusual_drain_alerted_date"] = today
+                        logger.info("Unusual drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
+                        body = (
+                            f"🟡 <b>FranklinWH: Unusual drain rate — {drain_rate:.0f}%/hr</b>\n"
+                            f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Load <b>{c.home_load_kw:.2f} kW</b>  ·  "
+                            f"Solar {c.solar_production_kw:.2f} kW\n"
+                            f"Time: {now.strftime('%-I:%M %p')} — check for EV charging or AC left on."
+                        )
+                else:
+                    state["unusual_drain_streak"] = 0
         except (ValueError, TypeError):
             pass
     state["last_soc"]      = c.battery_soc_pct
@@ -1117,14 +1142,40 @@ def _alert_solar_degradation(state: dict, today: str, now: datetime) -> str | No
 
     drop_pct = (baseline - recent) / baseline * 100
     state["solar_degradation_alerted_week"] = week_key
-    logger.info("Solar degradation alert: baseline PR=%.3f recent PR=%.3f drop=%.1f%%",
-                baseline, recent, drop_pct)
+
+    # Track consecutive alerted weeks — a single week can be seasonal soiling
+    # that clears on its own, but a persistent multi-week trend is more likely
+    # a real fault (panel failure, connector corrosion) worth escalating.
+    prior_week_key = (now - timedelta(days=7)).strftime("%G-W%V")
+    if state.get("solar_degradation_streak_week") == prior_week_key:
+        streak = state.get("solar_degradation_streak", 0) + 1
+    else:
+        streak = 1
+    state["solar_degradation_streak"]      = streak
+    state["solar_degradation_streak_week"] = week_key
+
+    logger.info("Solar degradation alert: baseline PR=%.3f recent PR=%.3f drop=%.1f%% streak=%d",
+                baseline, recent, drop_pct, streak)
+
+    persistent = streak >= 3
+    header = (
+        "🔴 <b>FranklinWH: Solar output persistently down</b>"
+        if persistent else
+        "⚠️ <b>FranklinWH: Solar output trending down</b>"
+    )
+    action = (
+        f"Persistent for {streak} consecutive weeks — likely a real fault "
+        "(panel failure, connector corrosion), not seasonal soiling. "
+        "Consider a professional inspection."
+        if persistent else
+        "This may indicate panel soiling, shading, or inverter efficiency loss.\n"
+        "Consider cleaning panels or checking inverter logs."
+    )
     return (
-        f"⚠️ <b>FranklinWH: Solar output trending down</b>\n"
+        f"{header}\n"
         f"7-day performance ratio: {recent:.2f} vs 30-day baseline {baseline:.2f} "
         f"({drop_pct:.0f}% drop)\n"
-        f"This may indicate panel soiling, shading, or inverter efficiency loss.\n"
-        f"Consider cleaning panels or checking inverter logs."
+        f"{action}"
     )
 
 
@@ -1429,7 +1480,7 @@ def _alert_solar_surplus_overflow(
     if state.get("surplus_overflow_date") == today:
         return None
     soc = c.battery_soc_pct
-    if soc < 93.0:
+    if soc < 100.0:
         return None
     # Battery charging or holding — solar exceeds load
     if c.battery_use_kw > 0.1 or c.solar_production_kw < c.home_load_kw:

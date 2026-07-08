@@ -63,6 +63,7 @@ def _tou_eb_plan(
     current_kwh    = soc / 100.0 * capacity_kwh
     current_rate   = rate_at(now)
     current_period = period_at(now).value.replace("_", " ")
+    on_peak_rate   = rate_at(peak_start)
 
     # ── Simulate battery from now → 4 pm ────────────────────────────
     solar_until_peak = 0.0
@@ -91,6 +92,9 @@ def _tou_eb_plan(
     target_kwh    = min(capacity_kwh, net_peak_draw + _EB_SOC_BUFFER * capacity_kwh)
     shortfall_kwh = max(0.0, target_kwh - kwh_at_peak)
     eb_needed     = shortfall_kwh > 0.0
+    # $ saved by covering the shortfall at today's rate instead of importing
+    # it at the 4–9 pm on-peak rate.
+    savings_est   = shortfall_kwh * max(0.0, on_peak_rate - current_rate)
 
     # ── Compute charge window ────────────────────────────────────────
     run_hours              = shortfall_kwh / charge_kw if charge_kw > 0 else 0.0
@@ -126,22 +130,28 @@ def _tou_eb_plan(
             hint = (
                 f"Run EB until 2 pm ({mins_left:.0f} min) — "
                 f"est. SoC at 4 pm: ~{soc_at_cutoff:.0f}%. "
-                "Switch back at 2 pm to avoid peak costs."
+                "Switch back at 2 pm to avoid peak costs. "
+                f"Est. savings: ${savings_est:.2f}."
             )
         else:
             until_str = run_until.strftime("%-I:%M %p")
             hint = (
                 f"Est. ~{run_hours:.1f}h to charge (until ~{until_str}). "
-                "Switch back before 2 pm to avoid peak costs."
+                "Switch back before 2 pm to avoid peak costs. "
+                f"Est. savings: ${savings_est:.2f}."
             )
     elif now < peak_start and run_until is not None:
         until_str = run_until.strftime("%-I:%M %p")
         hint = (
             f"Run EB until ~{until_str} (~{run_hours:.1f}h). "
-            f"Off-peak rate: ${current_rate:.3f}/kWh — switch back before 4 pm on-peak."
+            f"Off-peak rate: ${current_rate:.3f}/kWh — switch back before 4 pm on-peak. "
+            f"Est. savings: ${savings_est:.2f}."
         )
     else:
-        hint = f"Run EB for ~{run_hours:.1f}h. Current rate: ${current_rate:.3f}/kWh."
+        hint = (
+            f"Run EB for ~{run_hours:.1f}h. Current rate: ${current_rate:.3f}/kWh. "
+            f"Est. savings: ${savings_est:.2f}."
+        )
 
     return {
         "eb_needed":               eb_needed,
@@ -152,6 +162,7 @@ def _tou_eb_plan(
         "run_until":               run_until,
         "current_period":          current_period,
         "current_rate":            round(current_rate, 5),
+        "savings_est":             round(savings_est, 2),
         "hint_str":                hint,
     }
 
