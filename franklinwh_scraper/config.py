@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path.home() / ".franklinwh.json"
 
@@ -77,8 +80,10 @@ def load() -> Config:
             for k, v in data.items():
                 if hasattr(cfg, k):
                     setattr(cfg, k, v)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            # Previously silent — a corrupt config file meant credentials
+            # appeared to have "vanished" with zero trace in the logs.
+            logger.warning("Failed to read %s (%s) — falling back to defaults", CONFIG_PATH, e)
 
     overrides = {
         "email":    os.environ.get("FRANKLINWH_EMAIL", ""),
@@ -107,6 +112,19 @@ def load() -> Config:
 
 
 def save(cfg: Config) -> None:
-    """Save config to ~/.franklinwh.json with restricted permissions."""
-    CONFIG_PATH.write_text(json.dumps(cfg.to_dict(), indent=2))
-    CONFIG_PATH.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    """Save config to ~/.franklinwh.json with restricted permissions.
+
+    Creates the file with 0600 already applied via os.open's mode arg,
+    instead of write_text() (creates under the process umask, often 644)
+    followed by a separate chmod — that left a brief window where
+    credentials (password, smtp_password, anthropic_api_key) were
+    world/group-readable, and left them that way permanently if chmod
+    itself ever failed.
+    """
+    data = json.dumps(cfg.to_dict(), indent=2)
+    fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+    finally:
+        CONFIG_PATH.chmod(stat.S_IRUSR | stat.S_IWUSR)  # in case the file pre-existed with looser perms

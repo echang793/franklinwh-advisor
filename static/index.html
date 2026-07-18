@@ -783,6 +783,14 @@ function catOf(body){
   if (/\$|cost|bill|summary|peak|export|rate/.test(b)) return 'BILLING';
   return 'MODE';
 }
+function escapeHtml(s){
+  // Real entity-encoding (not just '<') before any innerHTML injection.
+  // Alert text is 100% server-generated today so this is dormant defense,
+  // not a live fix — but the previous "only escape '<'" pattern wasn't
+  // actually safe if that ever changes (a scraped string, a webhook echo).
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+          .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
 function segsOf(body){
   // convert the advisor's telegram HTML (<b>, <code>) into styled segments
   const clean = body.replace(/<code>|<\/code>/g, '');
@@ -833,7 +841,7 @@ function renderAlerts(){
   list.forEach(a => {
     let left = a.prog;
     const spans = [];
-    for (const sg of a.segs) { if (left <= 0) break; const t = left >= sg.t.length ? sg.t : sg.t.slice(0, left); spans.push(`<span style="color:${sg.c};font-weight:${sg.w};white-space:pre-wrap;">${t.replace(/</g,'&lt;')}</span>`); left -= sg.t.length; }
+    for (const sg of a.segs) { if (left <= 0) break; const t = left >= sg.t.length ? sg.t : sg.t.slice(0, left); spans.push(`<span style="color:${sg.c};font-weight:${sg.w};white-space:pre-wrap;">${escapeHtml(t)}</span>`); left -= sg.t.length; }
     const el = document.createElement('div');
     el.style.cssText = `background:${a.bg};border:1px solid ${a.border};border-radius:12px;padding:14px 16px;animation:rise .5s cubic-bezier(.2,.9,.3,1.2);cursor:pointer;transition:border-color .25s;`;
     el.title = 'Jump to related panel';
@@ -861,9 +869,9 @@ function renderDigests(){
   const items = [find('Daily Summary'), find('Weekly Summary'), find('Billing Cycle') || find('Monthly')];
   const cur = items[S.tab];
   const titles = ['📊 Daily Summary','📊 Weekly Summary','📅 Billing Cycle'];
-  const strip = s => s.replace(/<[^>]+>/g, '');
+  const strip = s => escapeHtml(s.replace(/<[^>]+>/g, ''));
   $('dg-body').innerHTML = cur
-    ? `<div style="animation:rise .4s ease-out;"><div style="font-size:14px;font-weight:700;margin-top:16px;">${strip(cur.body.split('\n')[0])}</div><pre class="digest">${strip(cur.body.split('\n').slice(1).join('\n')).replace(/</g,'&lt;')}</pre></div>`
+    ? `<div style="animation:rise .4s ease-out;"><div style="font-size:14px;font-weight:700;margin-top:16px;">${strip(cur.body.split('\n')[0])}</div><pre class="digest">${strip(cur.body.split('\n').slice(1).join('\n'))}</pre></div>`
     : `<div class="mono" style="font-size:11px;color:#4c5f50;margin-top:16px;">${titles[S.tab]} — none received yet. Digests appear after the advisor sends them (nightly / weekly / monthly).</div>`;
 }
 document.querySelectorAll('.tabbtn').forEach(b => b.addEventListener('click', () => {

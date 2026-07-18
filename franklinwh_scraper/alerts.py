@@ -396,7 +396,7 @@ def _alert_morning_preview(
 
     if outlook:
         cal_samples = state.get("solar_cal_samples", [])
-        system_peak_kw = _get_system_peak_kw(state)  # P85 — consistent with EOD digest
+        system_peak_kw = _get_system_peak_kw(state)  # P75 — consistent with EOD digest
         if system_peak_kw is not None:
             cal_note = f"{len(cal_samples)} readings"
         else:

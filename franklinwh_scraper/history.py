@@ -286,12 +286,15 @@ class HistoryStore:
 
     @staticmethod
     def _season_months(season: str) -> tuple[int, ...]:
-        return {
+        months = {
             "spring": (3, 4, 5),
             "summer": (6, 7, 8),
             "fall":   (9, 10, 11),
             "winter": (12, 1, 2),
-        }[season]
+        }.get(season.lower())
+        if months is None:
+            raise ValueError(f"Unknown season {season!r} — expected spring/summer/fall/winter")
+        return months
 
     def days_in_season(self, season: str) -> int:
         """Distinct calendar days with data that fall in the given season."""

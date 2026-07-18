@@ -178,8 +178,17 @@ def fetch_telegram_chat_id(bot_token: str, retries: int = 3, wait: int = 3) -> s
 
 
 def _esc(s: str) -> str:
-    """Escape double quotes for osascript strings."""
-    return s.replace('"', '\\"')
+    """Escape a string for embedding in an osascript double-quoted literal.
+
+    Backslash must be escaped first (or it would double-escape the
+    subsequent quote/newline escaping); newlines and carriage returns are
+    escaped too since raw control characters can distort the interpolated
+    AppleScript string.
+    """
+    return (s.replace("\\", "\\\\")
+             .replace('"', '\\"')
+             .replace("\n", "\\n")
+             .replace("\r", ""))
 
 
 def notify_email(body: str, cfg: "Config") -> None:

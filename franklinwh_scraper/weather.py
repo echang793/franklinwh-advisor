@@ -24,12 +24,18 @@ class GeoLocation:
 
 
 def geocode(city: str, timeout: int = 10) -> GeoLocation | None:
-    """Look up lat/lon for a city name. Returns None if not found."""
-    resp = requests.get(GEOCODING_URL, params={
-        "name": city, "count": 1, "language": "en", "format": "json",
-    }, timeout=timeout)
-    resp.raise_for_status()
-    results = resp.json().get("results")
+    """Look up lat/lon for a city name. Returns None if not found or on error —
+    consistent with fetch_nws_storm_alerts/fetch_solar_outlook in this same
+    module, which both catch broadly instead of propagating network errors."""
+    try:
+        resp = requests.get(GEOCODING_URL, params={
+            "name": city, "count": 1, "language": "en", "format": "json",
+        }, timeout=timeout)
+        resp.raise_for_status()
+        results = resp.json().get("results")
+    except Exception as e:
+        logger.debug("Geocode lookup failed for %r: %s", city, e)
+        return None
     if not results:
         return None
     r = results[0]
