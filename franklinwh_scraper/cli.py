@@ -36,6 +36,7 @@ from .config import Config, load as load_config, save as save_config
 from .exporters import export_csv, export_json
 
 from .history import HistoryStore
+from .license import ENFORCE_LICENSE, check_license
 from .notifier import (notify_email, notify_imessage, notify_log,
                        notify_macos, notify_telegram, notify_webhook,
                        fetch_telegram_chat_id, rec_to_text)
@@ -984,11 +985,41 @@ def cmd_advise(
             _info("Telegram AI chatbot started — message the bot to ask energy questions")
             click.echo()
 
+        if ENFORCE_LICENSE:
+            _lic = check_license(gateway or "")
+            if _lic.state == "invalid":
+                raise click.ClickException(f"License check failed: {_lic.message}")
+            if _lic.state == "grace":
+                _warn(_lic.message)
+
         _consec_errors   = 0
         _ERROR_THRESHOLD = 3
         _last_stats      = None  # cached for time-gated alerts during API outages
+        _lic_warn_date   = ""    # one grace-period Telegram warning per day
 
         while True:
+            # Re-check each cycle so expiry mid-run is caught; file read + Ed25519
+            # verify is microseconds, negligible at a 5-min poll cadence.
+            if ENFORCE_LICENSE:
+                _lic = check_license(gateway or "")
+                if _lic.state == "invalid":
+                    _err(f"License check failed: {_lic.message}")
+                    if cfg.telegram_bot_token and cfg.telegram_chat_id:
+                        notify_telegram(
+                            f"🔒 FranklinWH Advisor stopped: {_lic.message}",
+                            cfg.telegram_bot_token, cfg.telegram_chat_id,
+                        )
+                    break
+                if _lic.state == "grace":
+                    _today_str = datetime.now().strftime("%Y-%m-%d")
+                    if _lic_warn_date != _today_str:
+                        _lic_warn_date = _today_str
+                        _warn(_lic.message)
+                        if cfg.telegram_bot_token and cfg.telegram_chat_id:
+                            notify_telegram(
+                                f"🔒 {_lic.message}",
+                                cfg.telegram_bot_token, cfg.telegram_chat_id,
+                            )
             try:
                 stats = client.get_stats(gateway)
                 _last_stats = stats

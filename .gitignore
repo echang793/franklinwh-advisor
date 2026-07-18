@@ -37,3 +37,7 @@ CLAUDE.md
 *.json.bak
 .franklinwh.json
 .franklinwh*.json
+
+# Private license issuer — signs customer licenses with Eric's Ed25519 key.
+# Never staged, committed, or bundled into any build.
+scripts/issue_license.py
