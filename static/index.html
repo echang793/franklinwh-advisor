@@ -961,7 +961,23 @@ function resample(samples, dayStart){
   }
   return out;
 }
-async function J(url){ const r = await fetch(url); if (!r.ok) throw new Error(url + ' ' + r.status); return r.json(); }
+let _dashToken = localStorage.getItem('fwh-dash-token') || '';
+async function J(url){
+  const headers = _dashToken ? { 'X-Dashboard-Token': _dashToken } : {};
+  const r = await fetch(url, { headers });
+  if (r.status === 401) {
+    // Server has dashboard_token set but we don't have it (or it's wrong) —
+    // prompt once, store it, and retry this call.
+    const entered = prompt('Dashboard token required (set in ~/.franklinwh.json):');
+    if (entered) {
+      _dashToken = entered;
+      localStorage.setItem('fwh-dash-token', entered);
+      return J(url);
+    }
+  }
+  if (!r.ok) throw new Error(url + ' ' + r.status);
+  return r.json();
+}
 
 async function pollFast(){
   try {

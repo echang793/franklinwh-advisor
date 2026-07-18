@@ -55,6 +55,11 @@ class Config:
     # Values are alert-name strings (function suffix after _alert_).
     disabled_alerts: list[str] = field(default_factory=list)
 
+    # Optional shared-secret for the web dashboard (webapi.py). Empty = no
+    # auth required (fine for the default 127.0.0.1-only LaunchAgent binding;
+    # set this if the dashboard is ever reachable beyond localhost).
+    dashboard_token: str = ""
+
     def is_complete(self) -> bool:
         return bool(self.email and self.password and self.lat and self.lon)
 

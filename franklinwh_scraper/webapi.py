@@ -4,17 +4,23 @@ Serves the live dashboard (static/) and JSON endpoints that read the same
 files/DB the advisor writes — it never talks to the FranklinWH cloud itself,
 so it can run alongside the watch loop with zero extra API load.
 
-Run:  python3.13 -m uvicorn franklinwh_scraper.webapi:app --host 0.0.0.0 --port 8093
+Local-only by design: the shipped LaunchAgent binds --host 127.0.0.1, and
+that's the recommended binding — the /api/* routes have no auth beyond the
+optional dashboard_token below, so don't expose this port past localhost
+without setting one.
+
+Run:  python3.13 -m uvicorn franklinwh_scraper.webapi:app --host 127.0.0.1 --port 8093
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 
 from .alerts import (
@@ -43,6 +49,21 @@ _BAT_CAP = _cfg.battery_capacity_kwh or 13.6
 _POLL_S  = (_cfg.watch_interval or 5) * 60
 
 _CYCLE_START_DAY = 19  # SDG&E billing cycle boundary
+
+
+def _require_token(request: Request) -> None:
+    """Opt-in auth: no-op unless cfg.dashboard_token is set, so this doesn't
+    break the default unauthenticated-but-127.0.0.1-only setup. Set the
+    token in ~/.franklinwh.json if the dashboard is ever reachable beyond
+    localhost (port-forwarded, shared network, etc.)."""
+    if not _cfg.dashboard_token:
+        return
+    supplied = request.headers.get("X-Dashboard-Token", "")
+    if not hmac.compare_digest(supplied, _cfg.dashboard_token):
+        raise HTTPException(status_code=401, detail="Missing or invalid dashboard token")
+
+
+_authed = [Depends(_require_token)]
 
 
 def _db(path: Path) -> sqlite3.Connection:
@@ -108,7 +129,7 @@ def _saved_today(now: datetime) -> float:
     return round(saved, 2)
 
 
-@app.get("/api/current")
+@app.get("/api/current", dependencies=_authed)
 def api_current():
     r = _latest_reading()
     now = datetime.now()
@@ -134,7 +155,7 @@ def api_current():
     }
 
 
-@app.get("/api/recommendation")
+@app.get("/api/recommendation", dependencies=_authed)
 def api_recommendation():
     rec = {}
     try:
@@ -167,7 +188,7 @@ def api_recommendation():
     return {"recommendation": rec, "eb_plan": plan}
 
 
-@app.get("/api/alerts")
+@app.get("/api/alerts", dependencies=_authed)
 def api_alerts(limit: int = Query(20, ge=1, le=100)):
     out = []
     try:
@@ -182,7 +203,7 @@ def api_alerts(limit: int = Query(20, ge=1, le=100)):
     return {"alerts": list(reversed(out))}
 
 
-@app.get("/api/history")
+@app.get("/api/history", dependencies=_authed)
 def api_history(hours: int = Query(48, ge=1, le=168)):
     rows = _readings_since(datetime.now() - timedelta(hours=hours))
     return {"samples": [
@@ -192,7 +213,7 @@ def api_history(hours: int = Query(48, ge=1, le=168)):
     ]}
 
 
-@app.get("/api/forecast")
+@app.get("/api/forecast", dependencies=_authed)
 def api_forecast():
     now = datetime.now()
     state = _load_peak_state(_OUT)
@@ -226,7 +247,7 @@ def api_forecast():
             "current_soc": soc, "confidence": fc.confidence if fc else "none"}
 
 
-@app.get("/api/accuracy")
+@app.get("/api/accuracy", dependencies=_authed)
 def api_accuracy(days: int = Query(7, ge=1, le=30)):
     state = _load_peak_state(_OUT)
     out = []
@@ -245,7 +266,7 @@ def api_accuracy(days: int = Query(7, ge=1, le=30)):
     return {"days": out}
 
 
-@app.get("/api/tou")
+@app.get("/api/tou", dependencies=_authed)
 def api_tou():
     now = datetime.now()
     base = now.replace(minute=0, second=0, microsecond=0)
@@ -304,7 +325,7 @@ def _cycle_cost(start: date, end: date) -> dict:
             "saved": round(saved, 2)}
 
 
-@app.get("/api/bill")
+@app.get("/api/bill", dependencies=_authed)
 def api_bill():
     today = date.today()
     start, end = _cycle_bounds(today)
@@ -320,6 +341,13 @@ def api_bill():
         "net_mtd": cur["net"], "projected": projected,
         "prior_net": prior["net"], "saved_mtd": cur["saved"],
     }
+
+
+@app.get("/api/auth-status")
+def api_auth_status():
+    """Unauthenticated on purpose — tells the frontend whether it needs to
+    prompt for a token, without exposing the token itself."""
+    return {"required": bool(_cfg.dashboard_token)}
 
 
 app.mount("/", StaticFiles(directory=_ROOT / "static", html=True), name="static")
