@@ -47,7 +47,9 @@ Battery modes:
   Emergency Backup  – charges battery from grid (good before on-peak)
   Time-of-Use       – charges off-peak, discharges on-peak
 
-Be concise and practical. Use the system data block at the start of each message.
+Answer in 1-3 short sentences, Telegram-message length. No preamble, no restating \
+the question, no bullet lists unless the user asks for a breakdown. Give the direct \
+answer first. Use the system data block at the start of each message.
 """
 
 
@@ -548,7 +550,7 @@ class TelegramChatBot:
         history.append({"role": "user", "content": f"{context}\n\nQuestion: {question}"})
         resp = client.messages.create(
             model=_MODEL,
-            max_tokens=512,
+            max_tokens=200,
             system=_SYSTEM_PROMPT,
             messages=history,
         )
