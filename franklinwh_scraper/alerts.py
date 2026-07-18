@@ -20,8 +20,8 @@ from .format_utils import fmt_hours, soc_bar, time_to_pct
 from .history import integrate_intervals
 from .notifier import notify_email, notify_imessage_text, notify_telegram, notify_webhook
 from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
-                  export_rate_at, peak_export_hour, period_at, rate_at,
-                  rates_are_stale)
+                  export_rate_at, on_peak_window, peak_export_hour, period_at,
+                  rate_at, rates_are_stale)
 from .weather import fetch_nws_storm_alerts, fetch_solar_outlook
 
 logger = logging.getLogger(__name__)
@@ -980,7 +980,23 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store) -> str
     base_fee   = base_service_cost(days)
     net_cycle  = import_cost - export_credit + base_fee
     annual     = net_cycle / days * 365
-    direction  = "net consumer (you owe)" if annual >= 0 else "net exporter (building credit)"
+    is_consumer = annual >= 0
+    direction  = "net consumer (you owe)" if is_consumer else "net exporter (building credit)"
+
+    # Proactive sign-change flag: crossing from net-exporter to net-consumer
+    # (or back) mid-year is the kind of surprise that shows up as an
+    # unexpected true-up bill if nobody's watching the trend month to month.
+    prev_side  = state.get("nem_direction")
+    this_side  = "consumer" if is_consumer else "exporter"
+    flip_str   = ""
+    if prev_side is not None and prev_side != this_side:
+        flip_str = (
+            f"\n\n🔀 <b>You've crossed over to {direction} this cycle</b> "
+            f"(was {'net consumer' if prev_side == 'consumer' else 'net exporter'} last cycle) — "
+            f"expect a different true-up direction than you're used to."
+        )
+    state["nem_direction"] = this_side
+
     trueup_str = (
         f"\n\nNEM true-up (est.):\n"
         f"<code>  Import:       ${import_cost:.2f}\n"
@@ -1007,7 +1023,7 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store) -> str
         f"Home used:\n"
         f"<code>  This:  {cur.home_load_kwh:.1f} kWh{_mdelta(cur.home_load_kwh, prev.home_load_kwh)}\n"
         f"  Prior: {prev.home_load_kwh:.1f} kWh</code>{sparse_note}"
-        f"{trueup_str}"
+        f"{trueup_str}{flip_str}"
     )
 
 
@@ -1296,6 +1312,25 @@ def _alert_solar_degradation(state: dict, today: str, now: datetime) -> str | No
     drop_pct = (baseline - recent) / baseline * 100
     state["solar_degradation_alerted_week"] = week_key
 
+    # Translate the % drop into an estimated $/month cost — a raw percentage
+    # doesn't tell a homeowner whether to bother investigating; a dollar
+    # figure does. Uses the same predicted_kwh_{date} daily estimates the
+    # PR calibration already reads, so no new data source is needed.
+    cost_note = ""
+    predicted_daily = [
+        v for k, v in state.items()
+        if k.startswith("predicted_kwh_") and k[len("predicted_kwh_"):] >= cutoff_30
+        and isinstance(v, (int, float)) and v > 0
+    ]
+    if predicted_daily:
+        avg_daily_kwh   = statistics.mean(predicted_daily)
+        lost_kwh_month  = avg_daily_kwh * (drop_pct / 100) * 30
+        on_peak_start, _ = on_peak_window(now)
+        est_rate        = rate_at(on_peak_start)  # conservative: lost solar displaced by peak-rate import
+        est_monthly_cost = lost_kwh_month * est_rate
+        if est_monthly_cost >= 1.0:
+            cost_note = f"\nEst. ~${est_monthly_cost:.0f}/month in extra grid import at current usage."
+
     # Track consecutive alerted weeks — a single week can be seasonal soiling
     # that clears on its own, but a persistent multi-week trend is more likely
     # a real fault (panel failure, connector corrosion) worth escalating.
@@ -1327,7 +1362,7 @@ def _alert_solar_degradation(state: dict, today: str, now: datetime) -> str | No
     return (
         f"{header}\n"
         f"7-day performance ratio: {recent:.2f} vs 30-day baseline {baseline:.2f} "
-        f"({drop_pct:.0f}% drop)\n"
+        f"({drop_pct:.0f}% drop){cost_note}\n"
         f"{action}"
     )
 
@@ -1365,10 +1400,22 @@ def _alert_capacity_fade(state: dict, today: str, now: datetime, store) -> str |
     state["capacity_fade_alerted_week"] = week_key
     logger.info("Capacity-fade alert: recent %.1f kWh vs baseline %.1f kWh (%.0f%%)",
                 recent_cap, base_cap, fade_pct)
+
+    # Quantify: the lost kWh of usable capacity, assumed to cycle roughly
+    # daily, priced at the on-peak rate (the shortfall most likely shows up
+    # as extra 4-9pm grid import once the battery can no longer fully cover
+    # that window) — same estimation approach as the solar-degradation alert.
+    lost_kwh_cycle   = max(0.0, base_cap - recent_cap)
+    on_peak_start, _ = on_peak_window(now)
+    est_rate         = rate_at(on_peak_start)
+    est_monthly_cost = lost_kwh_cycle * 30 * est_rate
+    cost_note = (f"\nEst. ~${est_monthly_cost:.0f}/month in extra peak-rate grid import if this "
+                f"capacity gap goes uncovered." if est_monthly_cost >= 1.0 else "")
+
     return (
         f"🔋 <b>FranklinWH: Possible battery capacity fade</b>\n"
         f"Effective usable capacity ~{recent_cap:.1f} kWh recently vs ~{base_cap:.1f} kWh baseline "
-        f"({fade_pct:.0f}% lower)\n"
+        f"({fade_pct:.0f}% lower){cost_note}\n"
         f"From {len(recent)} recent / {len(base)} baseline discharge runs. "
         f"Some seasonal variation is normal — watch the trend; if it persists, check warranty."
     )
@@ -1514,8 +1561,18 @@ def _alert_heat_wave_prep(state: dict, today: str, now: datetime, c, outlook) ->
     )
 
 
-def _alert_ev_charge_window(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
-    """Evening: recommend the cheapest window to charge an EV (super-off-peak).
+_EV_SOLAR_SURPLUS_KWH = 5.0  # tomorrow's forecast surplus above this = "free" EV charging window
+
+
+def _alert_ev_charge_window(
+    state: dict, today: str, now: datetime, c, cfg: Config, outlook=None,
+) -> str | None:
+    """Evening: recommend the cheapest window to charge an EV.
+
+    Normally that's the fixed super-off-peak overnight window — but on a day
+    with a big predicted solar surplus tomorrow (the same signal
+    _alert_solar_surplus_overflow uses to flag solar going to waste), midday
+    charging from free solar beats even the cheapest grid rate.
 
     Only fires when cfg.ev_charging is set. Advisory only.
     """
@@ -1524,11 +1581,29 @@ def _alert_ev_charge_window(state: dict, today: str, now: datetime, c, cfg: Conf
     if now.hour not in (20, 21) or state.get("ev_charge_window_date") == today:
         return None
     state["ev_charge_window_date"] = today
-    # Super-off-peak overnight window: midnight–6 am (weekday rate)
+    kwh = getattr(cfg, "ev_kwh_per_session", 0.0) or 0.0
+
+    # Solar-surplus path: tomorrow's forecast exceeds a typical session's
+    # worth of charging — free beats cheap.
+    if outlook is not None:
+        sp = _get_system_peak_kw(state)
+        if sp is not None:
+            cloudy   = outlook.tomorrow_avg_ghi() < _GHI_CLOUDY_THRESHOLD
+            pr       = _get_performance_ratio(state, cloudy=cloudy)
+            tmrw_kwh = outlook.tomorrow_generation_kwh(sp, pr, _get_hourly_bias(state))
+            if not cloudy and tmrw_kwh >= _EV_SOLAR_SURPLUS_KWH:
+                logger.info("EV charge window alert (solar path) sent for %s", today)
+                return (
+                    f"☀️ <b>FranklinWH: Charge your EV from solar tomorrow</b>\n"
+                    f"Tomorrow's forecast: ~{tmrw_kwh:.1f} kWh solar — plenty of surplus expected. "
+                    f"Plug in mid-morning through early afternoon instead of overnight grid "
+                    f"charging; it's free instead of even the super-off-peak rate."
+                )
+
+    # Default path: cheapest grid window (super-off-peak overnight).
     sop = rate_at(now.replace(hour=1, minute=0, second=0, microsecond=0))
     onp = rate_at(now.replace(hour=17, minute=0, second=0, microsecond=0))
     cost_line = ""
-    kwh = getattr(cfg, "ev_kwh_per_session", 0.0) or 0.0
     if kwh > 0:
         save = kwh * (onp - sop)
         cost_line = (f"\n~{kwh:.0f} kWh: ${kwh * sop:.2f} at super-off-peak "
@@ -1820,7 +1895,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("multiday_cloudy_precharge", lambda: _alert_multiday_cloudy_precharge(state, today, now, c, outlook, cfg)),
             ("solar_surplus_overflow",    lambda: _alert_solar_surplus_overflow(state, today, now, c)),
             ("storm_prep",           lambda: _alert_storm_prep(state, today, now, c, cfg)),
-            ("ev_charge_window",     lambda: _alert_ev_charge_window(state, today, now, c, cfg)),
+            ("ev_charge_window",     lambda: _alert_ev_charge_window(state, today, now, c, cfg, outlook)),
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),
