@@ -70,16 +70,18 @@ def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
     Samples are stored oldest-first, so the EWMA weights the most recent day
     most heavily.
     """
+    # Clamp outliers to 1.4 rather than dropping them — a big under-prediction
+    # day (ratio > 1.4) is exactly the signal that should pull the EWMA up.
     if cloudy:
-        samples = [v for v in state.get("perf_ratio_cloudy_samples", []) if v <= 1.4]
+        samples = [min(v, 1.4) for v in state.get("perf_ratio_cloudy_samples", [])]
         if len(samples) < 3:
-            sunny = [v for v in state.get("perf_ratio_samples", []) if v <= 1.4]
+            sunny = [min(v, 1.4) for v in state.get("perf_ratio_samples", [])]
             if len(sunny) >= 3:
                 return max(_ewma(sunny) * 1.10, 0.60)
             return 0.85  # reasonable prior: cloudy panels run cooler
         return max(_ewma(samples), 0.55)
     else:
-        samples = [v for v in state.get("perf_ratio_samples", []) if v <= 1.4]
+        samples = [min(v, 1.4) for v in state.get("perf_ratio_samples", [])]
         if len(samples) < 3:
             return 1.0
         return max(_ewma(samples), 0.60)
@@ -117,6 +119,21 @@ def _send_alert(body: str, cfg: Config, urgent: bool = False) -> None:
         notify_email(body, cfg)
     if cfg.webhook_url:
         notify_webhook(body, urgent, cfg)
+    _log_alert(body, cfg, urgent)
+
+
+def _log_alert(body: str, cfg: Config, urgent: bool) -> None:
+    """Append the alert to output/alerts_log.jsonl for the web dashboard feed."""
+    try:
+        path = Path(cfg.output_dir) / "alerts_log.jsonl"
+        with open(path, "a") as f:
+            f.write(json.dumps({
+                "ts": datetime.now().isoformat(),
+                "urgent": urgent,
+                "body": body,
+            }) + "\n")
+    except OSError as e:
+        logger.debug("Alert log write failed: %s", e)
 
 
 def _ping_healthcheck(cfg: Config) -> None:
@@ -236,7 +253,7 @@ def _state_lock(out: Path):
 # Each takes (state, today, now, c, ...) and returns the alert body or None.
 # State mutations happen inside each function; caller saves state once at end.
 
-def _calibrate_solar(state: dict, solar_kw: float, outlook) -> None:
+def _calibrate_solar(state: dict, solar_kw: float, outlook, now: datetime | None = None) -> None:
     """Record a (solar_kw / GHI) sample used to estimate system peak kW.
 
     A single noisy reading (sensor glitch, a cloud edge the coarse hourly GHI
@@ -247,6 +264,11 @@ def _calibrate_solar(state: dict, solar_kw: float, outlook) -> None:
     shading removed) rather than one-off noise, and gets accepted as a block.
     """
     if not (outlook and solar_kw >= 1.0):
+        return
+    # Only sample near solar noon: GHI stays >600 well into the afternoon while
+    # panel output falls off with sun azimuth, so late-day samples systematically
+    # drag the peak-kW estimate below true midday capability.
+    if not (10 <= (now or datetime.now()).hour < 14):
         return
     current_ghi = outlook.avg_ghi(1)
     if current_ghi < 600:  # raised from 400 — only calibrate during clearly sunny conditions
@@ -268,14 +290,15 @@ def _calibrate_solar(state: dict, solar_kw: float, outlook) -> None:
                     recent_median, statistics.mean(pending),
                 )
                 samples.extend(pending)
-                state["solar_cal_samples"] = samples[-50:]
+                state["solar_cal_samples"] = samples[-240:]
                 pending = []
             state["solar_cal_pending"] = pending
             return
 
     state["solar_cal_pending"] = []
     samples.append(sample)
-    state["solar_cal_samples"] = samples[-50:]
+    # ~48 midday samples/day at 5-min polls — 240 spans ~5 days instead of one.
+    state["solar_cal_samples"] = samples[-240:]
 
 
 def _calibrate_solar_hourly(state: dict, solar_kw: float, outlook, now: datetime) -> None:
@@ -301,7 +324,9 @@ def _calibrate_solar_hourly(state: dict, solar_kw: float, outlook, now: datetime
         key = f"solar_bias_h{now.hour}"
         samples = state.get(key, [])
         samples.append(ratio)
-        state[key] = samples[-30:]
+        # 12 samples/hour/day at 5-min polls — 360 spans ~30 days so the median
+        # reflects a month of weather, not the last 2-3 days.
+        state[key] = samples[-360:]
 
 
 def _get_hourly_bias(state: dict) -> dict[int, float]:
@@ -588,11 +613,6 @@ def _alert_eod_digest(
     soc     = c.battery_soc_pct
     bat_cap = cfg.battery_capacity_kwh
 
-    backup_str = ""
-    if c.home_load_kw > 0.1:
-        backup_h   = soc / 100 * bat_cap / c.home_load_kw
-        backup_str = f"\n⏱ Backup: ~{backup_h:.1f} hr at current load"
-
     # ── DB-sourced energy totals ─────────────────────────────────────
     # API running counters reset on gateway restart / internet outage;
     # DB accumulates across all polls and is the reliable daily source.
@@ -618,19 +638,53 @@ def _alert_eod_digest(
         actual_kwh = solar_kwh
         delta_kwh  = actual_kwh - predicted_kwh
         sign       = "+" if delta_kwh >= 0 else ""
+        # Right-align the numbers (not just the labels) so the "kWh" column
+        # lines up even when predicted/actual/delta have different digit widths.
+        pred_str  = f"{predicted_kwh:>5.1f}"
+        act_str   = f"{actual_kwh:>5.1f}"
+        delta_str = f"{sign}{delta_kwh:.1f}"
+        delta_str = f"{delta_str:>5}"
         solar_delta_str = (
             f"\n🎯 Solar forecast vs actual:\n"
-            f"<code>  Predicted: {predicted_kwh:.1f} kWh\n"
-            f"  Actual:    {actual_kwh:.1f} kWh\n"
-            f"  Delta:     {sign}{delta_kwh:.1f} kWh ({sign}{delta_kwh / predicted_kwh * 100:.0f}%)</code>"
+            f"<code>  Predicted: {pred_str} kWh\n"
+            f"  Actual:    {act_str} kWh\n"
+            f"  Delta:     {delta_str} kWh ({sign}{delta_kwh / predicted_kwh * 100:.0f}%)</code>"
         )
 
-    soc_7am_str = ""
-    if usage_forecast and usage_forecast.hours and usage_forecast.confidence != "none":
-        tomorrow_7am  = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
-        night_net_kwh = sum(p.net_kw for p in usage_forecast.hours if now <= p.dt < tomorrow_7am)
-        pred_soc_7am  = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
-        soc_7am_str   = f"\n🌅 Predicted SoC @ 7 am: ~{pred_soc_7am:.0f}%"
+    soc_6am_str = ""
+    if usage_forecast and usage_forecast.hours:
+        # Find the first forecasted hour tomorrow where solar meaningfully starts,
+        # rather than a fixed clock time — sunrise (and thus the useful "how low
+        # did the battery get overnight" checkpoint) shifts several hours across
+        # the year, so a fixed 6 am either checks too early in winter or misses
+        # the tail of the draw-down in summer.
+        sunrise_dt = next(
+            (p.dt for p in usage_forecast.hours if p.dt > now and p.predicted_solar_kw > 0.1),
+            None,
+        )
+        # Round to the nearest whole hour for the label — forecast hours are
+        # offset from "now"'s minute, not aligned to :00.
+        if sunrise_dt is not None:
+            sunrise_hour = sunrise_dt.replace(minute=0, second=0, microsecond=0)
+            if sunrise_dt.minute >= 30:
+                sunrise_hour += timedelta(hours=1)
+        else:
+            sunrise_hour = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+
+        night_hours  = [p for p in usage_forecast.hours if now <= p.dt < sunrise_hour]
+        # Gate on the night window's own confidence, not the worst hour across
+        # the whole 24h forecast — a sparse hour later in the day (e.g. 3 pm
+        # tomorrow) shouldn't suppress a prediction that only uses tonight's data.
+        night_confs  = {p.confidence for p in night_hours}
+        night_conf   = next(
+            (c for c in ("none", "low", "medium", "high") if c in night_confs),
+            "none",
+        )
+        if night_hours and night_conf != "none":
+            night_net_kwh = sum(p.net_kw for p in night_hours)
+            pred_soc_6am  = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
+            hour_label    = sunrise_hour.strftime("%-I %p")
+            soc_6am_str   = f"\n🌅 Predicted SoC @ {hour_label}: ~{pred_soc_6am:.0f}%"
 
     precharge_str  = ""
     tmrw_solar_str = ""
@@ -710,7 +764,7 @@ def _alert_eod_digest(
         f"Batt dis: {batt_dis_kwh:.1f} kWh\n"
         f"Home:     {home_kwh:.1f} kWh</code>{self_suff_str}{peak_cov_str}{tou_str}\n"
         f"<code>─────────────────────</code>\n"
-        f"🔋 {_soc_bar(soc)}{backup_str}{soc_7am_str}{solar_delta_str}{tmrw_solar_str}{precharge_str}"
+        f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{tmrw_solar_str}{precharge_str}"
     )
 
 
@@ -1100,6 +1154,51 @@ def _alert_not_charging(state: dict, today: str, now: datetime, c) -> str | None
         f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW  ·  "
         f"Battery {c.battery_use_kw:+.2f} kW  ·  SoC {c.battery_soc_pct:.0f}%\n"
         f"Time: {now.strftime('%-I:%M %p')} — check battery mode or inverter."
+    )
+
+
+def _alert_prediction_drift(state: dict, today: str, now: datetime) -> str | None:
+    """Weekly watchdog: sustained absolute bias in solar predictions.
+
+    The PR EWMA, hourly bias, and peak-kW calibration should keep predictions
+    centred on actuals. If the 14-day mean actual/predicted ratio still sits
+    outside ±10%, some structural drift the loops can't fix has crept in
+    (EWMA pinned at its 1.4 clamp, panel changes, stale peak estimate) and a
+    human should look. Complements _alert_solar_degradation, which only
+    catches a *relative drop* vs the system's own baseline, not steady bias.
+    """
+    if now.hour not in (9, 10):
+        return None
+    last = state.get("prediction_drift_alert_date")
+    if last and (now - datetime.strptime(last, "%Y-%m-%d")).days < 7:
+        return None
+
+    cutoff = (now - timedelta(days=14)).strftime("%Y-%m-%d")
+    ratios = []
+    for k, v in state.items():
+        if k.startswith("daily_pr_") and k[len("daily_pr_"):] >= cutoff:
+            r = _safe_float(v)
+            if r is not None:
+                ratios.append(r)
+    if len(ratios) < 10:
+        return None
+
+    mean = sum(ratios) / len(ratios)
+    if 0.90 <= mean <= 1.10:
+        return None
+
+    state["prediction_drift_alert_date"] = today
+    pct = (mean - 1.0) * 100
+    direction = "low" if mean > 1.0 else "high"
+    logger.info("Prediction drift alert: 14-day mean PR=%.3f (%d days)", mean, len(ratios))
+    return (
+        f"📐 <b>FranklinWH: Solar predictions running {direction}</b>\n"
+        f"Last {len(ratios)} days: actual averaged {abs(pct):.0f}% "
+        f"{'above' if mean > 1.0 else 'below'} predicted "
+        f"(mean ratio {mean:.2f}).\n"
+        f"Self-calibration hasn't closed the gap — worth checking "
+        f"perf-ratio samples, system-peak estimate, and hourly bias in "
+        f"<code>.peak_alert_state.json</code>."
     )
 
 
@@ -1602,7 +1701,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
 
     with _state_lock(out):
         state = _load_peak_state(out)
-        _calibrate_solar(state, c.solar_production_kw, outlook)
+        _calibrate_solar(state, c.solar_production_kw, outlook, now)
         _calibrate_solar_hourly(state, c.solar_production_kw, outlook, now)
         _track_battery_cycles(state, c)
         _candidates = [
@@ -1622,6 +1721,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("fast_drain",        lambda: _alert_fast_drain(state, today, now, c)),
             ("not_charging",      lambda: _alert_not_charging(state, today, now, c)),
             ("solar_degradation",    lambda: _alert_solar_degradation(state, today, now)),
+            ("prediction_drift",     lambda: _alert_prediction_drift(state, today, now)),
             ("solar_back_to_baseline", lambda: _alert_solar_back_to_baseline(state, today, now)),
             ("capacity_fade",        lambda: _alert_capacity_fade(state, today, now, store)),
             ("peak_streak",          lambda: _alert_peak_streak(state, today, now)),

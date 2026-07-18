@@ -253,7 +253,8 @@ def test_calibrate_solar_rejects_single_outlier():
     outlook = types.SimpleNamespace(avg_ghi=lambda h: 700.0)
     state = {"solar_cal_samples": [3.8] * 10}
     # A single wildly different reading (sensor glitch) must not swing the pool.
-    alerts._calibrate_solar(state, solar_kw=8.0, outlook=outlook)  # ratio ~11.4, way off
+    alerts._calibrate_solar(state, solar_kw=8.0, outlook=outlook,
+                            now=datetime(2026, 7, 15, 12))  # ratio ~11.4, way off
     assert len(state["solar_cal_samples"]) == 10
     assert state["solar_cal_pending"] == [pytest.approx(11.43)]
 
@@ -265,9 +266,86 @@ def test_calibrate_solar_accepts_consistent_step_change():
     # Three consecutive, mutually-consistent readings well above the old
     # baseline (panels cleaned, shading removed) should be accepted as real.
     for _ in range(3):
-        alerts._calibrate_solar(state, solar_kw=4.55, outlook=outlook)  # ratio 6.5
+        alerts._calibrate_solar(state, solar_kw=4.55, outlook=outlook,
+                                now=datetime(2026, 7, 15, 12))  # ratio 6.5
     assert len(state["solar_cal_samples"]) == 13
     assert state["solar_cal_pending"] == []
+
+
+def test_prediction_drift_alert_fires_on_sustained_bias():
+    now = datetime(2026, 7, 15, 9)
+    state = {
+        f"daily_pr_2026-07-{d:02d}": 1.15 for d in range(2, 14)
+    }
+    msg = alerts._alert_prediction_drift(state, "2026-07-15", now)
+    assert msg is not None and "low" in msg
+    assert state["prediction_drift_alert_date"] == "2026-07-15"
+    # Dedupe: no re-fire within 7 days.
+    assert alerts._alert_prediction_drift(state, "2026-07-16", now + timedelta(days=1)) is None
+
+
+def test_prediction_drift_alert_silent_when_centred():
+    now = datetime(2026, 7, 15, 9)
+    state = {f"daily_pr_2026-07-{d:02d}": 1.02 for d in range(2, 14)}
+    assert alerts._alert_prediction_drift(state, "2026-07-15", now) is None
+    # Too few samples → silent even with big bias.
+    state = {f"daily_pr_2026-07-{d:02d}": 1.3 for d in range(10, 14)}
+    assert alerts._alert_prediction_drift(state, "2026-07-15", now) is None
+
+
+def _make_license(tmp_path, monkeypatch, gateway="GW123", expires="2099-01-01",
+                  tamper=False):
+    import base64
+    import json as _json
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    from franklinwh_scraper import license as lic
+
+    key = Ed25519PrivateKey.generate()
+    pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    monkeypatch.setattr(lic, "PUBLIC_KEY_B64", base64.b64encode(pub).decode())
+
+    payload = {"customer": "Test", "gateway_id": gateway,
+               "issued": "2026-01-01", "expires": expires}
+    canonical = _json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    sig = base64.b64encode(key.sign(canonical)).decode()
+    if tamper:
+        payload["expires"] = "2199-01-01"  # payload edited after signing
+    p = tmp_path / "lic.json"
+    p.write_text(_json.dumps({"payload": payload, "sig": sig}))
+    return p
+
+
+def test_license_valid_and_gateway_bound(tmp_path, monkeypatch):
+    from franklinwh_scraper import license as lic
+    p = _make_license(tmp_path, monkeypatch)
+    assert lic.check_license("GW123", path=p).state == "ok"
+    # Same file on a different system's gateway must fail.
+    assert lic.check_license("GW999", path=p).state == "invalid"
+    assert lic.check_license("", path=p).state == "invalid"
+
+
+def test_license_rejects_tampered_payload(tmp_path, monkeypatch):
+    from franklinwh_scraper import license as lic
+    p = _make_license(tmp_path, monkeypatch, tamper=True)
+    st = lic.check_license("GW123", path=p)
+    assert st.state == "invalid" and "signature" in st.message
+
+
+def test_license_expiry_grace_then_invalid(tmp_path, monkeypatch):
+    from datetime import date, timedelta
+    from franklinwh_scraper import license as lic
+    graceful = (date.today() - timedelta(days=5)).isoformat()
+    p = _make_license(tmp_path, monkeypatch, expires=graceful)
+    assert lic.check_license("GW123", path=p).state == "grace"
+    dead = (date.today() - timedelta(days=lic.GRACE_DAYS + 1)).isoformat()
+    p = _make_license(tmp_path, monkeypatch, expires=dead)
+    assert lic.check_license("GW123", path=p).state == "invalid"
+
+
+def test_license_missing_file(tmp_path):
+    from franklinwh_scraper import license as lic
+    assert lic.check_license("GW123", path=tmp_path / "nope").state == "invalid"
 
 
 def test_tou_rates_stale_alert_fires_once():

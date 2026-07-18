@@ -10,6 +10,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from franklinwh_scraper import alerts, notifier
 from franklinwh_scraper.config import Config
 from franklinwh_scraper.history import HistoryStore
+from franklinwh_scraper.predictor import HourPrediction, UsageForecast  # noqa: F401  used below
 from franklinwh_scraper.weather import HourlyForecast, SolarOutlook
 
 
@@ -85,6 +86,35 @@ def test_eod_digest_includes_tomorrow_solar(tmp_path):
     stats = _fake_stats()
     msg = alerts._alert_eod_digest(state, now.strftime("%Y-%m-%d"), now, stats, cfg, outlook, None)
     assert msg is not None and "Tomorrow's solar" in msg
+
+
+def test_eod_digest_format_locked(tmp_path):
+    """Regression lock for the daily-summary format: no backup-hours line,
+    predicted/actual/delta right-aligned to a fixed width, and the SoC
+    checkpoint labeled with the forecasted sunrise hour (not a hardcoded
+    6/7 am) — see conversation 2026-07-17."""
+    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+    # Sunrise forecast hour: first hour after `now` where solar > 0.1 kW.
+    sunrise = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+    hours = [
+        HourPrediction(dt=now + timedelta(hours=h), predicted_load_kw=0.8,
+                       predicted_solar_kw=(3.0 if now + timedelta(hours=h) >= sunrise else 0.0),
+                       net_kw=(2.2 if now + timedelta(hours=h) >= sunrise else -0.8),
+                       confidence="high")
+        for h in range(1, 13)
+    ]
+    forecast = UsageForecast(hours=hours, total_load_kwh=10.0, total_solar_kwh=20.0,
+                             net_kwh=10.0, peak_load_kw=1.0, confidence="high", data_days=30)
+    state = {"solar_cal_samples": [4.0, 4.2, 3.9], f"predicted_kwh_{now.strftime('%Y-%m-%d')}": 100.0}
+    cfg = Config(battery_capacity_kwh=13.6)
+    stats = _fake_stats(battery_soc_pct=72.0)  # totals.solar_kwh=30.0 → actual "27.4"-width case covered by 30.0
+    msg = alerts._alert_eod_digest(state, now.strftime("%Y-%m-%d"), now, stats, cfg, None, forecast)
+    assert msg is not None
+    assert "Backup:" not in msg
+    assert "Predicted SoC @ 6 AM:" in msg
+    assert "  Predicted: 100.0 kWh" in msg
+    assert "  Actual:     30.0 kWh" in msg  # right-aligned to width 5 — extra space vs "100.0"
+    assert "  Delta:     -70.0 kWh" in msg  # "-70.0" is already 5 chars, no extra pad
 
 
 def test_notifiers_graceful_when_unconfigured():
