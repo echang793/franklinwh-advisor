@@ -1024,6 +1024,10 @@ def _alert_grid_restored(state: dict, now: datetime, c, cfg: Config) -> str | No
 
     soc_start    = state.pop("grid_down_soc", c.battery_soc_pct)
     state.pop("grid_down_start")
+    # Clear the per-day dedup flag on restore, not just on outage-start — grid
+    # can drop more than once in a day, and grid_down/grid_restored are
+    # always-on safety alerts that must not go silent for a second outage.
+    state.pop("grid_down_alerted_date", None)
     soc_used     = max(0.0, soc_start - c.battery_soc_pct)
     kwh_used     = round(soc_used / 100 * cfg.battery_capacity_kwh, 1)
     dur_str      = (f"{duration_min / 60:.1f}h" if duration_min >= 60

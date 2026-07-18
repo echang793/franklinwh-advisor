@@ -148,6 +148,12 @@ def _dispatch_notifications(rec, cfg: Config, notify_flag: bool, last_mode: str 
     if cfg.telegram_bot_token and cfg.telegram_chat_id:
         notify_telegram(rec_to_text(rec), cfg.telegram_bot_token, cfg.telegram_chat_id)
 
+    if cfg.smtp_host and cfg.email_to:
+        notify_email(rec_to_text(rec), cfg)
+
+    if cfg.webhook_url:
+        notify_webhook(rec_to_text(rec), critical, cfg)
+
 
 def _resolve_gateway(client: AccountClient, gateway: str) -> str:
     if gateway:

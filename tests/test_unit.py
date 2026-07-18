@@ -348,6 +348,36 @@ def test_license_missing_file(tmp_path):
     assert lic.check_license("GW123", path=tmp_path / "nope").state == "invalid"
 
 
+def test_license_rejects_non_dict_payload(tmp_path, monkeypatch):
+    """A signed-but-malformed payload must degrade to invalid, not crash."""
+    import base64
+    import json as _json
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    from franklinwh_scraper import license as lic
+
+    key = Ed25519PrivateKey.generate()
+    pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    monkeypatch.setattr(lic, "PUBLIC_KEY_B64", base64.b64encode(pub).decode())
+    payload = ["not", "a", "dict"]
+    canonical = _json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    sig = base64.b64encode(key.sign(canonical)).decode()
+    p = tmp_path / "lic.json"
+    p.write_text(_json.dumps({"payload": payload, "sig": sig}))
+    assert lic.check_license("GW123", path=p).state == "invalid"
+
+
+def test_license_clock_rollback_detected(tmp_path, monkeypatch):
+    from datetime import date, timedelta
+    from franklinwh_scraper import license as lic
+    p = _make_license(tmp_path, monkeypatch, expires="2099-01-01")
+    assert lic.check_license("GW123", path=p).state == "ok"  # seeds .lastseen = today
+    future = (date.today() + timedelta(days=30)).isoformat()
+    lic._lastseen_path(p).write_text(future)
+    st = lic.check_license("GW123", path=p)
+    assert st.state == "invalid" and "rollback" in st.message.lower()
+
+
 def test_tou_rates_stale_alert_fires_once():
     stale_now = datetime(2026, 8, 1)  # well past 180 days from tou._RATES_EFFECTIVE_DATE
     state: dict = {}
@@ -477,3 +507,80 @@ def test_predict_treats_holiday_as_sunday_slot(tmp_path, monkeypatch):
     forecast = predict(db, horizon_hours=1)
 
     assert forecast.hours[0].predicted_load_kw > 5.0  # matched Sunday (9.0), not Friday (1.0)
+
+
+# ── advisor.py EB-plan gating ────────────────────────────────────────
+
+def test_recommend_eb_gates_on_projected_soc_not_current():
+    """Regression for the bug where a healthy *current* SoC (>=50%) could
+    suppress a real projected shortfall at 4pm. The recommendation must key
+    off plan['eb_needed'] (the projection), not the current-SoC threshold."""
+    import types
+    from franklinwh_scraper import advisor
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 15, 10, 0, 0)
+    peak_start = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    peak_end = now.replace(hour=21, minute=0, second=0, microsecond=0)
+    hours = []
+    t = now
+    while t < peak_end:
+        in_peak = peak_start <= t < peak_end
+        hours.append(HourPrediction(
+            dt=t, predicted_load_kw=1.5,
+            predicted_solar_kw=(0.1 if in_peak else 0.3),  # heavy cloud cover all day
+            net_kw=(0.1 - 1.5) if in_peak else (0.3 - 1.5),
+            confidence="high",
+        ))
+        t += timedelta(hours=1)
+    forecast = UsageForecast(hours=hours, total_load_kwh=15.0, total_solar_kwh=3.0,
+                             net_kwh=-12.0, peak_load_kw=1.5, confidence="high", data_days=30)
+
+    stats = types.SimpleNamespace(
+        current=types.SimpleNamespace(
+            battery_soc_pct=52.0,  # "healthy" by the old >=50% gate
+            home_load_kw=1.5, solar_production_kw=0.3, grid_status="normal",
+        ),
+        totals=types.SimpleNamespace(),
+    )
+    monkeypatch_now = advisor.datetime
+    try:
+        class _FakeDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        advisor.datetime = _FakeDatetime
+        rec = advisor.recommend(stats, outlook=None, forecast=forecast, battery_capacity_kwh=13.6)
+    finally:
+        advisor.datetime = monkeypatch_now
+
+    assert rec.mode == advisor.Mode.EMERGENCY_BACKUP
+    assert "short of covering" in rec.reason
+
+
+# ── alerts.py grid outage dedup ──────────────────────────────────────
+
+def test_grid_restored_clears_dedup_so_second_outage_alerts():
+    """Regression: a same-day repeat grid outage must still alert — grid_down
+    is an always-on safety alert and must not go silent after one restore."""
+    import types
+    c_down = types.SimpleNamespace(
+        grid_status="down", battery_soc_pct=80.0, home_load_kw=1.0,
+        solar_production_kw=0.0, generator_enabled=False, generator_production_kw=0.0,
+        battery_use_kw=1.0,
+    )
+    c_up = types.SimpleNamespace(grid_status="normal", battery_soc_pct=78.0,
+                                 solar_production_kw=0.5)
+    cfg = Config(battery_capacity_kwh=13.6)
+    state: dict = {}
+    today = "2026-07-15"
+
+    msg1 = alerts._alert_grid_down(state, today, datetime(2026, 7, 15, 9, 0), c_down, cfg)
+    assert msg1 is not None
+    msg2 = alerts._alert_grid_restored(state, datetime(2026, 7, 15, 10, 0), c_up, cfg)
+    assert msg2 is not None
+    assert "grid_down_alerted_date" not in state  # cleared on restore
+
+    # Second outage same day must alert again, not be silently deduped.
+    msg3 = alerts._alert_grid_down(state, today, datetime(2026, 7, 15, 15, 0), c_down, cfg)
+    assert msg3 is not None

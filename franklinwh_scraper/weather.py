@@ -71,10 +71,25 @@ class HourlyForecast:
 @dataclass
 class SolarOutlook:
     hours: list[HourlyForecast]
+    utc_offset_seconds: int = 0  # panel location's UTC offset, from Open-Meteo
+
+    def _local_now(self) -> datetime:
+        """'Now' in the panel location's timezone, not the machine's.
+
+        Open-Meteo returns hourly.time as naive-but-local-to-the-lat/lon
+        (timezone=auto). Comparing that against a machine-local datetime.now()
+        is only correct when the advisor runs in the same timezone as the
+        panels — true for the personal single-box deployment, false for a
+        commercial (gridwise) install running in e.g. a UTC container. Using
+        UTC now + the location's offset keeps every window/boundary check
+        below correct regardless of what timezone the process itself runs in.
+        """
+        from datetime import timezone
+        return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=self.utc_offset_seconds)
 
     def avg_ghi(self, next_hours: int) -> float:
         """Average global horizontal irradiance over the next N hours."""
-        now = datetime.now()
+        now = self._local_now()
         window = [
             h for h in self.hours
             if 0 <= (h.time - now).total_seconds() / 3600 <= next_hours
@@ -84,7 +99,7 @@ class SolarOutlook:
         return sum(h.ghi_wm2 for h in window) / len(window)
 
     def avg_cloud_cover(self, next_hours: int) -> float:
-        now = datetime.now()
+        now = self._local_now()
         window = [
             h for h in self.hours
             if 0 <= (h.time - now).total_seconds() / 3600 <= next_hours
@@ -94,7 +109,7 @@ class SolarOutlook:
         return sum(h.cloud_cover_pct for h in window) / len(window)
 
     def peak_ghi_today(self) -> float:
-        now = datetime.now()
+        now = self._local_now()
         today = [
             h for h in self.hours
             if h.time.date() == now.date()
@@ -111,7 +126,7 @@ class SolarOutlook:
         captures systematic within-day shape errors — morning shade, inverter
         clipping near solar noon — that a single flat perf_ratio can't.
         """
-        now = datetime.now()
+        now = self._local_now()
         today_hours = [h for h in self.hours if h.time.date() == now.date()]
         total_kwh = 0.0
         for h in today_hours:
@@ -123,7 +138,7 @@ class SolarOutlook:
 
     def tomorrow_avg_ghi(self) -> float:
         """Average GHI (W/m²) during solar hours (6 am–7 pm) tomorrow."""
-        now = datetime.now()
+        now = self._local_now()
         tomorrow = (now + timedelta(days=1)).date()
         window = [
             h for h in self.hours
@@ -143,7 +158,7 @@ class SolarOutlook:
 
     def avg_temp_c(self, next_hours: int) -> float:
         """Average forecast air temperature (°C) over the next N hours."""
-        now = datetime.now()
+        now = self._local_now()
         window = [
             h for h in self.hours
             if 0 <= (h.time - now).total_seconds() / 3600 <= next_hours
@@ -162,7 +177,7 @@ class SolarOutlook:
         captures systematic within-day shape errors — morning shade, inverter
         clipping near solar noon — that a single flat perf_ratio can't.
         """
-        now = datetime.now()
+        now = self._local_now()
         tomorrow = (now + timedelta(days=1)).date()
         total_kwh = 0.0
         for h in self.hours:
@@ -245,4 +260,4 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
         ))
 
     logger.debug("Fetched %d hourly forecasts for %.4f, %.4f", len(hours), lat, lon)
-    return SolarOutlook(hours=hours)
+    return SolarOutlook(hours=hours, utc_offset_seconds=js.get("utc_offset_seconds", 0))

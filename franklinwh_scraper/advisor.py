@@ -242,7 +242,13 @@ def recommend(
 
     # ── WARNING: TOU-aware EB decision (when usage history available) ─
     if forecast and forecast.confidence != "none":
-        if plan["eb_needed"] and soc < _SOC_HEALTHY:
+        # Gate on the *projected* shortfall (plan["eb_needed"]), not current SoC —
+        # current SoC can look healthy (e.g. 52%) while the forecast already
+        # accounts for a big midday draw-down that leaves a real deficit at
+        # 4pm. plan["eb_needed"] is derived from kwh_at_peak, which already
+        # incorporates current SoC, so an extra current-SoC gate here only
+        # ever suppresses correct recommendations, never adds useful signal.
+        if plan["eb_needed"]:
             return Recommendation(
                 mode=Mode.EMERGENCY_BACKUP,
                 reason=(
