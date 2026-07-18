@@ -584,3 +584,40 @@ def test_grid_restored_clears_dedup_so_second_outage_alerts():
     # Second outage same day must alert again, not be silently deduped.
     msg3 = alerts._alert_grid_down(state, today, datetime(2026, 7, 15, 15, 0), c_down, cfg)
     assert msg3 is not None
+
+
+# ── alerts.py state pruning ───────────────────────────────────────────
+
+def test_prune_old_state_covers_previously_unmatched_prefixes():
+    """Regression: predicted_kwh_/predicted_avg_ghi_/daily_import_cost_ keys
+    and *_week dedup markers used to match no prune rule and accumulated
+    forever."""
+    old_date = "2026-01-01"  # >30 days before "now" in any real run
+    old_week = "2026-W01"
+    state = {
+        f"predicted_kwh_{old_date}": 25.0,
+        f"predicted_avg_ghi_{old_date}": 400.0,
+        f"daily_import_cost_{old_date}": 1.5,
+        "solar_degradation_alerted_week": old_week,
+        f"predicted_kwh_{datetime.now().strftime('%Y-%m-%d')}": 30.0,  # keep: today
+    }
+    pruned = alerts._prune_old_state(state)
+    assert f"predicted_kwh_{old_date}" not in pruned
+    assert f"predicted_avg_ghi_{old_date}" not in pruned
+    assert f"daily_import_cost_{old_date}" not in pruned
+    assert "solar_degradation_alerted_week" not in pruned
+    assert f"predicted_kwh_{datetime.now().strftime('%Y-%m-%d')}" in pruned
+
+
+# ── alerts.py fast-drain minimum-elapsed floor ────────────────────────
+
+def test_fast_drain_ignores_near_zero_interval():
+    """Regression: a tiny elapsed_h (rapid re-poll) shouldn't be able to
+    amplify a 1% SoC blip into a false 'draining fast' alert."""
+    import types
+    c = types.SimpleNamespace(battery_soc_pct=30.0, home_load_kw=1.0,
+                              solar_production_kw=0.0, battery_use_kw=1.0)
+    now = datetime(2026, 7, 15, 12, 0, 0)
+    state = {"last_soc": 31.0, "last_soc_time": (now - timedelta(seconds=5)).isoformat()}
+    msg = alerts._alert_fast_drain(state, "2026-07-15", now, c)
+    assert msg is None  # 1%/5s would be ~720%/hr if not floored

@@ -212,15 +212,29 @@ def _safe_float(v) -> float | None:
         return None
 
 
+_DATE_KEYED_PREFIXES = (
+    "daily_pr_", "peak_cov_",
+    # These three are written daily but don't end in a literal "_date" suffix
+    # and previously matched none of the prune rules — the state file grew
+    # by one key per day per prefix, forever, for the life of the install.
+    "predicted_kwh_", "predicted_avg_ghi_", "daily_import_cost_",
+)
+
+
 def _prune_old_state(state: dict) -> dict:
-    """Drop date-keyed entries older than 30 days to prevent unbounded growth."""
+    """Drop date-keyed entries older than 30 days (or week-keyed dedup
+    markers older than ~4 weeks) to prevent unbounded growth."""
     cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    cutoff_week = (datetime.now() - timedelta(days=30)).strftime("%G-W%V")
     pruned = {}
     for k, v in state.items():
         if k.endswith("_date") and isinstance(v, str) and v < cutoff:
             continue
-        # Drop daily_pr_YYYY-MM-DD and peak_cov_YYYY-MM-DD entries older than 30 days
-        for prefix in ("daily_pr_", "peak_cov_"):
+        # Weekly dedup markers (solar_degradation_alerted_week, etc.) store an
+        # ISO "YYYY-Www" string, which sorts lexically the same way dates do.
+        if k.endswith("_week") and isinstance(v, str) and v < cutoff_week:
+            continue
+        for prefix in _DATE_KEYED_PREFIXES:
             if k.startswith(prefix) and k[len(prefix):] < cutoff:
                 break
         else:
@@ -1102,7 +1116,11 @@ def _alert_fast_drain(state: dict, today: str, now: datetime, c) -> str | None:
     if prev_soc is not None and prev_soc_time is not None:
         try:
             elapsed_h = (now - datetime.fromisoformat(prev_soc_time)).total_seconds() / 3600
-            if elapsed_h > 0:
+            # A floor, not just >0: two polls landing unusually close together
+            # (retry after a transient failure, manual/backfill run) can turn
+            # a 1% SoC blip into a triple-digit %/hr rate. This is an
+            # always-on alert, so a false positive here can't be muted.
+            if elapsed_h >= (2.0 / 60.0):
                 drain_rate = (prev_soc - c.battery_soc_pct) / elapsed_h
                 if drain_rate >= 8.0 and c.battery_soc_pct < 35.0 and state.get("fast_drain_alerted_date") != today:
                     state["fast_drain_alerted_date"] = today

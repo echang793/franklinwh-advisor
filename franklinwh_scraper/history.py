@@ -103,14 +103,25 @@ class MonthlyTotals:
 class HistoryStore:
     def __init__(self, db_path: Path = DEFAULT_DB_PATH):
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
-        self._conn.executescript(_CREATE_SQL)
-        for migration in _MIGRATIONS:
-            try:
-                self._conn.execute(migration)
-            except sqlite3.OperationalError:
-                pass  # column already exists
-        self._conn.commit()
+        # check_same_thread=False: webapi.py opens its own read-only connections
+        # to this same file from a different thread/process; WAL mode + a
+        # busy_timeout let concurrent readers wait out a writer's commit
+        # instead of raising "database is locked" on the first collision.
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.executescript(_CREATE_SQL)
+            for migration in _MIGRATIONS:
+                try:
+                    conn.execute(migration)
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+            conn.commit()
+        except Exception:
+            conn.close()
+            raise
+        self._conn = conn
 
     # ---------------------------------------------------------------- #
 

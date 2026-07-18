@@ -46,30 +46,51 @@ _CYCLE_START_DAY = 19  # SDG&E billing cycle boundary
 
 
 def _db(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    # busy_timeout lets a read collide with the CLI's writer commit and just
+    # wait it out (paired with WAL mode set by the writer in history.py)
+    # instead of raising "database is locked" immediately.
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def _latest_reading() -> dict | None:
+    conn = None
     try:
-        with _db(_OUT / "history.db") as c:
-            r = c.execute(
-                "SELECT timestamp, home_load_kw, solar_kw, battery_soc, grid_use_kw,"
-                "       grid_status, battery_use_kw, solar_total_kwh"
-                " FROM readings ORDER BY timestamp DESC LIMIT 1").fetchone()
-            return dict(r) if r else None
+        conn = _db(_OUT / "history.db")
+        r = conn.execute(
+            "SELECT timestamp, home_load_kw, solar_kw, battery_soc, grid_use_kw,"
+            "       grid_status, battery_use_kw, solar_total_kwh"
+            " FROM readings ORDER BY timestamp DESC LIMIT 1").fetchone()
+        return dict(r) if r else None
     except sqlite3.Error:
         return None
+    finally:
+        if conn is not None:
+            conn.close()
 
 
-def _readings_since(since: datetime) -> list[sqlite3.Row]:
-    with _db(_OUT / "history.db") as c:
-        return c.execute(
+def _readings_since(since: datetime, until: datetime | None = None) -> list[sqlite3.Row]:
+    conn = None
+    try:
+        conn = _db(_OUT / "history.db")
+        if until is not None:
+            return conn.execute(
+                "SELECT timestamp, grid_use_kw, home_load_kw, solar_kw, battery_soc,"
+                "       battery_use_kw"
+                " FROM readings WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+                (since.isoformat(), until.isoformat())).fetchall()
+        return conn.execute(
             "SELECT timestamp, grid_use_kw, home_load_kw, solar_kw, battery_soc,"
             "       battery_use_kw"
             " FROM readings WHERE timestamp >= ? ORDER BY timestamp",
             (since.isoformat(),)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _saved_today(now: datetime) -> float:
@@ -257,8 +278,15 @@ def _cycle_bounds(d: date) -> tuple[date, date]:
 
 
 def _cycle_cost(start: date, end: date) -> dict:
-    rows = _readings_since(datetime.combine(start, datetime.min.time()))
     end_dt = datetime.combine(end + timedelta(days=1), datetime.min.time())
+    # Bound the query to this cycle (+1h slack so the trapezoidal integrator
+    # below still has the one reading just past end_dt it needs to correctly
+    # close out the last interval). Without the upper bound, the prior-cycle
+    # lookup in api_bill() was fetching the *entire* current cycle too and
+    # discarding most of it in Python after fetchall() — worse every month
+    # as history.db grows.
+    rows = _readings_since(datetime.combine(start, datetime.min.time()),
+                           until=end_dt + timedelta(hours=1))
     imp = exp_credit = saved = 0.0
     for dt0, hours, grid_avg, home_avg, solar_avg in integrate_intervals(
             [(r["timestamp"], r["grid_use_kw"], r["home_load_kw"], r["solar_kw"]) for r in rows]):
