@@ -159,15 +159,22 @@ class TelegramChatBot:
         return not self._cfg.telegram_chat_id or chat_id == self._cfg.telegram_chat_id
 
     def _under_daily_cap(self) -> bool:
-        """True and increments the counter if today's call budget isn't exhausted."""
-        today = datetime.now().strftime("%Y-%m-%d")
-        if today != self._call_count_date:
-            self._call_count_date = today
-            self._call_count = 0
-        if self._call_count >= _DAILY_CALL_CAP:
-            return False
-        self._call_count += 1
-        return True
+        """True and increments the counter if today's call budget isn't exhausted.
+
+        Locked: each incoming message spawns its own worker thread, and an
+        unlocked check-then-increment here let two near-simultaneous
+        messages race past the check before either incremented, bypassing
+        the _DAILY_CALL_CAP spend guard it exists to enforce.
+        """
+        with self._lock:
+            today = datetime.now().strftime("%Y-%m-%d")
+            if today != self._call_count_date:
+                self._call_count_date = today
+                self._call_count = 0
+            if self._call_count >= _DAILY_CALL_CAP:
+                return False
+            self._call_count += 1
+            return True
 
     def update_state(self, stats, history_store, outlook,
                      system_peak_kw: float | None = None,
@@ -234,39 +241,44 @@ class TelegramChatBot:
                         self._convos.pop(chat_id, None)
                         self._send(chat_id, "Conversation cleared.")
                         continue
+                    # daemon=True below (all handler threads): matches the
+                    # parent bot thread's own daemon flag, which exists
+                    # specifically so process shutdown isn't blocked — a
+                    # non-daemon handler stuck behind a slow Ollama call
+                    # (up to the 120s urlopen timeout) used to defeat that.
                     if text.lower() == "/status":
                         threading.Thread(
                             target=self._send_status,
                             args=(chat_id,),
-                            daemon=False,
+                            daemon=True,
                         ).start()
                         continue
                     if text.lower() == "/forecast":
                         threading.Thread(
                             target=self._send_forecast,
                             args=(chat_id,),
-                            daemon=False,
+                            daemon=True,
                         ).start()
                         continue
                     if text.lower() == "/history":
                         threading.Thread(
                             target=self._send_history,
                             args=(chat_id,),
-                            daemon=False,
+                            daemon=True,
                         ).start()
                         continue
                     if text.lower() == "/bill":
                         threading.Thread(
                             target=self._send_bill,
                             args=(chat_id,),
-                            daemon=False,
+                            daemon=True,
                         ).start()
                         continue
                     if text.lower() == "/tip":
                         threading.Thread(
                             target=self._send_tip,
                             args=(chat_id,),
-                            daemon=False,
+                            daemon=True,
                         ).start()
                         continue
                     # /until <N[%]> or natural language "until/time to/reach N%"
@@ -282,7 +294,7 @@ class TelegramChatBot:
                         threading.Thread(
                             target=self._send_until,
                             args=(chat_id, _tgt),
-                            daemon=False,
+                            daemon=True,
                         ).start()
                         continue
                     # /willmake <H> — will the battery make it H hours without grid import?
@@ -292,13 +304,13 @@ class TelegramChatBot:
                         threading.Thread(
                             target=self._send_projection,
                             args=(chat_id, _hrs),
-                            daemon=False,
+                            daemon=True,
                         ).start()
                         continue
                     threading.Thread(
                         target=self._handle,
                         args=(chat_id, text),
-                        daemon=False,
+                        daemon=True,
                     ).start()
             except URLError:
                 time.sleep(5)
@@ -543,46 +555,53 @@ class TelegramChatBot:
             self._send(chat_id, f"Error: {e}")
 
     def _call_claude(self, chat_id: str, question: str, context: str) -> str:
+        # Locked read-modify-write: each incoming message runs on its own
+        # thread, and an unlocked snapshot-then-write-back here let two
+        # near-simultaneous messages for the same chat both read the same
+        # starting history and then last-writer-wins on the save, silently
+        # dropping one message's turn from the conversation.
         import anthropic
-        client  = anthropic.Anthropic(api_key=self._api_key)
-        history = list(self._convos.get(chat_id, []))
+        client = anthropic.Anthropic(api_key=self._api_key)
+        with self._lock:
+            history = list(self._convos.get(chat_id, []))
 
-        history.append({"role": "user", "content": f"{context}\n\nQuestion: {question}"})
-        resp = client.messages.create(
-            model=_MODEL,
-            max_tokens=200,
-            system=_SYSTEM_PROMPT,
-            messages=history,
-        )
-        reply = resp.content[0].text
-        history.append({"role": "assistant", "content": reply})
-        self._convos[chat_id] = history[-(_MAX_TURNS * 2):]
+            history.append({"role": "user", "content": f"{context}\n\nQuestion: {question}"})
+            resp = client.messages.create(
+                model=_MODEL,
+                max_tokens=200,
+                system=_SYSTEM_PROMPT,
+                messages=history,
+            )
+            reply = resp.content[0].text
+            history.append({"role": "assistant", "content": reply})
+            self._convos[chat_id] = history[-(_MAX_TURNS * 2):]
         return reply
 
     def _call_ollama(self, chat_id: str, question: str, context: str) -> str:
-        history = list(self._convos.get(chat_id, []))
-        history.append({"role": "user", "content": f"{context}\n\nQuestion: {question}"})
+        with self._lock:
+            history = list(self._convos.get(chat_id, []))
+            history.append({"role": "user", "content": f"{context}\n\nQuestion: {question}"})
 
-        messages = [{"role": "system", "content": _SYSTEM_PROMPT}] + history
-        model    = getattr(self._cfg, "ollama_model", "llama3.1:8b")
-        base_url = getattr(self._cfg, "ollama_url", "http://localhost:11434")
-        payload  = json.dumps({
-            "model":    model,
-            "messages": messages,
-            "stream":   False,
-        }).encode()
-        req  = Request(
-            f"{base_url.rstrip('/')}/api/chat",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urlopen(req, timeout=120) as resp:
-            data  = json.loads(resp.read())
-        reply = (data.get("message") or {}).get("content") or data.get("response", "")
-        if not reply:
-            raise ValueError(f"Unexpected Ollama response: {data}")
-        history.append({"role": "assistant", "content": reply})
-        self._convos[chat_id] = history[-(_MAX_TURNS * 2):]
+            messages = [{"role": "system", "content": _SYSTEM_PROMPT}] + history
+            model    = getattr(self._cfg, "ollama_model", "llama3.1:8b")
+            base_url = getattr(self._cfg, "ollama_url", "http://localhost:11434")
+            payload  = json.dumps({
+                "model":    model,
+                "messages": messages,
+                "stream":   False,
+            }).encode()
+            req  = Request(
+                f"{base_url.rstrip('/')}/api/chat",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(req, timeout=120) as resp:
+                data  = json.loads(resp.read())
+            reply = (data.get("message") or {}).get("content") or data.get("response", "")
+            if not reply:
+                raise ValueError(f"Unexpected Ollama response: {data}")
+            history.append({"role": "assistant", "content": reply})
+            self._convos[chat_id] = history[-(_MAX_TURNS * 2):]
         return reply
 
     def _send_until(self, chat_id: str, target_pct: int) -> None:

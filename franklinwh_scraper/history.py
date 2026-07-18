@@ -258,7 +258,12 @@ class HistoryStore:
                 dt_h = (
                     datetime.fromisoformat(t2) - datetime.fromisoformat(t1)
                 ).total_seconds() / 3600
-            except ValueError:
+            except (ValueError, TypeError):
+                # TypeError: a NULL timestamp (fromisoformat(None)) — every
+                # sibling integration function (integrate_intervals,
+                # capacity_samples, total_discharge_kwh) already catches
+                # both; this one only caught ValueError and would crash
+                # instead of skipping the bad row.
                 logger.warning("Skipping interval with bad timestamp: %r → %r", t1, t2)
                 continue
             avg = (b1 + b2) / 2
