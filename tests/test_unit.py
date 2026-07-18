@@ -152,8 +152,12 @@ def test_day_range_query_boundaries(tmp_path):
 def test_peak_export_hour():
     assert tou.peak_export_hour(8) == (18, 1.022)
     assert tou.peak_export_hour(9) == (19, 0.673)
-    assert tou.peak_export_hour(7) is None
-    assert tou.peak_export_hour(12) is None
+    # Outside Aug/Sep, falls back to the flat NBT floor rate instead of the
+    # old hard None gate — we don't have SDG&E's published per-hour export
+    # schedule for other months, so this is an honest flat number, not a
+    # fabricated hourly one.
+    assert tou.peak_export_hour(7) == (18, tou._NEM3_DEFAULT_EXPORT_RATE)
+    assert tou.peak_export_hour(12) == (18, tou._NEM3_DEFAULT_EXPORT_RATE)
 
 
 def test_alert_enabled():

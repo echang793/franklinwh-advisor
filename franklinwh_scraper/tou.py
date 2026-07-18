@@ -66,13 +66,21 @@ def export_rate_at(dt: datetime) -> float:
     return _NEM3_DEFAULT_EXPORT_RATE
 
 
-def peak_export_hour(month: int) -> tuple[int, float] | None:
-    """Highest-value export (hour, $/kWh) for the month, or None outside Aug/Sep."""
+def peak_export_hour(month: int) -> tuple[int, float]:
+    """Highest-value export (hour, $/kWh) for the month.
+
+    Aug/Sep use SDG&E's published per-hour NEM 3.0 boosted-evening rates.
+    Every other month falls back to a representative evening export hour
+    at the flat NBT avoided-cost floor (_NEM3_DEFAULT_EXPORT_RATE) — we
+    don't have SDG&E's published per-hour export schedule for those
+    months, so a flat floor is the honest number to advertise rather than
+    fabricating hourly variation the alert used to be hard-gated off for.
+    """
     rates = _NEM3_EXPORT_RATES.get(month)
-    if not rates:
-        return None
-    hour = max(rates, key=rates.__getitem__)
-    return hour, rates[hour]
+    if rates:
+        hour = max(rates, key=rates.__getitem__)
+        return hour, rates[hour]
+    return 18, _NEM3_DEFAULT_EXPORT_RATE
 
 
 def _is_holiday(dt: datetime) -> bool:

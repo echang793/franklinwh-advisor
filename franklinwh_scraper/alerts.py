@@ -218,6 +218,7 @@ _DATE_KEYED_PREFIXES = (
     # and previously matched none of the prune rules — the state file grew
     # by one key per day per prefix, forever, for the life of the install.
     "predicted_kwh_", "predicted_avg_ghi_", "daily_import_cost_",
+    "outages_",
 )
 
 
@@ -565,15 +566,15 @@ def _alert_low_noon_soc(state: dict, today: str, now: datetime, c) -> str | None
 def _alert_export_arbitrage(
     state: dict, today: str, now: datetime, c, cfg: Config, usage_forecast,
 ) -> str | None:
-    """Aug/Sep only: when the battery is full and won't be needed for self-supply,
-    advise exporting surplus to grid at the single highest-rate hour of the day.
+    """When the battery is full and won't be needed for self-supply, advise
+    exporting surplus to grid at the day's highest-value export hour —
+    Aug/Sep use SDG&E's published boosted per-hour rates, other months use
+    the flat NBT avoided-cost floor (see peak_export_hour). Runs year-round
+    now instead of the old hard Aug/Sep-only gate.
 
     Advisory only — does not command the inverter.
     """
-    peak = peak_export_hour(now.month)
-    if peak is None:
-        return None  # hard month gate — inert outside Aug/Sep
-    peak_hour, peak_rate = peak
+    peak_hour, peak_rate = peak_export_hour(now.month)
 
     # Fire late-morning through mid-afternoon so the user has lead time before
     # the export hour, once solar has had a chance to fill the battery. Window
@@ -605,7 +606,12 @@ def _alert_export_arbitrage(
     if exportable_kwh < 0.5:
         return None
 
-    credit     = exportable_kwh * peak_rate
+    credit = exportable_kwh * peak_rate
+    if credit < 1.0:
+        # Outside Aug/Sep the rate is the flat $0.05 floor, not a boosted
+        # hourly rate — without this, a routine day would "opportunity"-
+        # alert for a $0.10-$0.30 credit that isn't worth the notification.
+        return None
     hour_label = datetime(now.year, now.month, now.day, peak_hour).strftime("%-I %p")
     state["export_arb_date"] = today
     logger.info("Export arbitrage alert: %.1f kWh @ $%.3f = $%.2f at %s",
@@ -716,6 +722,20 @@ def _alert_eod_digest(
 
     self_suff_str = ""
 
+    # Multi-outage-per-day summary — outages_{date} is logged in full by
+    # _alert_grid_restored on every restore, not just the most recent one.
+    outage_str = ""
+    today_outages = state.get(f"outages_{today}", [])
+    if today_outages:
+        total_min = sum(o["duration_min"] for o in today_outages)
+        total_kwh = sum(o["kwh_used"] for o in today_outages)
+        dur_str = f"{total_min/60:.1f}h" if total_min >= 60 else f"{total_min:.0f} min"
+        n = len(today_outages)
+        outage_str = (
+            f"\n🔴 {n} grid outage{'s' if n != 1 else ''} today — {dur_str} total"
+            + (f", ~{total_kwh:.1f} kWh from battery" if total_kwh > 0.1 else "")
+        )
+
     # TOU daily cost estimate + peak coverage (requires history store)
     tou_str      = ""
     peak_cov_str = ""
@@ -779,7 +799,7 @@ def _alert_eod_digest(
         f"Grid out: {grid_out_kwh:.1f} kWh\n"
         f"Batt chg: {batt_chg_kwh:.1f} kWh\n"
         f"Batt dis: {batt_dis_kwh:.1f} kWh\n"
-        f"Home:     {home_kwh:.1f} kWh</code>{self_suff_str}{peak_cov_str}{tou_str}\n"
+        f"Home:     {home_kwh:.1f} kWh</code>{self_suff_str}{peak_cov_str}{tou_str}{outage_str}\n"
         f"<code>─────────────────────</code>\n"
         f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{tmrw_solar_str}{precharge_str}"
     )
@@ -1051,6 +1071,15 @@ def _alert_grid_restored(state: dict, now: datetime, c, cfg: Config) -> str | No
                     else f"{duration_min:.0f} min")
     kwh_str      = f"  ·  ~{kwh_used:.1f} kWh used from battery" if kwh_used > 0.1 else ""
     logger.info("Grid-restored alert: outage lasted %s", dur_str)
+
+    # Log every outage for today, not just the dedup flag — lets the EOD
+    # digest report "N outages today" instead of only ever knowing about
+    # the single most recent one.
+    today_key = outage_start.strftime("%Y-%m-%d")
+    log = state.get(f"outages_{today_key}", [])
+    log.append({"start": outage_start.isoformat(),
+               "duration_min": round(duration_min, 1), "kwh_used": kwh_used})
+    state[f"outages_{today_key}"] = log
     return (
         f"🟢 <b>FranklinWH: GRID RESTORED at {now.strftime('%-I:%M %p')}</b>\n"
         f"Outage lasted <b>{dur_str}</b>{kwh_str}\n"
@@ -1371,6 +1400,34 @@ def _alert_peak_streak(state: dict, today: str, now: datetime) -> str | None:
         f"{lines}\n"
         f"Battery may not be reaching 4 pm with enough charge. "
         f"Consider charging earlier or checking whether EB mode is being triggered in time."
+    )
+
+
+def _alert_peak_streak_good(state: dict, today: str, now: datetime) -> str | None:
+    """Evening check: last 7 consecutive days all >=95% peak coverage —
+    positive-reinforcement mirror of _alert_peak_streak, using the same
+    peak_cov_{date} state that's already tracked daily by _alert_eod_digest.
+    """
+    week_key = now.strftime("%G-W%V")
+    if now.hour not in (21, 22) or state.get("peak_streak_good_alerted_week") == week_key:
+        return None
+
+    good_days = []
+    check_date = now.date() - timedelta(days=1)
+    for _ in range(7):
+        date_str = check_date.strftime("%Y-%m-%d")
+        pct = state.get(f"peak_cov_{date_str}")
+        if pct is None or pct < 95.0:
+            return None  # missing data or streak broken
+        good_days.append(date_str)
+        check_date -= timedelta(days=1)
+
+    state["peak_streak_good_alerted_week"] = week_key
+    logger.info("Peak-coverage good streak alert: 7 consecutive days >=95%%")
+    return (
+        "🟢 <b>FranklinWH: 7 days straight covering peak</b>\n"
+        "Battery + solar have handled the 4–9 pm window without grid import "
+        "every day this week. System is well-sized for your current usage."
     )
 
 
@@ -1757,6 +1814,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("solar_back_to_baseline", lambda: _alert_solar_back_to_baseline(state, today, now)),
             ("capacity_fade",        lambda: _alert_capacity_fade(state, today, now, store)),
             ("peak_streak",          lambda: _alert_peak_streak(state, today, now)),
+            ("peak_streak_good",     lambda: _alert_peak_streak_good(state, today, now)),
             ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store)),
             ("heat_wave_prep",       lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),
             ("multiday_cloudy_precharge", lambda: _alert_multiday_cloudy_precharge(state, today, now, c, outlook, cfg)),
