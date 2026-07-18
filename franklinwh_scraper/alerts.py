@@ -591,12 +591,15 @@ def _alert_export_arbitrage(
     exportable_kwh = max(0.0, (soc - reserve_pct) / 100 * bat_cap)
 
     # Subtract predicted self-supply need at the export hour (net_kw = solar − load).
-    # Only apply when confidence is not "none" — a zero-load forecast (no history)
-    # would never reduce exportable_kwh, giving a falsely optimistic value.
-    if usage_forecast and usage_forecast.hours and usage_forecast.confidence != "none":
+    # Only apply when that specific hour's own confidence is not "none" — gating
+    # on the aggregate forecast.confidence would let one unrelated sparse hour
+    # elsewhere in the day suppress this correction, even though only the single
+    # matched hour is actually used below.
+    if usage_forecast and usage_forecast.hours:
         for p in usage_forecast.hours:
             if p.dt.date() == now.date() and p.dt.hour == peak_hour:
-                exportable_kwh = max(0.0, exportable_kwh - max(0.0, -p.net_kw))
+                if p.confidence != "none":
+                    exportable_kwh = max(0.0, exportable_kwh - max(0.0, -p.net_kw))
                 break
 
     if exportable_kwh < 0.5:
@@ -1560,7 +1563,8 @@ def _alert_multiday_cloudy_precharge(
     if not cloudy:
         return None
     pr = _get_performance_ratio(state, cloudy=True)
-    tmrw_kwh     = outlook.tomorrow_generation_kwh(sp, pr, _get_hourly_bias(state))
+    hourly_bias  = _get_hourly_bias(state)
+    tmrw_kwh     = outlook.tomorrow_generation_kwh(sp, pr, hourly_bias)
     day2_date    = (now + timedelta(days=2)).date()
     day2_hours   = [h for h in outlook.hours if h.time.date() == day2_date]
     from franklinwh_scraper.weather import _MIN_EFFICIENCY, _TEMP_COEFF
@@ -1568,6 +1572,12 @@ def _alert_multiday_cloudy_precharge(
     if day2_hours:
         for h in day2_hours:
             eff = max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (h.panel_temp_c - 25.0))
+            # Apply the same per-hour learned bias correction day-1 gets via
+            # tomorrow_generation_kwh() — without it, the two halves of this
+            # "2-day total" are computed by inconsistent models and silently
+            # diverge from what the system's own calibration would say.
+            if hourly_bias:
+                eff *= hourly_bias.get(h.time.hour, 1.0)
             day2_kwh += h.ghi_wm2 / 1000.0 * sp * eff
         day2_kwh = round(day2_kwh * pr, 1)
 

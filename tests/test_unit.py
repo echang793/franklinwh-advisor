@@ -621,3 +621,68 @@ def test_fast_drain_ignores_near_zero_interval():
     state = {"last_soc": 31.0, "last_soc_time": (now - timedelta(seconds=5)).isoformat()}
     msg = alerts._alert_fast_drain(state, "2026-07-15", now, c)
     assert msg is None  # 1%/5s would be ~720%/hr if not floored
+
+
+# ── advisor.py window-specific confidence gating ─────────────────────
+
+def test_tou_eb_plan_uses_window_confidence_not_aggregate():
+    """Regression: a single zero-history hour anywhere in the 24h forecast
+    used to drop UsageForecast.confidence to 'none' for everything, which
+    disabled the EB decision even when the now->9pm window it actually
+    needs has real data. Fix computes confidence per-window."""
+    from franklinwh_scraper import advisor
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 15, 10, 0, 0)
+    peak_start = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    peak_end = now.replace(hour=21, minute=0, second=0, microsecond=0)
+    hours = []
+    t = now
+    while t < peak_end + timedelta(hours=3):
+        # Everything through 9pm has real data; one unrelated late hour
+        # (11pm-ish) is "none" — this used to poison forecast.confidence
+        # for the whole 24h horizon.
+        conf = "none" if t >= peak_end + timedelta(hours=2) else "high"
+        hours.append(HourPrediction(dt=t, predicted_load_kw=2.0, predicted_solar_kw=0.5,
+                                    net_kw=-1.5, confidence=conf))
+        t += timedelta(hours=1)
+    forecast = UsageForecast(hours=hours, total_load_kwh=10.0, total_solar_kwh=2.0,
+                             net_kwh=-8.0, peak_load_kw=1.0, confidence="none",  # aggregate poisoned
+                             data_days=30)
+
+    plan = advisor._tou_eb_plan(now, soc=60.0, capacity_kwh=13.6, forecast=forecast)
+    # window_confidence covers now->peak_end, which is entirely "high" —
+    # must not fall back to the crude hardcoded default (net_peak_draw=4.0
+    # regardless of forecast).
+    assert plan["window_confidence"] == "high"
+    assert plan["net_peak_draw"] != 4.0
+
+
+# ── history.py solar-reset detection ──────────────────────────────────
+
+def test_daily_solar_kwh_api_falls_back_on_midday_reset(tmp_path):
+    """Regression: MAX(solar_total_kwh) silently under-reports if the API
+    counter resets mid-day (gateway reboot) and later production stays
+    below the pre-reset peak. Must detect the drop and use the trapezoidal
+    fallback instead."""
+    db = HistoryStore(tmp_path / "h.db")
+    day = "2026-07-15"
+    rows = [
+        (f"{day}T08:00:00", 3.0, 0.5, 1.5),   # ts, solar_total_kwh, home_kw, solar_kw
+        (f"{day}T10:00:00", 8.0, 0.5, 2.0),   # peak before reset
+        (f"{day}T12:00:00", 1.0, 0.5, 2.5),   # counter reset — drop below prior peak
+        (f"{day}T14:00:00", 5.0, 0.5, 2.5),   # real production continues, stays under 8.0
+    ]
+    for ts, total, home, solar in rows:
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts, 2, int(ts[11:13]), home, solar, 50.0, 0.0, "normal", total, 0.0),
+        )
+    db._conn.commit()
+
+    naive_max = 8.0  # what the old MAX()-only implementation would return
+    result = db.daily_solar_kwh_api(day)
+    assert result != naive_max  # must not silently under-report via MAX()
+    assert result > 0.0  # trapezoidal fallback still produces a real number

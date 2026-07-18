@@ -211,18 +211,33 @@ class HistoryStore:
         ).fetchall()
         return round(sum(s * hours for _dt, hours, _g, _h, s in integrate_intervals(rows)), 2)
 
+    _RESET_TOLERANCE_KWH = 0.05  # float noise floor when checking monotonicity
+
     def daily_solar_kwh_api(self, date_str: str) -> float:
         """Return actual daily solar kWh from the API's own running total.
 
-        Uses MAX(solar_total_kwh) for the date — the API counter resets at midnight
-        and peaks at end-of-day, so MAX gives the true daily production regardless
-        of how many polls were missed.  Returns 0.0 if no rows or column missing.
+        MAX(solar_total_kwh) for the date normally gives the true daily
+        production regardless of how many polls were missed, since the API
+        counter resets at midnight and peaks at end-of-day. But a gateway
+        reboot or MQTT session reset can also reset the counter *mid-day* —
+        if production after that reset stays below the pre-reset peak, a
+        naive MAX() would silently under-report the day. Detect a mid-day
+        drop and fall back to the trapezoidal method (daily_solar_kwh) when
+        the series isn't monotonically non-decreasing.
         """
-        row = self._conn.execute(
-            "SELECT MAX(solar_total_kwh) FROM readings WHERE timestamp >= ? AND timestamp < ?",
+        rows = self._conn.execute(
+            "SELECT solar_total_kwh FROM readings WHERE timestamp >= ? AND timestamp < ? "
+            "ORDER BY timestamp",
             (date_str, _next_day(date_str)),
-        ).fetchone()
-        return round(float(row[0]), 2) if row and row[0] is not None else 0.0
+        ).fetchall()
+        values = [r[0] for r in rows if r[0] is not None]
+        if not values:
+            return 0.0
+        for prev, cur in zip(values, values[1:]):
+            if cur < prev - self._RESET_TOLERANCE_KWH:
+                logger.info("Mid-day solar counter reset detected for %s — using trapezoidal fallback", date_str)
+                return self.daily_solar_kwh(date_str)
+        return round(max(values), 2)
 
     def daily_battery_kwh(self, date_str: str) -> tuple[float, float]:
         """Return (charge_kwh, discharge_kwh) for a calendar date via trapezoidal integration.
@@ -324,7 +339,7 @@ class HistoryStore:
         than an all-time or seasonal average would, at the cost of more noise
         per slot — callers should blend with a longer baseline, not use alone.
         """
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         rows = self._conn.execute(
             """
             SELECT day_of_week, hour_of_day, AVG(home_load_kw)
@@ -338,7 +353,7 @@ class HistoryStore:
 
     def recent_solar_profile(self, days: int) -> LoadProfile:
         """Average solar production kW keyed by (day_of_week, hour_of_day) over the trailing N days."""
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         rows = self._conn.execute(
             """
             SELECT day_of_week, hour_of_day, AVG(solar_kw)
@@ -352,7 +367,7 @@ class HistoryStore:
 
     def recent_slot_counts(self, days: int) -> dict[tuple[int, int], int]:
         """Number of readings per (day_of_week, hour_of_day) slot in the trailing N days."""
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         rows = self._conn.execute(
             "SELECT day_of_week, hour_of_day, COUNT(*) FROM readings "
             "WHERE timestamp >= ? GROUP BY day_of_week, hour_of_day",

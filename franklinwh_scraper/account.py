@@ -102,6 +102,11 @@ class AccountClient:
             raise ValueError(f"Invalid credentials: {js.get('message')}")
         if js.get("code") == 400:
             raise ValueError(f"Account locked: {js.get('message')}")
+        if js.get("code") != 200 or "result" not in js:
+            # Any other API error code (500, rate-limit, maintenance, etc.)
+            # used to fall through to js["result"]["token"] and crash with a
+            # bare KeyError instead of a clear auth error.
+            raise RuntimeError(f"Login failed, code {js.get('code')}: {js.get('message')}")
         self._token = js["result"]["token"]
         logger.info("Logged in as %s", self.email)
         return self._token
@@ -132,6 +137,14 @@ class AccountClient:
                 raise ConnectionError(f"Still unauthorized after re-login: {js.get('message')}")
             self.login()
             return self._get(path, params, _retried=True)
+        if js.get("code") not in (200, None):
+            # Callers (get_gateways, get_composite_info, ...) fall back to an
+            # empty result on a missing "result" key by design — that's the
+            # right behavior for e.g. a gateway handshake timeout. But a real
+            # API error code (500, rate-limit) hitting that same fallback
+            # used to look identical to "genuinely empty account" with zero
+            # trace in the logs. Surface it without changing control flow.
+            logger.warning("API call to %s returned code %s: %s", path, js.get("code"), js.get("message"))
         return js
 
     # -------------------------------------------------------------- #

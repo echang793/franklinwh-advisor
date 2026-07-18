@@ -47,6 +47,18 @@ _EB_CHARGE_KW  = 5.0   # conservative FranklinWH AC charge rate in EB mode
 _EB_SOC_BUFFER = 0.10  # extra 10% capacity buffer beyond projected peak draw
 
 
+def _window_confidence(forecast: UsageForecast | None, start: datetime, end: datetime) -> str:
+    """Worst confidence among forecast hours in [start, end) — narrower than
+    gating on UsageForecast.confidence (the worst hour across the *entire*
+    24h horizon), which lets one zero-history hour anywhere in the day
+    suppress a perfectly good near-term forecast. Same trick alerts.py's
+    _alert_eod_digest already uses for its overnight SoC projection."""
+    if not forecast or not forecast.hours:
+        return "none"
+    confs = {p.confidence for p in forecast.hours if start <= p.dt < end}
+    return next((c for c in ("none", "low", "medium", "high") if c in confs), "none")
+
+
 def _tou_eb_plan(
     now: datetime,
     soc: float,
@@ -65,10 +77,17 @@ def _tou_eb_plan(
     current_period = period_at(now).value.replace("_", " ")
     on_peak_rate   = rate_at(peak_start)
 
+    # Gate each phase on the confidence of *its own* window, not the worst
+    # hour across the whole 24h forecast — an unrelated sparse hour late in
+    # the day shouldn't suppress a prediction that only needs now→9pm.
+    pre_peak_conf = _window_confidence(forecast, now, peak_start)
+    peak_conf     = _window_confidence(forecast, peak_start, peak_end)
+    window_conf   = _window_confidence(forecast, now, peak_end)
+
     # ── Simulate battery from now → 4 pm ────────────────────────────
     solar_until_peak = 0.0
     load_until_peak  = 0.0
-    if forecast and forecast.confidence != "none":
+    if forecast and pre_peak_conf != "none":
         for h in forecast.hours:
             if now <= h.dt < peak_start:
                 solar_until_peak += max(0.0, h.predicted_solar_kw)
@@ -79,7 +98,7 @@ def _tou_eb_plan(
     soc_at_peak = kwh_at_peak / capacity_kwh * 100.0
 
     # ── Forecast energy needed during 4–9 pm ────────────────────────
-    if forecast and forecast.confidence != "none":
+    if forecast and peak_conf != "none":
         peak_load  = sum(max(0.0, h.predicted_load_kw)
                          for h in forecast.hours if peak_start <= h.dt < peak_end)
         peak_solar = sum(max(0.0, h.predicted_solar_kw)
@@ -164,6 +183,7 @@ def _tou_eb_plan(
         "current_rate":            round(current_rate, 5),
         "savings_est":             round(savings_est, 2),
         "hint_str":                hint,
+        "window_confidence":       window_conf,
     }
 
 
@@ -241,7 +261,11 @@ def recommend(
         )
 
     # ── WARNING: TOU-aware EB decision (when usage history available) ─
-    if forecast and forecast.confidence != "none":
+    # Gate on the now→9pm window's own confidence (plan["window_confidence"]),
+    # not the aggregate forecast.confidence — a zero-history hour anywhere in
+    # the full 24h horizon shouldn't disable the EB decision when the hours
+    # that actually matter here (now through peak) have real data.
+    if forecast and plan["window_confidence"] != "none":
         # Gate on the *projected* shortfall (plan["eb_needed"]), not current SoC —
         # current SoC can look healthy (e.g. 52%) while the forecast already
         # accounts for a big midday draw-down that leaves a real deficit at
