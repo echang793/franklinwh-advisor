@@ -291,7 +291,23 @@ mkPanel('ebplan', `
     <div class="tile"><div id="eb-net" style="font-size:24px;font-weight:700;color:#b9d8be;">— <span style="font-size:14px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">net peak draw</div></div>
     <div class="tile"><div id="eb-short" style="font-size:24px;font-weight:700;color:#57e389;">— <span style="font-size:14px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">EB shortfall</div></div>
   </div>
-  <div id="eb-msg" class="mono" style="font-size:11.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+  <div id="eb-msg" class="mono" style="font-size:11.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>
+  <div style="border-top:1px solid #18261b;margin-top:16px;padding-top:14px;display:flex;flex-direction:column;gap:10px;">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <span class="mono" style="font-size:10px;letter-spacing:.1em;color:#5f7263;">WILL I MAKE IT</span>
+      <input id="wm-hours" type="number" min="1" max="24" value="8" style="width:48px;background:#0c130d;border:1px solid #18261b;border-radius:6px;color:#e6f2e8;font-family:'JetBrains Mono',monospace;font-size:11px;padding:4px 6px;">
+      <span class="mono" style="font-size:10px;color:#5f7263;">hours</span>
+      <button id="wm-check" class="chip">CHECK</button>
+    </div>
+    <div id="wm-result" class="mono" style="font-size:11px;line-height:1.6;"></div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <span class="mono" style="font-size:10px;letter-spacing:.1em;color:#5f7263;">TIME TO</span>
+      <input id="until-target" type="number" min="0" max="100" value="80" style="width:48px;background:#0c130d;border:1px solid #18261b;border-radius:6px;color:#e6f2e8;font-family:'JetBrains Mono',monospace;font-size:11px;padding:4px 6px;">
+      <span class="mono" style="font-size:10px;color:#5f7263;">%</span>
+      <button id="until-check" class="chip">CHECK</button>
+    </div>
+    <div id="until-result" class="mono" style="font-size:11px;line-height:1.6;"></div>
+  </div>`);
 
 mkPanel('touclock', `
   <div class="plabel">TOU RATE CLOCK · EV-TOU-5</div>
@@ -998,6 +1014,43 @@ async function J(url){
   if (!r.ok) throw new Error(url + ' ' + r.status);
   return r.json();
 }
+
+// ── EB panel: willmake / until (dashboard equivalents of the chatbot commands) ──
+$('wm-check').addEventListener('click', async () => {
+  const hours = Math.max(1, Math.min(24, +$('wm-hours').value || 8));
+  const out = $('wm-result');
+  out.textContent = 'checking…'; out.style.color = '#5f7263';
+  try {
+    const r = await J(`/api/willmake?hours=${hours}`);
+    if (!r.ok) { out.textContent = r.error === 'insufficient_forecast' ? 'Not enough usage history yet.' : 'No data yet.'; return; }
+    if (r.will_make_it) {
+      out.style.color = '#57e389';
+      out.textContent = `✓ Should make it — stays above ${r.min_soc.toFixed(0)}% (now ${r.current_soc.toFixed(0)}% → ~${r.end_soc.toFixed(0)}% in ${hours}h)`;
+    } else {
+      out.style.color = '#f5b942';
+      const minAt = new Date(r.min_at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+      out.textContent = `⚠ Projected to hit 0% around ${minAt} — grid import likely`;
+    }
+  } catch(e) { out.textContent = 'Error checking projection.'; out.style.color = '#f5b942'; }
+});
+$('until-check').addEventListener('click', async () => {
+  const target = Math.max(0, Math.min(100, +$('until-target').value || 80));
+  const out = $('until-result');
+  out.textContent = 'checking…'; out.style.color = '#5f7263';
+  try {
+    const r = await J(`/api/until?target=${target}`);
+    if (!r.ok) {
+      out.style.color = '#5f7263';
+      out.textContent = r.error === 'idle' ? `Battery idle at ${r.current_soc?.toFixed(0) ?? '?'}% — can't estimate.`
+        : r.error === 'wrong_direction' ? `Battery moving away from ${target}% at current rate.`
+        : 'No data yet.';
+      return;
+    }
+    out.style.color = '#57e389';
+    const eta = new Date(r.eta).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+    out.textContent = `~${r.hours.toFixed(1)}h to ${target}% (ETA ${eta}) at current ${Math.abs(r.battery_kw).toFixed(1)} kW rate`;
+  } catch(e) { out.textContent = 'Error checking.'; out.style.color = '#f5b942'; }
+});
 
 async function pollFast(){
   try {

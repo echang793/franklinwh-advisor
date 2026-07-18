@@ -33,6 +33,7 @@ from .alerts import (
 )
 from .advisor import _tou_eb_plan
 from .config import load as load_config
+from .format_utils import time_to_pct
 from .history import HistoryStore, integrate_intervals
 from .predictor import predict
 from .tou import (BASE_SERVICE_DAILY, TouPeriod, export_rate_at, on_peak_window,
@@ -304,6 +305,65 @@ def api_battery_health(weeks: int = Query(12, ge=1, le=52)):
                 "samples": len(samples),
             })
     return {"weeks": out, "nameplate_kwh": _BAT_CAP}
+
+
+@app.get("/api/until", dependencies=_authed)
+def api_until(target: float = Query(..., ge=0, le=100)):
+    """Dashboard equivalent of the chatbot's /until N — hours to reach a
+    target SoC at the current instantaneous charge/discharge rate."""
+    r = _latest_reading()
+    if not r:
+        return {"ok": False, "error": "no readings yet"}
+    hours = time_to_pct(r["battery_soc"], target, _BAT_CAP, r["battery_use_kw"])
+    if hours is None:
+        idle = abs(r["battery_use_kw"]) < 0.1
+        return {"ok": False, "error": "idle" if idle else "wrong_direction",
+                "current_soc": r["battery_soc"]}
+    eta = datetime.now() + timedelta(hours=hours)
+    return {"ok": True, "current_soc": r["battery_soc"], "target": target,
+            "hours": round(hours, 1), "eta": eta.isoformat(),
+            "battery_kw": r["battery_use_kw"]}
+
+
+@app.get("/api/willmake", dependencies=_authed)
+def api_willmake(hours: int = Query(..., ge=1, le=24)):
+    """Dashboard equivalent of the chatbot's /willmake H — projects SoC
+    forward using the solar+load forecast (not just the current rate) and
+    reports whether the battery stays above 0% without grid import."""
+    now = datetime.now()
+    r = _latest_reading()
+    if not r:
+        return {"ok": False, "error": "no readings yet"}
+    soc = r["battery_soc"]
+    state = _load_peak_state(_OUT)
+    with HistoryStore(_OUT / "history.db") as history:
+        outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
+        sp = _get_system_peak_kw(state)
+        cloudy = bool(outlook and outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD)
+        fc = (predict(history, 24, outlook=outlook, system_peak_kw=sp,
+                      perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
+                      hourly_bias=_get_hourly_bias(state))
+              if history.has_enough_data() else None)
+    if fc is None or fc.confidence == "none":
+        return {"ok": False, "error": "insufficient_forecast"}
+
+    kwh = soc / 100.0 * _BAT_CAP
+    horizon = now + timedelta(hours=hours)
+    min_soc, min_at = soc, now
+    for h in fc.hours:
+        if h.dt <= now or h.dt > horizon:
+            continue
+        kwh = max(0.0, min(_BAT_CAP, kwh + h.predicted_solar_kw - h.predicted_load_kw))
+        pct = kwh / _BAT_CAP * 100.0
+        if pct < min_soc:
+            min_soc, min_at = pct, h.dt
+    end_pct = kwh / _BAT_CAP * 100.0
+    return {
+        "ok": True, "will_make_it": min_soc > 0.0, "current_soc": soc,
+        "min_soc": round(min_soc, 1), "min_at": min_at.isoformat(),
+        "end_soc": round(end_pct, 1), "horizon": horizon.isoformat(),
+        "confidence": fc.confidence, "data_days": fc.data_days,
+    }
 
 
 @app.get("/api/tou", dependencies=_authed)
