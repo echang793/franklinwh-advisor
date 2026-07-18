@@ -220,13 +220,17 @@ def api_forecast():
     r = _latest_reading()
     soc = r["battery_soc"] if r else 50.0
     hours_out = []
+    cloudy = False
+    perf_ratio = 1.0
+    sp = None
     with HistoryStore(_OUT / "history.db") as history:
         outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
         sp = _get_system_peak_kw(state)
         cloudy = bool(outlook and outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD)
+        perf_ratio = _get_performance_ratio(state, cloudy=cloudy)
+        hourly_bias = _get_hourly_bias(state)
         fc = (predict(history, 12, outlook=outlook, system_peak_kw=sp,
-                      perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
-                      hourly_bias=_get_hourly_bias(state))
+                      perf_ratio=perf_ratio, hourly_bias=hourly_bias)
               if history.has_enough_data() else None)
     kwh = soc / 100 * _BAT_CAP
     if fc:
@@ -243,8 +247,17 @@ def api_forecast():
                 "rate": rate_at(h.dt),
                 "on_peak": period == TouPeriod.ON_PEAK,
             })
-    return {"hours": hours_out, "battery_capacity_kwh": _BAT_CAP,
-            "current_soc": soc, "confidence": fc.confidence if fc else "none"}
+    return {
+        "hours": hours_out, "battery_capacity_kwh": _BAT_CAP,
+        "current_soc": soc, "confidence": fc.confidence if fc else "none",
+        # "Forecast health" — these were already computed above and thrown
+        # away; surfacing them explains *why* today's forecast looks the
+        # way it does (learned system efficiency, cloud-day derate, and
+        # calibrated peak-kW estimate) instead of being a black box.
+        "perf_ratio": round(perf_ratio, 3),
+        "cloudy_today": cloudy,
+        "system_peak_kw": round(sp, 2) if sp is not None else None,
+    }
 
 
 @app.get("/api/accuracy", dependencies=_authed)
@@ -264,6 +277,33 @@ def api_accuracy(days: int = Query(7, ge=1, le=30)):
             out.append({"date": ds, "label": d.strftime("J%d").replace("J0", "J"),
                         "predicted": pred, "actual": round(actual, 1)})
     return {"days": out}
+
+
+@app.get("/api/battery-health", dependencies=_authed)
+def api_battery_health(weeks: int = Query(12, ge=1, le=52)):
+    """Effective usable battery capacity trend, weekly median, from the same
+    clean-discharge-run detection alerts.py's own capacity-fade alert uses
+    (history.capacity_samples) — surfaced here for a dashboard trend view
+    instead of only ever appearing as a one-off alert message."""
+    out = []
+    with HistoryStore(_OUT / "history.db") as history:
+        today = date.today()
+        for i in range(weeks, 0, -1):
+            week_start = today - timedelta(days=7 * i)
+            week_end = week_start + timedelta(days=6)
+            samples = history.capacity_samples(week_start.isoformat(), week_end.isoformat())
+            if not samples:
+                continue
+            samples.sort()
+            median = samples[len(samples) // 2]
+            out.append({
+                "week_start": week_start.isoformat(),
+                "label": week_start.strftime("%b %-d"),
+                "capacity_kwh": round(median, 1),
+                "pct_of_nameplate": round(median / _BAT_CAP * 100, 1),
+                "samples": len(samples),
+            })
+    return {"weeks": out, "nameplate_kwh": _BAT_CAP}
 
 
 @app.get("/api/tou", dependencies=_authed)
@@ -348,6 +388,19 @@ def api_auth_status():
     """Unauthenticated on purpose — tells the frontend whether it needs to
     prompt for a token, without exposing the token itself."""
     return {"required": bool(_cfg.dashboard_token)}
+
+
+@app.get("/api/health", dependencies=_authed)
+def api_health():
+    """FranklinWH API connection health — the watch loop's own consecutive-
+    error tracking, written to .health.json each cycle. Surfaces the same
+    outage signal the CLI already sends over Telegram, without needing to
+    check advisor.log."""
+    try:
+        data = json.loads((_OUT / ".health.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"consec_errors": 0, "last_error": None, "updated": None}
+    return data
 
 
 app.mount("/", StaticFiles(directory=_ROOT / "static", html=True), name="static")

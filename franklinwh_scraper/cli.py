@@ -110,6 +110,22 @@ def _save_last_mode(out: Path, mode: str) -> None:
     (out / ".last_recommendation.json").write_text(json.dumps({"mode": mode}))
 
 
+def _write_health_marker(out: Path, consec_errors: int, last_error: str | None) -> None:
+    """Persist the watch loop's own error-streak tracking so webapi.py's
+    dashboard can show FranklinWH API outage status without needing to
+    check advisor.log — the CLI already detects and reports this over
+    Telegram, this just makes the same signal visible on the dashboard."""
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / ".health.json").write_text(json.dumps({
+            "consec_errors": consec_errors,
+            "last_error": last_error,
+            "updated": datetime.now().isoformat(),
+        }))
+    except OSError:
+        pass
+
+
 
 def _dispatch_notifications(rec, cfg: Config, notify_flag: bool, last_mode: str | None, outdir: Path | None = None) -> None:
     """Send macOS + iMessage notifications when the recommendation changes or is critical."""
@@ -1125,11 +1141,13 @@ def cmd_advise(
                     )
                 _consec_errors = 0
                 _ping_healthcheck(cfg)  # signal a healthy completed cycle
+                _write_health_marker(outdir, 0, None)
 
             except Exception as e:
                 _consec_errors += 1
                 logger.exception("Watch loop error")
                 _err(str(e))
+                _write_health_marker(outdir, _consec_errors, str(e))
                 # During API outages, still fire time-gated alerts (morning preview,
                 # EOD digest) using the last known stats so sleep/connectivity blips
                 # don't silently swallow them.

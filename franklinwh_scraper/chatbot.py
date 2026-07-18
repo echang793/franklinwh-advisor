@@ -281,6 +281,13 @@ class TelegramChatBot:
                             daemon=True,
                         ).start()
                         continue
+                    if text.lower() == "/summary":
+                        threading.Thread(
+                            target=self._send_summary,
+                            args=(chat_id,),
+                            daemon=True,
+                        ).start()
+                        continue
                     # /until <N[%]> or natural language "until/time to/reach N%"
                     _um = re.search(
                         r'/until\s+(\d+)'          # /until 20
@@ -487,6 +494,14 @@ class TelegramChatBot:
         except Exception as e:
             logger.warning("_send_bill error: %s", e)
             self._send(chat_id, f"Error fetching billing data: {e}")
+
+    def _send_summary(self, chat_id: str) -> None:
+        """'How am I doing today' in one command — the tip, forecast, and
+        bill pieces already exist independently; this just runs all three
+        instead of requiring the user to know three separate commands."""
+        self._send_tip(chat_id)
+        self._send_forecast(chat_id)
+        self._send_bill(chat_id)
 
     def _send_tip(self, chat_id: str) -> None:
         try:

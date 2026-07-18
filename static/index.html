@@ -69,6 +69,7 @@ input[type=range]{accent-color:#57e389;height:14px;cursor:pointer;}
       <span id="hd-dot" style="width:7px;height:7px;border-radius:50%;background:#57e389;animation:pulse 1.6s ease-in-out infinite;box-shadow:0 0 8px #57e389;"></span>
       <span id="hd-status">POLLING OK</span>
     </span>
+    <span id="hd-apierrors" title="" style="display:none;color:#f5b942;">⚠ API ERRORS</span>
     <span style="color:#2a3a2e;">·</span>
     <span id="hd-poll" style="color:#4c5f50;">LAST POLL — · NEXT —</span>
     <span style="color:#2a3a2e;">·</span>
@@ -259,7 +260,8 @@ mkPanel('forecast', `
     <span class="mono" style="font-size:10px;letter-spacing:.14em;color:#5f7263;">WHAT-IF · CLOUD COVER</span>
     <input id="f-cc" type="range" min="0" max="100" step="5" value="0" style="flex:1;min-width:120px;">
     <span id="f-ccval" class="mono" style="font-size:11px;font-weight:700;color:#57e389;min-width:40px;text-align:right;">0%</span>
-  </div>`);
+  </div>
+  <div id="f-health" class="mono" style="font-size:10px;color:#4c5f50;margin-top:10px;"></div>`);
 
 mkPanel('mode', `
   <div id="m-burst" style="display:none;position:absolute;top:50%;left:70%;width:160px;height:160px;margin:-80px 0 0 -80px;border-radius:50%;background:radial-gradient(circle,rgba(87,227,137,.5),transparent 70%);animation:burst .9s ease-out forwards;pointer-events:none;"></div>
@@ -670,6 +672,16 @@ function renderForecast(){
       <div class="mono" style="font-size:11px;color:#57e389;margin-top:2px;">projected SoC ${f.socAdj}%</div>`;
   } else tip.style.display = 'none';
   renderEB(fc);
+  const fh = S.forecastHealth;
+  if (fh && fh.perfRatio != null) {
+    const pctOff = Math.round((fh.perfRatio - 1) * 100);
+    const effStr = pctOff === 0 ? 'matching nameplate' : (pctOff > 0 ? `+${pctOff}%` : `${pctOff}%`) + ' vs nameplate';
+    $('f-health').textContent = `learned efficiency: ${effStr}`
+      + (fh.systemPeakKw ? ` · calibrated peak ${fh.systemPeakKw.toFixed(1)} kW` : '')
+      + (fh.cloudy ? ' · cloudy-day derate active' : '');
+  } else if ($('f-health')) {
+    $('f-health').textContent = '';
+  }
 }
 $('f-scrub').addEventListener('pointermove', e => { const n = Math.max(1, S.forecast.length); const r = e.currentTarget.getBoundingClientRect(); S.scrubIdx = Math.max(0, Math.min(n-1, Math.floor((e.clientX-r.left)/r.width*n))); renderForecast(); });
 $('f-scrub').addEventListener('pointerleave', () => { S.scrubIdx = -1; renderForecast(); });
@@ -1011,9 +1023,9 @@ async function pollFast(){
 }
 async function pollSlow(){
   try {
-    const [h, f, acc, tou, bill, rec] = await Promise.all([
+    const [h, f, acc, tou, bill, rec, health] = await Promise.all([
       J('/api/history?hours=48'), J('/api/forecast'), J('/api/accuracy'),
-      J('/api/tou'), J('/api/bill'), J('/api/recommendation'),
+      J('/api/tou'), J('/api/bill'), J('/api/recommendation'), J('/api/health'),
     ]);
     const now = Date.now();
     const todayStart = now - 24*3600000;
@@ -1021,8 +1033,17 @@ async function pollSlow(){
     S.histY = resample(h.samples, todayStart - 24*3600000);
     S.forecast = (f.hours || []).slice(0, 12);
     S.cap = f.battery_capacity_kwh || S.cap;
+    S.forecastHealth = { perfRatio: f.perf_ratio, cloudy: f.cloudy_today, systemPeakKw: f.system_peak_kw };
     S.acc = acc.days; S.tou = tou; S.bill = bill;
     S.rec = rec.recommendation || null; S.eb = rec.eb_plan;
+    S.apiHealth = health;
+    const badge = $('hd-apierrors');
+    if (health && health.consec_errors > 0) {
+      badge.style.display = '';
+      badge.title = `${health.consec_errors} consecutive poll failures — ${health.last_error || 'unknown error'}`;
+    } else {
+      badge.style.display = 'none';
+    }
     renderHistory(); renderForecast(); renderAccuracy(); renderTou(); renderBill(); renderMode();
   } catch(e) { /* retry next cycle */ }
 }
