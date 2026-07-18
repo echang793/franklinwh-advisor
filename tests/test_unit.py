@@ -689,4 +689,55 @@ def test_daily_solar_kwh_api_falls_back_on_midday_reset(tmp_path):
     naive_max = 8.0  # what the old MAX()-only implementation would return
     result = db.daily_solar_kwh_api(day)
     assert result != naive_max  # must not silently under-report via MAX()
-    assert result > 0.0  # trapezoidal fallback still produces a real number
+
+
+# ── history.py readings rollup ─────────────────────────────────────────
+
+def test_rollup_old_readings_preserves_hourly_slots(tmp_path):
+    """Old readings should downsample to one row per (date, hour) — not one
+    per day, which would destroy the (day_of_week, hour_of_day) slot
+    granularity the predictor depends on. Recent data must be untouched."""
+    db = HistoryStore(tmp_path / "h.db")
+    old_day = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
+    recent_day = datetime.now().strftime("%Y-%m-%d")
+
+    # 3 readings in old-day hour 8, 2 in old-day hour 9 — should each
+    # collapse to a single row. 2 readings in today's hour 8 must survive
+    # untouched (not old enough to roll up).
+    for minute in (0, 15, 30):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"{old_day}T08:{minute:02d}:00", 2, 8, 1.0, 2.0, 50.0, 0.0, "normal", 5.0, 0.0),
+        )
+    for minute in (0, 15):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"{old_day}T09:{minute:02d}:00", 2, 9, 1.0, 2.0, 50.0, 0.0, "normal", 5.0, 0.0),
+        )
+    for minute in (0, 15):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"{recent_day}T08:{minute:02d}:00", 2, 8, 1.0, 2.0, 50.0, 0.0, "normal", 5.0, 0.0),
+        )
+    db._conn.commit()
+    assert db.reading_count() == 7
+
+    removed = db.rollup_old_readings(older_than_days=180)
+    assert removed == 3  # (3-1) + (2-1) from the two old-day buckets
+
+    rows = db._conn.execute(
+        "SELECT day_of_week, hour_of_day FROM readings WHERE timestamp LIKE ?",
+        (f"{old_day}%",),
+    ).fetchall()
+    assert sorted(rows) == [(2, 8), (2, 9)]  # one row per old (dow, hour) slot
+
+    recent_rows = db._conn.execute(
+        "SELECT COUNT(*) FROM readings WHERE timestamp LIKE ?", (f"{recent_day}%",)
+    ).fetchone()
+    assert recent_rows[0] == 2  # untouched

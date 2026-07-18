@@ -1010,26 +1010,51 @@ def cmd_advise(
                 _lic = check_license(gateway or "")
                 if _lic.state == "invalid":
                     _err(f"License check failed: {_lic.message}")
+                    _lic_msg = f"🔒 FranklinWH Advisor stopped: {_lic.message}"
                     if cfg.telegram_bot_token and cfg.telegram_chat_id:
-                        notify_telegram(
-                            f"🔒 FranklinWH Advisor stopped: {_lic.message}",
-                            cfg.telegram_bot_token, cfg.telegram_chat_id,
-                        )
+                        notify_telegram(_lic_msg, cfg.telegram_bot_token, cfg.telegram_chat_id)
+                    if cfg.smtp_host and cfg.email_to:
+                        notify_email(_lic_msg, cfg)
+                    if cfg.webhook_url:
+                        notify_webhook(_lic_msg, True, cfg)
                     break
                 if _lic.state == "grace":
                     _today_str = datetime.now().strftime("%Y-%m-%d")
                     if _lic_warn_date != _today_str:
                         _lic_warn_date = _today_str
                         _warn(_lic.message)
+                        _lic_msg = f"🔒 {_lic.message}"
+                        # License grace warnings previously only reached Telegram,
+                        # despite email/webhook being fully supported channels
+                        # elsewhere (same gap as the mode-change notification fix).
                         if cfg.telegram_bot_token and cfg.telegram_chat_id:
-                            notify_telegram(
-                                f"🔒 {_lic.message}",
-                                cfg.telegram_bot_token, cfg.telegram_chat_id,
-                            )
+                            notify_telegram(_lic_msg, cfg.telegram_bot_token, cfg.telegram_chat_id)
+                        if cfg.smtp_host and cfg.email_to:
+                            notify_email(_lic_msg, cfg)
+                        if cfg.webhook_url:
+                            notify_webhook(_lic_msg, False, cfg)
             try:
                 stats = client.get_stats(gateway)
                 _last_stats = stats
                 history.record(stats)
+
+                # Weekly readings.db rollup — downsamples data older than 180
+                # days from ~5-min to hourly granularity. A simple marker file
+                # (not the alerts state, to avoid lock contention with its own
+                # file-locked read/save cycle) caps this to once every 7 days;
+                # it's a full historical table scan, not a per-poll operation.
+                _rollup_marker = outdir / ".last_rollup"
+                _today_iso = datetime.now().strftime("%Y-%m-%d")
+                try:
+                    _last_rollup = _rollup_marker.read_text().strip()
+                except OSError:
+                    _last_rollup = ""
+                if not _last_rollup or (datetime.now() - datetime.strptime(_last_rollup, "%Y-%m-%d")).days >= 7:
+                    _removed = history.rollup_old_readings()
+                    if _removed:
+                        _info(f"Rolled up {_removed} old readings")
+                    outdir.mkdir(parents=True, exist_ok=True)
+                    _rollup_marker.write_text(_today_iso)
 
                 outlook        = _fetch_outlook_cached(lat, lon)
                 _peak_state    = _load_peak_state(outdir)

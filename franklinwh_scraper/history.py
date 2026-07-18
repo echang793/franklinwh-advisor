@@ -529,6 +529,52 @@ class HistoryStore:
         row = self._conn.execute("SELECT MIN(timestamp) FROM readings").fetchone()
         return row[0][:10] if row and row[0] else None
 
+    def rollup_old_readings(self, older_than_days: int = 180) -> int:
+        """Downsample readings older than N days from ~5-min to one row per
+        (date, hour), cutting old row count ~12x. readings.db otherwise
+        grows unbounded forever at a 5-min poll cadence.
+
+        Collapsing to one row per *day* (like a typical retention rollup)
+        would destroy the (day_of_week, hour_of_day) slot granularity the
+        predictor's load/solar profiles depend on — one row per hour keeps
+        every slot the predictor actually buckets by, just with far fewer
+        near-duplicate samples per slot for old history. Recent data (the
+        window that matters most for accuracy) is left untouched.
+
+        Returns the number of rows removed. Call periodically (e.g. weekly),
+        not every poll — it's a full historical scan.
+        """
+        cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat()
+        buckets = self._conn.execute(
+            """
+            SELECT substr(timestamp,1,13) AS bucket,
+                   day_of_week, hour_of_day,
+                   AVG(home_load_kw), AVG(solar_kw), AVG(battery_soc),
+                   AVG(grid_use_kw), MAX(solar_total_kwh), AVG(battery_use_kw),
+                   COUNT(*), MIN(timestamp)
+            FROM readings
+            WHERE timestamp < ?
+            GROUP BY bucket
+            HAVING COUNT(*) > 1
+            """,
+            (cutoff,),
+        ).fetchall()
+        removed = 0
+        for (bucket, dow, hod, load, solar, soc, grid, total, batt, cnt, first_ts) in buckets:
+            self._conn.execute("DELETE FROM readings WHERE substr(timestamp,1,13) = ?", (bucket,))
+            self._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (first_ts, dow, hod, load, solar, soc, grid, "normal", total, batt),
+            )
+            removed += cnt - 1
+        if buckets:
+            self._conn.commit()
+            logger.info("Rolled up %d old readings into %d hourly buckets (%d rows removed)",
+                       sum(b[9] for b in buckets), len(buckets), removed)
+        return removed
+
     def close(self) -> None:
         self._conn.close()
 
