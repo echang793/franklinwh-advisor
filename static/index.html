@@ -1,0 +1,1127 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FranklinWH Energy Advisor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/html-to-image@1.11.11/dist/html-to-image.js"></script>
+<style>
+html,body{margin:0;padding:0;background:#070c08;}
+a{color:#57e389;text-decoration:none}a:hover{color:#8df0b0;text-decoration:underline}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+@keyframes sweepX{0%{transform:translateX(-100%);opacity:0}15%{opacity:1}100%{transform:translateX(100vw);opacity:0}}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+@keyframes flick{0%,100%{opacity:0}10%{opacity:.55}20%{opacity:.05}30%{opacity:.4}45%{opacity:0}60%{opacity:.3}70%{opacity:0}}
+@keyframes rise{0%{opacity:0;transform:translateY(14px) scale(.97)}60%{transform:translateY(-2px) scale(1.005)}100%{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes chev{0%,100%{opacity:.15;transform:translateX(0)}50%{opacity:1;transform:translateX(3px)}}
+@keyframes burst{0%{transform:scale(.2);opacity:.9}100%{transform:scale(3);opacity:0}}
+@keyframes glowPulse{0%,100%{box-shadow:0 0 18px rgba(87,227,137,.25)}50%{box-shadow:0 0 42px rgba(87,227,137,.55)}}
+body{min-height:100vh;background:radial-gradient(1200px 600px at 70% -10%, #0d1a0f 0%, #070c08 55%);font-family:'Space Grotesk',sans-serif;color:#e6f2e8;padding:0 0 48px 0;position:relative;overflow-x:hidden;}
+.mono{font-family:'JetBrains Mono',monospace;}
+.card{background:#101711;border:1px solid #1c2a1e;border-radius:16px;padding:24px;position:relative;}
+.plabel{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.18em;color:#5f7263;}
+.grip{position:absolute;top:3px;left:50%;transform:translateX(-50%);font-size:13px;letter-spacing:2px;color:#3f5244;cursor:grab;user-select:none;touch-action:none;z-index:6;padding:2px 14px;}
+.grip:hover{color:#57e389;}
+.hidebtn{position:absolute;top:6px;right:12px;font-size:12px;color:#3f5244;cursor:pointer;z-index:6;padding:2px 6px;user-select:none;}
+.hidebtn:hover{color:#ff8a7a;}
+.focusbtn{position:absolute;top:6px;right:36px;font-size:12px;color:#3f5244;cursor:pointer;z-index:6;padding:2px 6px;user-select:none;}
+.focusbtn:hover{color:#57e389;}
+.focusbtn.on{color:#57e389;}
+.chip{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;padding:5px 11px;border-radius:999px;border:1px solid #1c2a1e;background:transparent;color:#5f7263;cursor:pointer;transition:all .25s;}
+.chip.on{background:rgba(87,227,137,.12);border-color:#2e5c3a;color:#57e389;}
+.simchip{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.08em;color:#f5b942;background:rgba(245,185,66,.06);border:1px solid #4a3a12;border-radius:999px;padding:7px 14px;cursor:pointer;}
+.simchip:hover{background:rgba(245,185,66,.16);border-color:#6b5216;}
+.toolbtn{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.08em;color:#7d937f;background:transparent;border:1px solid #1c2a1e;border-radius:999px;padding:7px 14px;cursor:pointer;}
+.toolbtn:hover{color:#57e389;border-color:#2e5c3a;}
+.snapbtn{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.08em;color:#8fb4ff;background:rgba(143,180,255,.05);border:1px solid #1e2c4a;border-radius:999px;padding:7px 14px;cursor:pointer;}
+.snapbtn:hover{background:rgba(143,180,255,.12);border-color:#2c4270;}
+.tabbtn{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;padding:6px 12px;border-radius:999px;border:1px solid #1c2a1e;background:transparent;color:#5f7263;cursor:pointer;transition:all .3s;}
+.tabbtn.on{background:rgba(87,227,137,.12);border-color:#2e5c3a;color:#57e389;}
+.tile{background:#0c130d;border:1px solid #18261b;border-radius:10px;padding:14px;}
+pre.digest{font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.7;color:#9db8a2;background:#0c130d;border:1px solid #18261b;border-radius:10px;padding:14px;margin:12px 0 0 0;overflow-x:auto;}
+@media (max-width:919px){.grip{font-size:17px}.hidebtn,.focusbtn{font-size:15px}}
+input[type=range]{accent-color:#57e389;height:14px;cursor:pointer;}
+</style>
+</head>
+<body>
+<div id="flicker" style="position:fixed;inset:0;background:#3a0d0d;pointer-events:none;z-index:60;display:none;"></div>
+<div id="sweep" style="position:fixed;top:0;left:0;width:220px;height:2px;background:linear-gradient(90deg,transparent,#57e389,transparent);z-index:50;opacity:0;"></div>
+
+<div id="sticky" style="position:fixed;top:0;left:0;right:0;z-index:45;display:none;align-items:center;flex-wrap:wrap;gap:14px;padding:10px 24px;background:rgba(7,12,8,.86);backdrop-filter:blur(12px);border-bottom:1px solid #16211a;font-family:'JetBrains Mono',monospace;font-size:12px;animation:rise .3s ease-out;">
+  <span style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:14px;color:#e6f2e8;">FranklinWH</span>
+  <span style="display:inline-block;width:110px;height:6px;border-radius:999px;background:#18231a;position:relative;overflow:hidden;"><span id="st-bar" style="position:absolute;top:0;left:0;bottom:0;width:0%;border-radius:999px;background:linear-gradient(90deg,#1f7a44,#57e389);"></span></span>
+  <span id="st-soc" style="color:#57e389;font-weight:700;"></span>
+  <span id="st-solar" style="color:#5f7263;"></span>
+  <span id="st-load" style="color:#5f7263;"></span>
+  <span id="st-saved" style="color:#57e389;"></span>
+  <span id="st-status" style="margin-left:auto;color:#57e389;"></span>
+</div>
+
+<header style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;max-width:1240px;margin:0 auto;padding:28px 24px 20px 24px;border-bottom:1px solid #16211a;">
+  <div style="font-size:22px;font-weight:700;letter-spacing:-0.01em;">FranklinWH <span id="hd-brand" style="color:#57e389;">Energy Advisor</span></div>
+  <div class="mono" style="display:flex;align-items:center;gap:10px;font-size:12px;letter-spacing:.14em;color:#6d8272;flex-wrap:wrap;">
+    <span id="hd-datetime"></span>
+    <span style="color:#2a3a2e;">·</span>
+    <span id="hd-status-wrap" style="display:inline-flex;align-items:center;gap:7px;color:#57e389;">
+      <span id="hd-dot" style="width:7px;height:7px;border-radius:50%;background:#57e389;animation:pulse 1.6s ease-in-out infinite;box-shadow:0 0 8px #57e389;"></span>
+      <span id="hd-status">POLLING OK</span>
+    </span>
+    <span style="color:#2a3a2e;">·</span>
+    <span id="hd-poll" style="color:#4c5f50;">LAST POLL — · NEXT —</span>
+    <span style="color:#2a3a2e;">·</span>
+    <span style="color:#57e389;">SAVED TODAY <b id="hd-saved" style="font-weight:700;">$0.00</b></span>
+    <button id="hd-unread" style="display:none;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:#07160b;background:#57e389;border:none;border-radius:999px;padding:5px 11px;cursor:pointer;box-shadow:0 0 12px rgba(87,227,137,.5);animation:pulse 1.6s ease-in-out infinite;" title="Unread alerts — click to view"></button>
+  </div>
+</header>
+
+<div id="toolbar" style="max-width:1240px;margin:0 auto;padding:14px 24px 0 24px;display:flex;flex-wrap:wrap;align-items:center;gap:10px;"></div>
+
+<div id="hints" style="display:none;position:fixed;left:20px;bottom:20px;z-index:66;width:280px;background:rgba(10,15,11,.97);border:1px solid #2e5c3a;border-radius:14px;padding:16px;box-shadow:0 16px 40px rgba(0,0,0,.6);animation:rise .4s ease-out;">
+  <div class="mono" style="font-size:10px;letter-spacing:.18em;color:#57e389;font-weight:700;">GETTING AROUND</div>
+  <div style="font-size:12.5px;color:#9db8a2;line-height:1.8;margin-top:10px;">⠿ drag a panel anywhere — live drop preview<br>✕ hide · ⤢ expand · H hides hovered panel<br>drag across charts to scrub, or ← → ↑ ↓<br>what-if slider re-plans the battery live</div>
+  <button id="hints-ok" class="mono" style="margin-top:12px;font-size:10px;letter-spacing:.12em;font-weight:700;color:#07160b;background:#57e389;border:none;border-radius:8px;padding:8px 16px;cursor:pointer;width:100%;">GOT IT</button>
+</div>
+
+<div id="dragpill" style="display:none;position:fixed;z-index:70;pointer-events:none;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.14em;font-weight:700;color:#07160b;background:#57e389;border-radius:999px;padding:6px 12px;transform:translate(14px,14px);box-shadow:0 8px 24px rgba(0,0,0,.5);"></div>
+<div id="minimap" style="display:none;position:fixed;right:20px;bottom:20px;z-index:65;width:230px;background:rgba(10,15,11,.96);border:1px solid #26382b;border-radius:12px;padding:12px;box-shadow:0 12px 36px rgba(0,0,0,.6);pointer-events:none;animation:rise .25s ease-out;">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;">
+    <span class="mono" style="font-size:9px;letter-spacing:.18em;color:#5f7263;">DROP PREVIEW</span>
+    <span class="mono" style="font-size:8px;letter-spacing:.1em;color:#3f5244;">RELEASE TO APPLY</span>
+  </div>
+  <div style="display:flex;gap:4px;align-items:flex-start;">
+    <div id="mini-l" style="flex:1;display:flex;flex-direction:column;gap:4px;"></div>
+    <div id="mini-r" style="flex:1;display:flex;flex-direction:column;gap:4px;"></div>
+  </div>
+</div>
+<div id="dropind" style="display:none;position:fixed;height:4px;border-radius:999px;background:#57e389;box-shadow:0 0 14px rgba(87,227,137,.8);z-index:60;pointer-events:none;transition:top .18s ease, left .18s ease, width .18s ease;"></div>
+
+<div id="banner-outage" style="display:none;max-width:1240px;margin:18px auto 0 auto;padding:0 24px;">
+  <div style="background:linear-gradient(90deg,#2a0d0a,#1c0b08);border:1px solid #6e2019;border-radius:16px;padding:18px 24px;display:flex;flex-wrap:wrap;align-items:center;gap:18px;animation:rise .5s cubic-bezier(.2,.9,.3,1.2);">
+    <span style="font-size:26px;">🔴</span>
+    <div style="flex:1;min-width:220px;">
+      <div class="mono" style="font-size:12px;letter-spacing:.18em;color:#ff8a7a;font-weight:700;">GRID DOWN · RUNNING ON BATTERY</div>
+      <div style="font-size:14px;color:#d9a8a0;margin-top:4px;">Backup ~<b class="tte" style="color:#ffb4a8;"></b> at current load · Conserve: turn off AC, EV, dryer, pool pump.</div>
+    </div>
+    <div class="mono tte" style="font-size:22px;font-weight:700;color:#ff8a7a;"></div>
+  </div>
+</div>
+<div id="banner-peak" style="display:none;max-width:1240px;margin:18px auto 0 auto;padding:0 24px;">
+  <div style="background:linear-gradient(90deg,#241a06,#171106);border:1px solid #6b5216;border-radius:16px;padding:18px 24px;display:flex;flex-wrap:wrap;align-items:center;gap:18px;animation:rise .5s cubic-bezier(.2,.9,.3,1.2), glowPulse 3s ease-in-out infinite;">
+    <span style="font-size:26px;">⚡</span>
+    <div style="flex:1;min-width:220px;">
+      <div class="mono" id="peak-title" style="font-size:12px;letter-spacing:.18em;color:#f5b942;font-weight:700;">ON-PEAK ACTIVE · 4–9 PM</div>
+      <div style="font-size:14px;color:#cbb27a;margin-top:4px;">Battery holding the line — covering <b id="peak-load" style="color:#f5d18a;"></b> home load · grid import <b id="peak-grid" style="color:#f5d18a;"></b></div>
+    </div>
+    <div style="text-align:right;">
+      <div class="mono" style="font-size:10px;letter-spacing:.18em;color:#8a7440;">ENDS IN</div>
+      <div class="mono" id="peak-cd" style="font-size:22px;font-weight:700;color:#f5b942;"></div>
+    </div>
+  </div>
+</div>
+
+<main id="grid" style="max-width:1240px;margin:24px auto 0 auto;padding:0 24px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));grid-auto-rows:8px;grid-auto-flow:dense;column-gap:24px;align-items:start;"></main>
+
+<script>
+'use strict';
+const DEMO = new URLSearchParams(location.search).get('demo') === '1';
+const CAP0 = 13.6;
+const $ = id => document.getElementById(id);
+const M = "'JetBrains Mono',monospace";
+const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','alerts','digests'];
+const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',alerts:'ALERTS',digests:'DIGESTS'};
+
+// ── Live state ───────────────────────────────────────────────────────
+const S = {
+  cap: CAP0, soc: 0, solar: 0, load: 0, chg: 0, dis: 0, grid: 0, exp: 0,
+  gridStatus: 'normal', onPeak: false, savedToday: 0,
+  lastPoll: null, nextPoll: null,
+  alerts: [], unread: 0, alertsVisible: true, filterCat: 'ALL',
+  hist: [], histY: [], histIdx: -1, cmp: false,
+  forecast: [], cc: 0, scrubIdx: -1,
+  eb: null, rec: null, acc: [], tou: null, bill: null,
+  tab: 0, focusId: null, flashId: null, narrow: window.innerWidth < 920,
+  spans: {}, dragId: null, pending: null,
+  // demo
+  simTime: new Date(), speed: 1, jumped: false, outage: false, modeApplied: false, applying: false,
+};
+const D = { soc: 0, solar: 0, load: 0, kwh: 0, saved: 0, savings: 0 };
+let savTarget = 0;
+
+const fmtTime = d => String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+const nowT = () => DEMO ? S.simTime : new Date();
+
+// ── Audio ────────────────────────────────────────────────────────────
+let audioCtx = null;
+function ensureAudio(){ if(!audioCtx){ try{ audioCtx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } if(audioCtx && audioCtx.state==='suspended') audioCtx.resume(); }
+function tone(f0,f1,dur,type,gain,when){ const c=audioCtx; if(!c)return; const t0=c.currentTime+(when||0); const o=c.createOscillator(),g=c.createGain(); o.type=type; o.frequency.setValueAtTime(f0,t0); o.frequency.exponentialRampToValueAtTime(f1,t0+dur); g.gain.setValueAtTime(0.0001,t0); g.gain.exponentialRampToValueAtTime(gain,t0+0.02); g.gain.exponentialRampToValueAtTime(0.0001,t0+dur); o.connect(g); g.connect(c.destination); o.start(t0); o.stop(t0+dur+0.05); }
+const playChirp = () => { tone(880,1320,.09,'sine',.05,0); tone(1100,1650,.09,'sine',.04,.11); };
+const playAlarm = () => { tone(330,165,.4,'sawtooth',.05,0); tone(330,165,.4,'sawtooth',.05,.5); };
+window.addEventListener('pointerdown', ensureAudio);
+
+// ── Panels ───────────────────────────────────────────────────────────
+const grid = $('grid');
+function mkPanel(id, inner){
+  const s = document.createElement('section');
+  s.dataset.panel = id;
+  s.className = 'card';
+  s.innerHTML = `<span class="grip" title="Drag to rearrange">⠿</span><span class="hidebtn" title="Hide panel">✕</span><span class="focusbtn" title="Expand / collapse panel">⤢</span>` + inner;
+  s.querySelector('.grip').addEventListener('pointerdown', e => startDrag(id, e));
+  s.querySelector('.hidebtn').addEventListener('click', e => { e.stopPropagation(); hidePanel(id, true); });
+  s.querySelector('.focusbtn').addEventListener('click', e => { e.stopPropagation(); flip(() => { S.focusId = S.focusId === id ? null : id; }); });
+  grid.appendChild(s);
+  return s;
+}
+
+mkPanel('battery', `
+  <div class="plabel">BATTERY STATE OF CHARGE</div>
+  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:16px;margin-top:14px;">
+    <div id="b-soc" style="font-size:76px;font-weight:700;line-height:1;color:#57e389;text-shadow:0 0 34px rgba(87,227,137,.35);transition:color .6s;">—%</div>
+    <div id="b-status" class="mono" style="font-size:13px;color:#7d937f;"></div>
+  </div>
+  <div style="margin-top:22px;height:12px;border-radius:999px;background:#18231a;position:relative;overflow:hidden;">
+    <div id="b-bar" style="position:absolute;top:0;left:0;bottom:0;width:0%;border-radius:999px;background:linear-gradient(90deg,#1f7a44,#57e389);transition:width .5s ease;box-shadow:0 0 16px rgba(87,227,137,.35);overflow:hidden;">
+      <div style="position:absolute;inset:0;background:linear-gradient(100deg,transparent 30%,rgba(255,255,255,.35) 50%,transparent 70%);background-size:200% 100%;animation:shimmer 2.4s linear infinite;"></div>
+    </div>
+  </div>
+  <div class="mono" style="display:flex;justify-content:space-between;margin-top:10px;font-size:11px;color:#4c5f50;">
+    <span id="b-kwh"></span><span id="b-tte"></span>
+  </div>`);
+
+mkPanel('history', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div class="plabel">LAST 24 HOURS</div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <button id="h-cmp" class="chip">↔ VS YESTERDAY</button>
+      <div id="h-info" class="mono" style="font-size:10px;letter-spacing:.08em;color:#57e389;">24H · 15-MIN SAMPLES · DRAG TO SCRUB</div>
+    </div>
+  </div>
+  <div id="h-scrub" style="position:relative;margin-top:14px;cursor:crosshair;touch-action:none;">
+    <div id="h-cursor" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(217,245,226,.5);pointer-events:none;z-index:2;"></div>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div><div class="mono" style="font-size:9px;letter-spacing:.14em;color:#4c5f50;margin-bottom:3px;">SOC %</div>
+        <svg viewBox="0 0 400 52" preserveAspectRatio="none" style="display:block;width:100%;height:44px;"><path id="hp-socY" fill="none" stroke="#9db8a2" stroke-width="1.2" stroke-dasharray="4 3" opacity="0"></path><path id="hp-soc" fill="none" stroke="#57e389" stroke-width="1.6"></path></svg></div>
+      <div><div class="mono" style="font-size:9px;letter-spacing:.14em;color:#4c5f50;margin-bottom:3px;">SOLAR kW</div>
+        <svg viewBox="0 0 400 52" preserveAspectRatio="none" style="display:block;width:100%;height:44px;"><path id="hp-solarY" fill="none" stroke="#9db8a2" stroke-width="1.2" stroke-dasharray="4 3" opacity="0"></path><path id="hp-solar" fill="none" stroke="#8df0b0" stroke-width="1.6"></path></svg></div>
+      <div><div class="mono" style="font-size:9px;letter-spacing:.14em;color:#4c5f50;margin-bottom:3px;">HOME LOAD kW</div>
+        <svg viewBox="0 0 400 52" preserveAspectRatio="none" style="display:block;width:100%;height:44px;"><path id="hp-loadY" fill="none" stroke="#9db8a2" stroke-width="1.2" stroke-dasharray="4 3" opacity="0"></path><path id="hp-load" fill="none" stroke="#d9f5e2" stroke-width="1.4" opacity="0.8"></path></svg></div>
+    </div>
+  </div>`);
+
+mkPanel('flow', `
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <div class="plabel">LIVE ENERGY FLOW</div>
+    <div class="mono" style="font-size:10px;letter-spacing:.14em;color:#3f5244;">kW · REAL-TIME</div>
+  </div>
+  <canvas id="flowcv" style="width:100%;height:250px;display:block;margin-top:8px;"></canvas>`);
+
+mkPanel('bill', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div class="plabel" id="bill-title">BILL PROJECTION</div>
+    <div class="mono" id="bill-day" style="font-size:10px;letter-spacing:.1em;color:#3f5244;"></div>
+  </div>
+  <div style="margin-top:14px;height:6px;border-radius:999px;background:#18231a;position:relative;overflow:hidden;">
+    <div id="bill-prog" style="position:absolute;top:0;left:0;bottom:0;width:0%;border-radius:999px;background:linear-gradient(90deg,#1f7a44,#57e389);"></div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px;">
+    <div><div id="bill-mtd" style="font-size:30px;font-weight:700;color:#e6f2e8;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">net cost month-to-date</div></div>
+    <div><div id="bill-proj" style="font-size:30px;font-weight:700;color:#f5d18a;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">projected end of cycle</div></div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:10px;margin-top:18px;">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span class="mono" style="font-size:9px;letter-spacing:.12em;color:#7d937f;width:66px;">THIS CYCLE</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="bill-curbar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#1f7a44,#57e389);"></div></div>
+      <span id="bill-curval" class="mono" style="font-size:10px;color:#9db8a2;width:52px;text-align:right;"></span>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span class="mono" style="font-size:9px;letter-spacing:.12em;color:#5f7263;width:66px;">PRIOR</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="bill-priorbar" style="width:100%;height:100%;border-radius:6px;background:#2a3a2e;"></div></div>
+      <span id="bill-priorval" class="mono" style="font-size:10px;color:#7d937f;width:52px;text-align:right;"></span>
+    </div>
+  </div>
+  <div id="bill-foot" class="mono" style="font-size:11px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+
+mkPanel('forecast', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div class="plabel">SOLAR FORECAST · NEXT 12H</div>
+    <div class="mono" style="font-size:10px;letter-spacing:.1em;color:#3f5244;">● SOC PROJECTION</div>
+  </div>
+  <div id="f-scrub" style="position:relative;margin-top:18px;height:150px;display:flex;align-items:flex-end;gap:6px;cursor:crosshair;touch-action:none;">
+    <div id="f-band" style="display:none;position:absolute;top:-6px;bottom:18px;background:rgba(245,185,66,.06);border-left:1px dashed #4a3a12;border-right:1px dashed #4a3a12;pointer-events:none;">
+      <div class="mono" style="position:absolute;top:-2px;left:6px;font-size:9px;letter-spacing:.16em;color:#8a7440;">ON-PEAK</div>
+    </div>
+    <div id="f-bars" style="display:contents;"></div>
+    <div id="f-tip" style="display:none;position:absolute;bottom:150px;transform:translateX(-50%);background:#0c130d;border:1px solid #2a3f2e;border-radius:10px;padding:10px 14px;white-space:nowrap;z-index:5;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.5);"></div>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;margin-top:16px;flex-wrap:wrap;">
+    <span class="mono" style="font-size:10px;letter-spacing:.14em;color:#5f7263;">WHAT-IF · CLOUD COVER</span>
+    <input id="f-cc" type="range" min="0" max="100" step="5" value="0" style="flex:1;min-width:120px;">
+    <span id="f-ccval" class="mono" style="font-size:11px;font-weight:700;color:#57e389;min-width:40px;text-align:right;">0%</span>
+  </div>`);
+
+mkPanel('mode', `
+  <div id="m-burst" style="display:none;position:absolute;top:50%;left:70%;width:160px;height:160px;margin:-80px 0 0 -80px;border-radius:50%;background:radial-gradient(circle,rgba(87,227,137,.5),transparent 70%);animation:burst .9s ease-out forwards;pointer-events:none;"></div>
+  <div class="plabel">RECOMMENDED MODE</div>
+  <div style="display:flex;align-items:center;flex-wrap:wrap;gap:14px;margin-top:18px;">
+    <span id="m-from" class="mono" style="font-size:13px;padding:9px 18px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;background:transparent;transition:all .5s;">—</span>
+    <span style="display:inline-flex;gap:2px;font-size:15px;color:#57e389;">
+      <span style="animation:chev 1.1s ease-in-out infinite;">›</span>
+      <span style="animation:chev 1.1s ease-in-out .18s infinite;">›</span>
+      <span style="animation:chev 1.1s ease-in-out .36s infinite;">›</span>
+    </span>
+    <span id="m-to" class="mono" style="font-size:13px;font-weight:700;padding:9px 18px;border-radius:999px;background:#57e389;color:#07160b;border:1px solid #57e389;box-shadow:0 0 22px rgba(87,227,137,.35);transition:all .5s;">—</span>
+  </div>
+  <div id="m-reason" style="font-size:13px;color:#7d937f;margin-top:16px;line-height:1.55;"></div>
+  <div id="m-applyrow" style="display:none;align-items:center;gap:16px;margin-top:18px;flex-wrap:wrap;">
+    <button id="m-apply" class="mono" style="font-size:12px;letter-spacing:.1em;font-weight:700;padding:11px 22px;border-radius:10px;border:1px solid #57e389;background:#57e389;color:#07160b;cursor:pointer;transition:all .4s;">APPLY</button>
+    <div id="m-sav" style="display:none;animation:rise .5s cubic-bezier(.2,.9,.3,1.2);">
+      <div class="mono" style="font-size:10px;letter-spacing:.16em;color:#4c5f50;">EST. SAVINGS TODAY</div>
+      <div id="m-savval" class="mono" style="font-size:22px;font-weight:700;color:#57e389;"></div>
+    </div>
+  </div>`);
+
+mkPanel('ebplan', `
+  <div class="plabel">EMERGENCY-BACKUP CHARGE PLAN</div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:18px;">
+    <div class="tile"><div id="eb-soc4" style="font-size:24px;font-weight:700;color:#b9d8be;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">est. SoC @ 4 pm</div></div>
+    <div class="tile"><div id="eb-net" style="font-size:24px;font-weight:700;color:#b9d8be;">— <span style="font-size:14px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">net peak draw</div></div>
+    <div class="tile"><div id="eb-short" style="font-size:24px;font-weight:700;color:#57e389;">— <span style="font-size:14px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">EB shortfall</div></div>
+  </div>
+  <div id="eb-msg" class="mono" style="font-size:11.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+
+mkPanel('touclock', `
+  <div class="plabel">TOU RATE CLOCK · EV-TOU-5</div>
+  <div style="display:flex;align-items:center;gap:26px;flex-wrap:wrap;margin-top:18px;">
+    <div style="position:relative;width:168px;height:168px;flex-shrink:0;">
+      <div id="tc-ring" style="position:absolute;inset:0;border-radius:50%;background:conic-gradient(#2e5c3a 0% 100%);"></div>
+      <div style="position:absolute;inset:22px;border-radius:50%;background:#101711;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;">
+        <div id="tc-time" class="mono" style="font-size:16px;font-weight:700;color:#e6f2e8;"></div>
+        <div id="tc-period" class="mono" style="font-size:8.5px;letter-spacing:.1em;color:#57e389;font-weight:700;"></div>
+        <div id="tc-rate" class="mono" style="font-size:10px;color:#7d937f;"></div>
+      </div>
+      <div id="tc-hand" style="position:absolute;left:50%;top:50%;width:2px;height:78px;margin-left:-1px;transform:rotate(0deg);transform-origin:50% 0;pointer-events:none;">
+        <div style="position:absolute;top:-78px;left:0;width:2px;height:26px;background:#d9f5e2;box-shadow:0 0 6px rgba(217,245,226,.9);border-radius:2px;"></div>
+      </div>
+      <div class="mono" style="position:absolute;top:-14px;left:50%;transform:translateX(-50%);font-size:8px;color:#4c5f50;">12A</div>
+      <div class="mono" style="position:absolute;top:50%;right:-22px;transform:translateY(-50%);font-size:8px;color:#4c5f50;">6A</div>
+      <div class="mono" style="position:absolute;bottom:-14px;left:50%;transform:translateX(-50%);font-size:8px;color:#4c5f50;">12P</div>
+      <div class="mono" style="position:absolute;top:50%;left:-22px;transform:translateY(-50%);font-size:8px;color:#4c5f50;">6P</div>
+    </div>
+    <div id="tc-legend" class="mono" style="display:flex;flex-direction:column;gap:10px;font-size:11px;min-width:170px;"></div>
+  </div>`);
+
+mkPanel('accuracy', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div class="plabel">SOLAR FORECAST ACCURACY · 7D</div>
+    <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#3f5244;">▢ PREDICTED · ▦ ACTUAL</div>
+  </div>
+  <div id="acc-bars" style="display:flex;align-items:flex-end;gap:12px;margin-top:18px;height:96px;"></div>
+  <div id="acc-foot" class="mono" style="font-size:10.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+
+mkPanel('alerts', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div class="plabel">ALERTS · LIVE</div>
+    <div class="mono" style="display:inline-flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;color:#57e389;">
+      <span style="width:6px;height:6px;border-radius:50%;background:#57e389;animation:pulse 1.6s ease-in-out infinite;"></span>@franklinwh_advisor_bot
+    </div>
+  </div>
+  <div id="al-filters" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:14px;"></div>
+  <div id="al-list" style="display:flex;flex-direction:column;gap:14px;margin-top:16px;"></div>`);
+
+mkPanel('digests', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+    <div class="plabel">DIGESTS</div>
+    <div style="display:flex;gap:6px;">
+      <button class="tabbtn on" data-tab="0">DAILY</button>
+      <button class="tabbtn" data-tab="1">WEEKLY</button>
+      <button class="tabbtn" data-tab="2">MONTHLY</button>
+    </div>
+  </div>
+  <div id="dg-body"></div>`);
+
+// ── Toolbar ──────────────────────────────────────────────────────────
+function buildToolbar(){
+  const tb = $('toolbar');
+  tb.innerHTML = '';
+  const addBtn = (cls, html, fn, title) => { const b = document.createElement('button'); b.className = cls; b.innerHTML = html; if(title) b.title = title; b.addEventListener('click', fn); tb.appendChild(b); return b; };
+  if (DEMO) {
+    const collapsed = localStorage.getItem('fwh-sim-bar') === '0';
+    const lbl = document.createElement('button');
+    lbl.className = 'mono'; lbl.style.cssText = 'font-size:10px;letter-spacing:.2em;color:#4c5f50;background:transparent;border:none;padding:0;cursor:pointer;';
+    lbl.textContent = 'SIMULATE ' + (collapsed ? '▸' : '▾');
+    lbl.addEventListener('click', () => { localStorage.setItem('fwh-sim-bar', collapsed ? '1' : '0'); buildToolbar(); });
+    tb.appendChild(lbl);
+    if (!collapsed) {
+      addBtn('simchip', '⏩ 4 PM PEAK', () => doJump(16,0));
+      addBtn('simchip', '🌅 SUNRISE', () => doJump(6,10));
+      addBtn('simchip', '🌙 SUPER OFF-PEAK', () => doJump(0,5));
+      if (S.jumped) addBtn('mono', '⏪ BACK TO LIVE', backToLive).style.cssText = 'font-size:11px;letter-spacing:.08em;font-weight:700;color:#07160b;background:#57e389;border:1px solid #57e389;border-radius:999px;padding:7px 14px;cursor:pointer;animation:rise .3s ease-out;';
+      const sp = document.createElement('span'); sp.style.cssText = 'display:inline-flex;align-items:center;gap:4px;margin-left:4px;';
+      sp.innerHTML = '<span class="mono" style="font-size:10px;letter-spacing:.2em;color:#4c5f50;">SPEED:</span>'; tb.appendChild(sp);
+      [['⏸',0],['1×',1],['60×',60]].forEach(([l,v]) => { const b = document.createElement('button'); b.className = 'chip' + (S.speed===v?' on':''); b.textContent = l; b.addEventListener('click', () => { S.speed = v; buildToolbar(); }); sp.appendChild(b); });
+      const ob = addBtn('mono', S.outage ? '🟢 RESTORE GRID' : '🔌 SIMULATE GRID OUTAGE', toggleOutage);
+      ob.style.cssText = 'font-size:11px;letter-spacing:.08em;color:' + (S.outage?'#57e389':'#ff8a7a') + ';background:rgba(240,90,80,.05);border:1px solid #4a1c18;border-radius:999px;padding:7px 14px;cursor:pointer;';
+      addBtn('toolbtn', '⟲ RESET LAYOUT', resetLayout);
+      addBtn('snapbtn', snapMsg || '📸 SNAPSHOT', snapshot);
+    }
+  } else {
+    addBtn('toolbtn', '⟲ RESET LAYOUT', resetLayout);
+    addBtn('snapbtn', snapMsg || '📸 SNAPSHOT', snapshot);
+  }
+  const hidden = getHidden();
+  if (hidden.length) {
+    const sp = document.createElement('span'); sp.className = 'mono'; sp.style.cssText = 'font-size:10px;letter-spacing:.14em;color:#5f7263;margin-left:6px;'; sp.textContent = 'HIDDEN:'; tb.appendChild(sp);
+    hidden.forEach(id => { const b = document.createElement('button'); b.style.cssText = "font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;padding:4px 10px;border-radius:999px;border:1px dashed #2e5c3a;background:transparent;color:#7d937f;cursor:pointer;"; b.textContent = PANEL_LABELS[id] + ' +'; b.title = 'Show panel'; b.addEventListener('click', () => hidePanel(id, false)); tb.appendChild(b); });
+  }
+}
+let snapMsg = null;
+function snapshot(){
+  const lib = window.htmlToImage;
+  if (!lib) { snapMsg = '⚠ OFFLINE'; buildToolbar(); setTimeout(()=>{snapMsg=null;buildToolbar();},2200); return; }
+  snapMsg = '⏳ RENDERING…'; buildToolbar();
+  lib.toPng(document.body, { backgroundColor:'#0a0f0b', pixelRatio:2 })
+    .then(url => { const a=document.createElement('a'); a.href=url; a.download='franklinwh-dashboard.png'; a.click(); snapMsg='✓ SAVED'; })
+    .catch(() => { snapMsg='⚠ FAILED'; })
+    .finally(() => { buildToolbar(); setTimeout(()=>{snapMsg=null;buildToolbar();},2200); });
+}
+
+// ── Layout system ────────────────────────────────────────────────────
+function defaultLayout(){ return { left:['battery','flow','forecast','ebplan','accuracy','alerts'], right:['history','bill','mode','touclock','digests'] }; }
+let layout = (() => { try { const l = JSON.parse(localStorage.getItem('fwh-dash-cols')); if (l && Array.isArray(l.left) && Array.isArray(l.right) && l.left.concat(l.right).sort().join() === PANEL_IDS.slice().sort().join()) return l; } catch(e){} return defaultLayout(); })();
+function getHidden(){ try { const h = JSON.parse(localStorage.getItem('fwh-dash-hidden')); if (Array.isArray(h)) return h.filter(id => PANEL_IDS.includes(id)); } catch(e){} return []; }
+function hidePanel(id, on){ const h = getHidden().filter(x => x !== id); if (on) h.push(id); localStorage.setItem('fwh-dash-hidden', JSON.stringify(h)); applyPanelStyles(); buildToolbar(); }
+function applyLayout(l){ layout = l; localStorage.setItem('fwh-dash-cols', JSON.stringify(l)); }
+function applyPanelStyles(){
+  const hidden = getHidden();
+  PANEL_IDS.forEach(id => {
+    const el = grid.querySelector(`[data-panel="${id}"]`);
+    const li = layout.left.indexOf(id);
+    const c = li >= 0 ? 1 : 2;
+    const idx = li >= 0 ? li : layout.right.indexOf(id);
+    const foc = S.focusId === id;
+    el.style.display = hidden.includes(id) ? 'none' : 'block';
+    el.style.order = foc ? -1 : idx * 2 + (c === 2 ? 1 : 0);
+    el.style.gridColumn = foc ? '1 / -1' : (S.narrow ? 'auto' : String(c));
+    el.style.gridRowEnd = 'span ' + (S.spans[id] || 50);
+    el.style.outline = S.flashId === id ? '3px solid #57e389' : S.dragId === id ? '2px dashed #57e389' : (foc ? '1px solid #2e5c3a' : '0 solid transparent');
+    el.style.outlineOffset = '2px';
+    el.querySelector('.focusbtn').classList.toggle('on', foc);
+  });
+}
+function flip(mutate){
+  const els = Array.from(grid.querySelectorAll('[data-panel]'));
+  const first = new Map(els.map(el => [el, el.getBoundingClientRect()]));
+  mutate();
+  applyPanelStyles();
+  els.forEach(el => {
+    const f = first.get(el), l = el.getBoundingClientRect();
+    const dx = f.left - l.left, dy = f.top - l.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+    el.style.transition = 'none';
+    el.style.transform = `translate(${dx}px,${dy}px)`;
+    requestAnimationFrame(() => {
+      el.style.transition = 'transform .45s cubic-bezier(.2,.9,.3,1.05)';
+      el.style.transform = '';
+      setTimeout(() => { el.style.transition = ''; }, 520);
+    });
+  });
+}
+function resetLayout(){ localStorage.setItem('fwh-dash-hidden','[]'); flip(() => applyLayout(defaultLayout())); buildToolbar(); }
+
+const spanRO = new ResizeObserver(entries => {
+  let changed = false;
+  entries.forEach(en => {
+    const id = en.target.dataset.panel, h = en.target.offsetHeight;
+    if (!id || h < 30) return;
+    const sp = Math.max(6, Math.ceil((h + 24) / 8));
+    if (S.spans[id] !== sp) { S.spans[id] = sp; changed = true; }
+  });
+  if (changed) applyPanelStyles();
+});
+grid.querySelectorAll('[data-panel]').forEach(el => spanRO.observe(el));
+
+let dragStartX = 0, dragStartY = 0, hoverId = null;
+grid.addEventListener('pointerover', e => { const s = e.target.closest('[data-panel]'); hoverId = s ? s.dataset.panel : null; });
+function startDrag(id, e){
+  e.preventDefault();
+  dragStartX = e.clientX; dragStartY = e.clientY;
+  S.dragId = id; S.pending = null;
+  $('dragpill').textContent = 'MOVING · ' + PANEL_LABELS[id];
+  $('dragpill').style.display = 'block'; $('minimap').style.display = 'block';
+  applyPanelStyles(); renderMinimap();
+  window.addEventListener('pointermove', onDragMove);
+  window.addEventListener('pointerup', onDragUp);
+}
+function onDragMove(e){
+  const pill = $('dragpill'); pill.style.left = e.clientX + 'px'; pill.style.top = e.clientY + 'px';
+  const id = S.dragId; if (!id) return;
+  if (S.narrow && Math.abs(e.clientX - dragStartX) > 90 && Math.abs(e.clientY - dragStartY) < 40) { cancelDrag(); hidePanel(id, true); return; }
+  const gr = grid.getBoundingClientRect();
+  const twoCol = gr.width > 700;
+  const col = twoCol && e.clientX > gr.left + gr.width / 2 ? 2 : 1;
+  const colArr = (col === 2 ? layout.right : layout.left).filter(x => x !== id);
+  const vis = colArr.map(pid => { const el = grid.querySelector(`[data-panel="${pid}"]`); const r = el ? el.getBoundingClientRect() : null; return { id: pid, r: r && r.height > 10 ? r : null }; }).filter(v => v.r);
+  let vidx = 0; vis.forEach(v => { if (e.clientY > v.r.top + v.r.height / 2) vidx++; });
+  const beforeId = vidx < vis.length ? vis[vidx].id : null;
+  const newCol = colArr.slice();
+  newCol.splice(beforeId ? newCol.indexOf(beforeId) : newCol.length, 0, id);
+  S.pending = col === 2 ? { left: layout.left.filter(x => x !== id), right: newCol } : { left: newCol, right: layout.right.filter(x => x !== id) };
+  let top;
+  if (!vis.length) top = gr.top + 6;
+  else if (vidx >= vis.length) top = vis[vis.length-1].r.bottom + 10;
+  else top = vis[vidx].r.top - 14;
+  const ind = $('dropind');
+  ind.style.display = 'block';
+  ind.style.top = Math.round(top) + 'px';
+  ind.style.left = Math.round(twoCol ? (col === 2 ? gr.left + gr.width/2 + 12 : gr.left) : gr.left) + 'px';
+  ind.style.width = Math.round(twoCol ? gr.width/2 - 12 : gr.width) + 'px';
+  renderMinimap();
+}
+function renderMinimap(){
+  const hidden = getHidden(), lay = S.pending || layout;
+  const mk = ids => ids.filter(id => !hidden.includes(id)).map(id => {
+    const on = id === S.dragId;
+    const h = Math.max(16, Math.min(64, Math.round(((S.spans[id] || 50) * 8) / 16)));
+    return `<div style="height:${h}px;background:${on?'rgba(87,227,137,.22)':'rgba(255,255,255,.04)'};border:1px solid ${on?'#57e389':'#26382b'};border-radius:4px;display:flex;align-items:center;justify-content:center;overflow:hidden;transition:all .15s;"><span class="mono" style="font-size:7px;letter-spacing:.05em;color:${on?'#57e389':'#5f7263'};white-space:nowrap;">${PANEL_LABELS[id]}</span></div>`;
+  }).join('');
+  $('mini-l').innerHTML = mk(lay.left); $('mini-r').innerHTML = mk(lay.right);
+}
+function cancelDrag(){
+  window.removeEventListener('pointermove', onDragMove);
+  window.removeEventListener('pointerup', onDragUp);
+  S.dragId = null; S.pending = null;
+  $('dragpill').style.display = 'none'; $('minimap').style.display = 'none'; $('dropind').style.display = 'none';
+  applyPanelStyles();
+}
+function onDragUp(){
+  const pending = S.pending;
+  window.removeEventListener('pointermove', onDragMove);
+  window.removeEventListener('pointerup', onDragUp);
+  $('dragpill').style.display = 'none'; $('minimap').style.display = 'none'; $('dropind').style.display = 'none';
+  if (pending) flip(() => { applyLayout(pending); S.dragId = null; S.pending = null; });
+  else { S.dragId = null; applyPanelStyles(); }
+}
+function jumpToPanel(cat){
+  const map = { MODE:'mode', BILLING:'bill', SOLAR:'forecast', BATTERY:'battery', GRID:'flow', __ALERTS__:'alerts' };
+  const pid = map[cat] || 'flow';
+  if (getHidden().includes(pid)) hidePanel(pid, false);
+  setTimeout(() => { const el = grid.querySelector(`[data-panel="${pid}"]`); if (el) window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - 90, behavior: 'smooth' }); }, 60);
+  S.flashId = pid; applyPanelStyles();
+  clearTimeout(jumpToPanel._t);
+  jumpToPanel._t = setTimeout(() => { S.flashId = null; applyPanelStyles(); }, 1800);
+}
+window.addEventListener('resize', () => { const n = window.innerWidth < 920; if (n !== S.narrow) { S.narrow = n; applyPanelStyles(); } });
+window.addEventListener('keydown', e => {
+  if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  if (e.key === 'Escape') { if (S.dragId) cancelDrag(); else if (S.focusId) flip(() => { S.focusId = null; }); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); S.scrubIdx = Math.min(11, (S.scrubIdx < 0 ? -1 : S.scrubIdx) + 1); renderForecast(); }
+  else if (e.key === 'ArrowLeft')  { e.preventDefault(); S.scrubIdx = Math.max(0, (S.scrubIdx < 0 ? 12 : S.scrubIdx) - 1); renderForecast(); }
+  else if (e.key === 'ArrowUp')    { e.preventDefault(); S.histIdx = Math.min(95, (S.histIdx < 0 ? 47 : S.histIdx) + 4); renderHistCursor(); }
+  else if (e.key === 'ArrowDown')  { e.preventDefault(); S.histIdx = Math.max(0, (S.histIdx < 0 ? 47 : S.histIdx) - 4); renderHistCursor(); }
+  else if (e.key === 'h' || e.key === 'H') { if (hoverId) hidePanel(hoverId, true); }
+});
+
+// sticky mini-bar + unread IO
+new IntersectionObserver(en => { $('sticky').style.display = en[0].isIntersecting ? 'none' : 'flex'; }, { threshold: 0 })
+  .observe(grid.querySelector('[data-panel="battery"]'));
+new IntersectionObserver(en => { S.alertsVisible = en[0].isIntersecting; if (S.alertsVisible && S.unread) { S.unread = 0; renderHeader(); } }, { threshold: 0.2 })
+  .observe(grid.querySelector('[data-panel="alerts"]'));
+
+// hints
+try { if (!localStorage.getItem('fwh-hints-seen')) $('hints').style.display = 'block'; } catch(e){}
+$('hints-ok').addEventListener('click', () => { localStorage.setItem('fwh-hints-seen','1'); $('hints').style.display = 'none'; });
+$('hd-unread').addEventListener('click', () => jumpToPanel('__ALERTS__'));
+
+// ── Rendering ────────────────────────────────────────────────────────
+function accentColor(){ return S.gridStatus !== 'normal' ? '#ff8a7a' : S.onPeak ? '#f5b942' : '#57e389'; }
+function accentGlow(){ return S.gridStatus !== 'normal' ? 'rgba(255,138,122,.35)' : S.onPeak ? 'rgba(245,185,66,.35)' : 'rgba(87,227,137,.35)'; }
+function tteHours(){ return (S.soc/100*S.cap) / Math.max(0.35, S.load - Math.min(S.solar, S.load)); }
+function tteStr(){ const h = tteHours(); return h > 24 ? '24+ hr' : h.toFixed(1) + ' hr'; }
+
+function renderHeader(){
+  const t = nowT();
+  $('hd-datetime').textContent = t.toLocaleDateString('en-US',{month:'short',day:'numeric'}).toUpperCase() + ' · ' + fmtTime(t);
+  const out = S.gridStatus !== 'normal';
+  const col = out ? '#ff8a7a' : '#57e389';
+  $('hd-status').textContent = out ? 'GRID DOWN' : 'POLLING OK';
+  $('hd-status-wrap').style.color = col; $('hd-dot').style.background = col; $('hd-dot').style.boxShadow = '0 0 8px ' + col;
+  const lp = S.lastPoll ? fmtTime(new Date(S.lastPoll)) + ':' + String(new Date(S.lastPoll).getSeconds()).padStart(2,'0') : '—';
+  const np = S.nextPoll ? Math.max(0, Math.ceil((new Date(S.nextPoll) - Date.now())/1000)) + 's' : '—';
+  $('hd-poll').textContent = `LAST POLL ${lp} · NEXT ${np}`;
+  const un = $('hd-unread');
+  un.style.display = S.unread > 0 ? '' : 'none';
+  un.textContent = '🔔 ' + S.unread;
+}
+function renderLerp(){
+  const acc = accentColor();
+  $('b-soc').textContent = D.soc.toFixed(0) + '%';
+  $('b-soc').style.color = acc; $('b-soc').style.textShadow = '0 0 34px ' + accentGlow();
+  $('b-bar').style.width = D.soc.toFixed(0) + '%';
+  $('b-bar').style.background = `linear-gradient(90deg,#1f7a44,${acc})`;
+  $('b-kwh').textContent = `${D.kwh.toFixed(1)} / ${S.cap} kWh`;
+  $('b-tte').textContent = 'backup ~' + tteStr();
+  $('b-status').textContent = S.chg > 0.05 ? `↑ charging · solar ${D.solar.toFixed(1)} kW` : S.dis > 0.05 ? `↓ discharging · ${S.dis.toFixed(1)} kW` : `· idle · solar ${D.solar.toFixed(1)} kW`;
+  $('hd-saved').textContent = '$' + D.saved.toFixed(2);
+  $('st-bar').style.width = D.soc.toFixed(0) + '%';
+  $('st-soc').textContent = D.soc.toFixed(0) + '%'; $('st-soc').style.color = acc;
+  $('st-solar').textContent = '☀ ' + D.solar.toFixed(1) + ' kW';
+  $('st-load').textContent = '⌂ ' + D.load.toFixed(1) + ' kW';
+  $('st-saved').textContent = '$' + D.saved.toFixed(2);
+  const out = S.gridStatus !== 'normal';
+  $('st-status').textContent = out ? 'GRID DOWN' : 'POLLING OK'; $('st-status').style.color = out ? '#ff8a7a' : '#57e389';
+  document.querySelectorAll('#banner-outage .tte').forEach(el => el.textContent = tteStr());
+  if ($('m-sav').style.display !== 'none') $('m-savval').textContent = '$' + D.savings.toFixed(2);
+}
+function renderBanners(){
+  const out = S.gridStatus !== 'normal';
+  $('banner-outage').style.display = out ? 'block' : 'none';
+  $('banner-peak').style.display = (!out && S.onPeak) ? 'block' : 'none';
+  const battEl = grid.querySelector('[data-panel="battery"]');
+  battEl.style.borderColor = out ? '#6e2019' : S.onPeak ? '#6b5216' : '#1c2a1e';
+  if (S.onPeak) {
+    const t = nowT();
+    const rate = S.tou ? '$' + S.tou.rate.toFixed(3) : '$0.529';
+    $('peak-title').textContent = `ON-PEAK ACTIVE · 4–9 PM · ${rate}/kWh`;
+    $('peak-load').textContent = D.load.toFixed(2) + ' kW';
+    $('peak-grid').textContent = Math.max(0, S.grid).toFixed(2) + ' kW';
+    const end = new Date(t); end.setHours(21,0,0,0);
+    const hrs = Math.max(0, (end - t) / 3600000);
+    $('peak-cd').textContent = Math.floor(hrs) + 'h ' + String(Math.round(hrs % 1 * 60)).padStart(2,'0') + 'm';
+  }
+}
+function sweep(){ const el = $('sweep'); el.style.animation = 'none'; void el.offsetWidth; el.style.animation = 'sweepX 1.4s ease-out forwards'; }
+function flash(color){ const f = $('flicker'); f.style.background = color; f.style.display = 'block'; f.style.animation = 'none'; void f.offsetWidth; f.style.animation = 'flick .8s ease-out forwards'; setTimeout(() => f.style.display = 'none', 900); }
+
+// history sparklines
+function histPaths(samples){
+  const path = (get, min, max) => samples.map((p,i) => (i?'L':'M') + (i/(samples.length-1||1)*400).toFixed(1) + ',' + (48 - (Math.max(min,Math.min(max,get(p))) - min)/(max-min)*42).toFixed(1)).join('');
+  const maxKw = Math.max(5, ...samples.map(p => p.solar)), maxLd = Math.max(3, ...samples.map(p => p.load));
+  return { soc: path(p=>p.soc,0,100), solar: path(p=>p.solar,0,maxKw), load: path(p=>p.load,0,maxLd) };
+}
+function renderHistory(){
+  if (S.hist.length > 1) {
+    const p = histPaths(S.hist);
+    $('hp-soc').setAttribute('d', p.soc); $('hp-solar').setAttribute('d', p.solar); $('hp-load').setAttribute('d', p.load);
+  }
+  const op = S.cmp && S.histY.length > 1 ? 0.55 : 0;
+  if (S.histY.length > 1) {
+    const p = histPaths(S.histY);
+    $('hp-socY').setAttribute('d', p.soc); $('hp-solarY').setAttribute('d', p.solar); $('hp-loadY').setAttribute('d', p.load);
+  }
+  ['hp-socY','hp-solarY','hp-loadY'].forEach(id => $(id).setAttribute('opacity', op));
+  renderHistCursor();
+}
+function renderHistCursor(){
+  const n = S.hist.length;
+  const on = S.histIdx >= 0 && n > 0;
+  $('h-cursor').style.display = on ? 'block' : 'none';
+  if (on) {
+    const idx = Math.min(n-1, Math.round(S.histIdx / 95 * (n-1)));
+    $('h-cursor').style.left = ((S.histIdx + 0.5) / 96 * 100).toFixed(1) + '%';
+    const hp = S.hist[idx];
+    $('h-info').textContent = `${hp.t} · SOC ${hp.soc.toFixed(0)}% · SOLAR ${hp.solar.toFixed(1)} kW · LOAD ${hp.load.toFixed(1)} kW`;
+  } else {
+    $('h-info').textContent = S.cmp ? 'SOLID = TODAY · DASHED = YESTERDAY' : '24H · 15-MIN SAMPLES · DRAG TO SCRUB';
+  }
+}
+$('h-cmp').addEventListener('click', () => { S.cmp = !S.cmp; $('h-cmp').classList.toggle('on', S.cmp); renderHistory(); });
+$('h-scrub').addEventListener('pointermove', e => { const r = e.currentTarget.getBoundingClientRect(); S.histIdx = Math.max(0, Math.min(95, Math.floor((e.clientX - r.left)/r.width*96))); renderHistCursor(); });
+$('h-scrub').addEventListener('pointerleave', () => { S.histIdx = -1; renderHistCursor(); });
+
+// forecast + what-if + EB derivation
+function adjForecast(){
+  const ccF = 1 - S.cc/100*0.9;
+  let cum = 0;
+  return S.forecast.map(f => {
+    const kw = f.solar_kw * ccF;
+    cum += (f.solar_kw - kw);
+    return Object.assign({}, f, { kw, socAdj: Math.max(5, Math.round(f.soc - cum/S.cap*100)) });
+  });
+}
+function renderForecast(){
+  const fc = adjForecast();
+  const bars = $('f-bars');
+  if (!fc.length) { bars.innerHTML = '<div class="mono" style="font-size:11px;color:#4c5f50;align-self:center;width:100%;text-align:center;">collecting data — forecast activates after 3 days</div>'; $('f-band').style.display='none'; return; }
+  const maxKw = Math.max(0.5, ...fc.map(f => f.kw), ...S.forecast.map(f => f.solar_kw));
+  // on-peak band from entries
+  const first = fc.findIndex(f => f.on_peak), last = fc.map(f=>f.on_peak).lastIndexOf(true);
+  if (first >= 0) { $('f-band').style.display = 'block'; $('f-band').style.left = (first/fc.length*100) + '%'; $('f-band').style.width = ((last-first+1)/fc.length*100) + '%'; }
+  else $('f-band').style.display = 'none';
+  bars.innerHTML = fc.map((f, i) => {
+    const barH = Math.max(3, Math.round(f.kw / maxKw * 92));
+    const socY = 18 + Math.round((f.socAdj - 50)/50*100);
+    const op = S.scrubIdx === -1 ? 1 : (S.scrubIdx === i ? 1 : 0.35);
+    const filt = S.scrubIdx === i ? 'drop-shadow(0 0 8px rgba(87,227,137,.8)) brightness(1.25)' : 'none';
+    return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:6px;height:100%;position:relative;">
+      <div style="position:absolute;bottom:${socY}px;left:50%;transform:translateX(-50%);width:5px;height:5px;border-radius:50%;background:#d9f5e2;box-shadow:0 0 6px rgba(217,245,226,.8);pointer-events:none;"></div>
+      <div style="width:100%;height:${barH}px;min-height:3px;border-radius:5px 5px 2px 2px;background:linear-gradient(180deg,#57e389,#1f7a44);opacity:${op};transition:opacity .15s,filter .15s;filter:${filt};"></div>
+      <div class="mono" style="font-size:9px;color:#4c5f50;">${f.label}</div></div>`;
+  }).join('');
+  const tip = $('f-tip');
+  if (S.scrubIdx >= 0 && fc[S.scrubIdx]) {
+    const f = fc[S.scrubIdx];
+    tip.style.display = 'block';
+    tip.style.left = ((S.scrubIdx + 0.5)/fc.length*100).toFixed(1) + '%';
+    const pc = f.on_peak ? '#f5b942' : '#57e389';
+    tip.innerHTML = `<div class="mono" style="font-size:11px;font-weight:700;color:#e6f2e8;">${f.label}M · <span style="color:${pc};">${f.period}</span></div>
+      <div class="mono" style="font-size:11px;color:#7d937f;margin-top:4px;">solar ${f.kw.toFixed(1)} kW · $${f.rate.toFixed(3)}/kWh</div>
+      <div class="mono" style="font-size:11px;color:#57e389;margin-top:2px;">projected SoC ${f.socAdj}%</div>`;
+  } else tip.style.display = 'none';
+  renderEB(fc);
+}
+$('f-scrub').addEventListener('pointermove', e => { const n = Math.max(1, S.forecast.length); const r = e.currentTarget.getBoundingClientRect(); S.scrubIdx = Math.max(0, Math.min(n-1, Math.floor((e.clientX-r.left)/r.width*n))); renderForecast(); });
+$('f-scrub').addEventListener('pointerleave', () => { S.scrubIdx = -1; renderForecast(); });
+$('f-cc').addEventListener('input', e => { S.cc = +e.target.value; $('f-ccval').textContent = S.cc + '%'; $('f-ccval').style.color = S.cc > 60 ? '#f5b942' : '#57e389'; renderForecast(); });
+
+function renderEB(fc){
+  const eb = S.eb;
+  if (!eb) { $('eb-msg').textContent = 'collecting data — EB plan activates once the forecast does'; return; }
+  // re-derive under what-if: adjust soc@4pm by cumulative lost solar before peak
+  let soc4 = Math.round(eb.soc_at_peak ?? eb.soc_at_4pm ?? 0);
+  let net = eb.net_peak_draw ?? 0;
+  if (fc && fc.length && S.cc > 0) {
+    const ccF = 1 - S.cc/100*0.9;
+    let lostPre = 0, lostPeak = 0;
+    for (const f of fc) {
+      const lost = f.solar_kw * (1 - ccF);
+      if (f.on_peak) lostPeak += lost; else if (new Date(f.ts) < new Date(fc.find(x=>x.on_peak)?.ts ?? f.ts)) lostPre += lost;
+    }
+    soc4 = Math.max(0, Math.round(soc4 - lostPre / S.cap * 100));
+    net = net + lostPeak;
+  }
+  const avail = Math.max(0, (soc4 - 10)/100*S.cap);
+  const target = Math.min(S.cap, net + 0.10*S.cap);
+  const short = S.cc > 0 ? Math.max(0, target - avail) : (eb.shortfall_kwh ?? 0);
+  $('eb-soc4').textContent = soc4 + '%';
+  $('eb-net').innerHTML = net.toFixed(1) + ' <span style="font-size:14px;color:#7d937f;">kWh</span>';
+  $('eb-short').innerHTML = short.toFixed(1) + ' <span style="font-size:14px;color:#7d937f;">kWh</span>';
+  $('eb-short').style.color = short > 0.05 ? '#f5b942' : '#57e389';
+  $('eb-msg').style.color = short > 0.05 ? '#cbb27a' : '#6d8272';
+  $('eb-msg').textContent = short > 0.05
+    ? `⚠ EB shortfall${S.cc>0?' under this cloud scenario':''} — schedule ${short.toFixed(1)} kWh grid charge in the next super off-peak window ($0.117/kWh).`
+    : (eb.hint_str || '✓ No EB charge needed — battery projects past the 10% buffer.');
+}
+
+function renderMode(){
+  const rec = S.rec;
+  if (!rec || !rec.recommended_mode) return;
+  const pretty = m => m.replace('self_consumption','Self-Use').replace('time_of_use','Time-of-Use').replace('emergency_backup','Emergency Backup').replace(/_/g,' ');
+  $('m-to').textContent = pretty(rec.recommended_mode);
+  $('m-from').textContent = rec.needs_action ? 'Current' : pretty(rec.recommended_mode);
+  $('m-reason').textContent = rec.reason || '';
+  $('m-applyrow').style.display = DEMO ? 'flex' : 'none';  // FranklinWH mode switching lives in their app
+}
+function renderAccuracy(){
+  const days = S.acc;
+  const errTh = 10;
+  if (!days.length) { $('acc-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#4c5f50;align-self:center;width:100%;text-align:center;">no prediction history yet</div>'; $('acc-foot').textContent=''; return; }
+  const mx = Math.max(...days.map(d => Math.max(d.predicted, d.actual)), 1);
+  $('acc-bars').innerHTML = days.map(d => {
+    const dl = (d.actual - d.predicted)/d.predicted*100;
+    const col = Math.abs(dl) > errTh ? '#f5b942' : '#57e389';
+    return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:5px;height:100%;">
+      <div class="mono" style="font-size:9px;color:${col};">${dl>=0?'+':''}${dl.toFixed(0)}%</div>
+      <div style="display:flex;align-items:flex-end;gap:3px;width:100%;justify-content:center;flex:1;">
+        <div style="width:38%;height:${Math.round(d.predicted/mx*64)}px;border:1px solid #2e5c3a;border-radius:3px 3px 0 0;background:transparent;"></div>
+        <div style="width:38%;height:${Math.round(d.actual/mx*64)}px;border-radius:3px 3px 0 0;background:linear-gradient(180deg,#57e389,#1f7a44);"></div>
+      </div>
+      <div class="mono" style="font-size:9px;color:#4c5f50;">${d.label}</div></div>`;
+  }).join('');
+  const mean = days.reduce((a,d) => a + Math.abs((d.actual-d.predicted)/d.predicted*100), 0)/days.length;
+  $('acc-foot').textContent = `🎯 Mean error ±${mean.toFixed(1)}% · per-hour bias correction map active (learned from every poll).`;
+}
+function renderTou(){
+  const t = S.tou;
+  const now = nowT();
+  const hf = now.getHours() + now.getMinutes()/60;
+  $('tc-time').textContent = fmtTime(now);
+  $('tc-hand').style.transform = `rotate(${(hf/24*360).toFixed(1)}deg)`;
+  if (!t) return;
+  const colFor = p => p.includes('ON') && !p.includes('OFF') ? '#f5b942' : p.includes('SUPER') ? '#17351f' : '#2e5c3a';
+  const stops = t.ring.map((r, h) => `${colFor(r.period)} ${(h/24*100).toFixed(2)}% ${((h+1)/24*100).toFixed(2)}%`).join(', ');
+  $('tc-ring').style.background = `conic-gradient(${stops})`;
+  $('tc-period').textContent = t.period;
+  $('tc-period').style.color = t.period === 'ON PEAK' ? '#f5b942' : t.period === 'OFF PEAK' ? '#8df0b0' : '#57e389';
+  $('tc-rate').textContent = '$' + t.rate.toFixed(3) + '/kWh';
+  const rates = {};
+  t.ring.forEach(r => { rates[r.period] = r.rate; });
+  $('tc-legend').innerHTML = [
+    ['SUPER OFF PEAK','#17351f','1px solid #2a3a2e'],
+    ['OFF PEAK','#2e5c3a',''],
+    ['ON PEAK','#f5b942',''],
+  ].map(([p,c,b]) => rates[p] === undefined ? '' :
+    `<div style="display:flex;align-items:center;gap:9px;"><span style="width:10px;height:10px;border-radius:3px;background:${c};${b?'border:'+b+';':''}"></span><span style="color:#7d937f;">${p.replace('OFF PEAK','OFF-PEAK').replace('ON PEAK','ON-PEAK 4–9 PM')}</span><span style="margin-left:auto;color:${p==='ON PEAK'?'#f5d18a':'#9db8a2'};">$${rates[p].toFixed(3)}</span></div>`
+  ).join('') + `<div style="color:#4c5f50;font-size:10px;line-height:1.6;margin-top:4px;">Weekday summer schedule. Weekends & holidays shift SOP to before 2 PM.</div>`;
+}
+function renderBill(){
+  const b = S.bill;
+  if (!b) return;
+  const f = d => new Date(d + 'T00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}).toUpperCase();
+  $('bill-title').textContent = `BILL PROJECTION · CYCLE ${f(b.cycle_start)} – ${f(b.cycle_end)}`;
+  $('bill-day').textContent = `DAY ${b.day} OF ${b.days}`;
+  $('bill-prog').style.width = (b.day/b.days*100).toFixed(1) + '%';
+  $('bill-mtd').textContent = '$' + b.net_mtd.toFixed(2);
+  $('bill-proj').textContent = '$' + b.projected.toFixed(2);
+  const mx = Math.max(b.projected, b.prior_net, 1);
+  $('bill-curbar').style.width = (b.projected/mx*100).toFixed(0) + '%';
+  $('bill-priorbar').style.width = (b.prior_net/mx*100).toFixed(0) + '%';
+  $('bill-curval').textContent = '$' + b.projected.toFixed(2);
+  $('bill-priorval').textContent = '$' + b.prior_net.toFixed(2);
+  const delta = b.prior_net > 0 ? (b.projected - b.prior_net)/b.prior_net*100 : 0;
+  $('bill-foot').innerHTML = `${delta<=0?'▼':'▲'} Tracking <b style="color:${delta<=0?'#57e389':'#f5b942'};">${delta>=0?'+':'−'}${Math.abs(delta).toFixed(0)}%</b> vs prior cycle · battery + solar saved <b style="color:#57e389;">$${b.saved_mtd.toFixed(2)}</b> MTD.`;
+}
+
+// ── Alerts feed ──────────────────────────────────────────────────────
+const CATS = ['ALL','MODE','BILLING','SOLAR','BATTERY','GRID'];
+function catOf(body){
+  const b = body.toLowerCase();
+  if (/grid down|grid restored|outage|storm/.test(b)) return 'GRID';
+  if (/solar|forecast|cloud|heat wave|sunny/.test(b)) return 'SOLAR';
+  if (/battery|soc|drain|charged|capacity|backup/.test(b)) return 'BATTERY';
+  if (/\$|cost|bill|summary|peak|export|rate/.test(b)) return 'BILLING';
+  return 'MODE';
+}
+function segsOf(body){
+  // convert the advisor's telegram HTML (<b>, <code>) into styled segments
+  const clean = body.replace(/<code>|<\/code>/g, '');
+  const segs = [];
+  const re = /<b>(.*?)<\/b>/gs;
+  let last = 0, m;
+  while ((m = re.exec(clean)) !== null) {
+    if (m.index > last) segs.push({ t: clean.slice(last, m.index), c: '#cfe8d4', w: 400 });
+    segs.push({ t: m[1], c: '#57e389', w: 700 });
+    last = m.index + m[0].length;
+  }
+  if (last < clean.length) segs.push({ t: clean.slice(last), c: '#cfe8d4', w: 400 });
+  return segs;
+}
+function relTime(ts){
+  const dm = Math.max(0, Math.round((Date.now() - new Date(ts)) / 60000));
+  return dm < 1 ? 'JUST NOW' : dm < 60 ? dm + 'M AGO' : dm < 1440 ? Math.round(dm/60) + 'H AGO' : Math.round(dm/1440) + 'D AGO';
+}
+function ingestAlerts(list, initial){
+  const known = new Set(S.alerts.map(a => a.ts));
+  let added = 0;
+  for (const raw of list) {
+    if (known.has(raw.ts)) continue;
+    const cat = catOf(raw.body);
+    const red = /grid down|🪫|below/.test(raw.body.toLowerCase());
+    const amber = /peak/.test(raw.body.toLowerCase()) && cat === 'BILLING';
+    S.alerts.unshift({
+      ts: raw.ts, cat, body: raw.body, segs: segsOf(raw.body),
+      channel: 'TELEGRAM · ADVISOR BOT', chColor: red ? '#ff8a7a' : '#57e389',
+      bg: red ? '#2a0d0a' : amber ? '#241a06' : '#12301d',
+      border: red ? '#6e2019' : amber ? '#6b5216' : '#1e4a2c',
+      prog: initial ? 1e9 : 0, done: initial,
+    });
+    added++;
+    if (!initial) { if (cat === 'GRID' && red) playAlarm(); else playChirp(); }
+  }
+  S.alerts.sort((a,b) => new Date(b.ts) - new Date(a.ts));
+  S.alerts = S.alerts.slice(0, 30);
+  if (added && !initial && !S.alertsVisible) { S.unread += added; renderHeader(); }
+  if (added) { renderAlerts(); renderDigests(); }
+}
+function renderAlerts(){
+  const wrap = $('al-filters');
+  wrap.innerHTML = '';
+  CATS.forEach(c => { const b = document.createElement('button'); b.className = 'chip' + (S.filterCat === c ? ' on' : ''); b.textContent = c; b.addEventListener('click', () => { S.filterCat = c; renderAlerts(); }); wrap.appendChild(b); });
+  const list = S.alerts.filter(a => S.filterCat === 'ALL' || a.cat === S.filterCat);
+  $('al-list').innerHTML = list.length ? '' : '<div class="mono" style="font-size:11px;color:#4c5f50;">no alerts yet — they appear here as the advisor sends them</div>';
+  list.forEach(a => {
+    let left = a.prog;
+    const spans = [];
+    for (const sg of a.segs) { if (left <= 0) break; const t = left >= sg.t.length ? sg.t : sg.t.slice(0, left); spans.push(`<span style="color:${sg.c};font-weight:${sg.w};white-space:pre-wrap;">${t.replace(/</g,'&lt;')}</span>`); left -= sg.t.length; }
+    const el = document.createElement('div');
+    el.style.cssText = `background:${a.bg};border:1px solid ${a.border};border-radius:12px;padding:14px 16px;animation:rise .5s cubic-bezier(.2,.9,.3,1.2);cursor:pointer;transition:border-color .25s;`;
+    el.title = 'Jump to related panel';
+    el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <div class="mono" style="font-size:10px;letter-spacing:.16em;font-weight:700;color:${a.chColor};">${a.channel}</div>
+        <div class="mono" style="font-size:8.5px;letter-spacing:.14em;color:#4c5f50;border:1px solid #1e3a26;border-radius:999px;padding:2px 8px;">${a.cat}</div></div>
+      <div style="font-size:14px;line-height:1.55;color:#cfe8d4;margin-top:8px;">${spans.join('')}${a.done ? '' : '<span style="display:inline-block;width:7px;height:15px;background:#57e389;vertical-align:-2px;animation:blink .8s step-end infinite;"></span>'}</div>
+      <div class="mono" title="${a.ts}" style="font-size:10px;color:#4c5f50;text-align:right;margin-top:8px;">${relTime(a.ts)}</div>`;
+    el.addEventListener('click', () => jumpToPanel(a.cat));
+    $('al-list').appendChild(el);
+  });
+}
+setInterval(() => {  // typewriter
+  const a = S.alerts.find(x => !x.done);
+  if (!a) return;
+  const total = a.segs.reduce((n,sg) => n + sg.t.length, 0);
+  a.prog += 3; if (a.prog >= total) a.done = true;
+  renderAlerts();
+}, 40);
+setInterval(() => { document.querySelectorAll('#al-list [title]'); renderHeader(); }, 1000);
+
+// digests from alert feed
+function renderDigests(){
+  const find = pat => S.alerts.find(a => a.body.includes(pat));
+  const items = [find('Daily Summary'), find('Weekly Summary'), find('Billing Cycle') || find('Monthly')];
+  const cur = items[S.tab];
+  const titles = ['📊 Daily Summary','📊 Weekly Summary','📅 Billing Cycle'];
+  const strip = s => s.replace(/<[^>]+>/g, '');
+  $('dg-body').innerHTML = cur
+    ? `<div style="animation:rise .4s ease-out;"><div style="font-size:14px;font-weight:700;margin-top:16px;">${strip(cur.body.split('\n')[0])}</div><pre class="digest">${strip(cur.body.split('\n').slice(1).join('\n')).replace(/</g,'&lt;')}</pre></div>`
+    : `<div class="mono" style="font-size:11px;color:#4c5f50;margin-top:16px;">${titles[S.tab]} — none received yet. Digests appear after the advisor sends them (nightly / weekly / monthly).</div>`;
+}
+document.querySelectorAll('.tabbtn').forEach(b => b.addEventListener('click', () => {
+  S.tab = +b.dataset.tab;
+  document.querySelectorAll('.tabbtn').forEach(x => x.classList.toggle('on', +x.dataset.tab === S.tab));
+  renderDigests();
+}));
+
+// ── Canvas flow ──────────────────────────────────────────────────────
+const flowCv = $('flowcv');
+const pdata = { solarHome: [], solarBatt: [], solarGrid: [], battHome: [], gridHome: [] };
+function fitCv(){ const r = flowCv.getBoundingClientRect(); flowCv.width = r.width * devicePixelRatio; flowCv.height = 250 * devicePixelRatio; }
+new ResizeObserver(fitCv).observe(flowCv); fitCv();
+function drawFlow(){
+  if (!flowCv.width) return;
+  const ctx = flowCv.getContext('2d'), dpr = devicePixelRatio;
+  const W = flowCv.width/dpr, H = flowCv.height/dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
+  const out = S.gridStatus !== 'normal';
+  const N = {
+    solar: { x: W*0.5, y: 42, label: 'SOLAR', kw: S.solar, col: '#57e389' },
+    batt:  { x: W*0.16, y: 175, label: 'BATTERY', kw: S.chg > 0 ? S.chg : -S.dis, col: '#8df0b0' },
+    home:  { x: W*0.5, y: 205, label: 'HOME', kw: S.load, col: '#d9f5e2' },
+    grid:  { x: W*0.84, y: 175, label: out ? 'GRID ✕' : 'GRID', kw: out ? 0 : (S.grid > 0 ? S.grid : -S.exp), col: out ? '#e05a50' : '#f5b942' }
+  };
+  const paths = [
+    { key:'solarHome', a:N.solar, b:N.home, kw: Math.min(S.solar, S.load), col:'#57e389' },
+    { key:'solarBatt', a:N.solar, b:N.batt, kw: S.chg, col:'#57e389' },
+    { key:'solarGrid', a:N.solar, b:N.grid, kw: S.exp, col:'#f5b942' },
+    { key:'battHome',  a:N.batt,  b:N.home, kw: S.dis, col:'#8df0b0' },
+    { key:'gridHome',  a:N.grid,  b:N.home, kw: Math.max(0,S.grid), col:'#f5b942' }
+  ];
+  const density = 1.5;
+  paths.forEach(p => {
+    const mx = (p.a.x+p.b.x)/2, my = (p.a.y+p.b.y)/2 + 26;
+    const active = p.kw > 0.05;
+    ctx.beginPath(); ctx.moveTo(p.a.x,p.a.y); ctx.quadraticCurveTo(mx,my,p.b.x,p.b.y);
+    ctx.strokeStyle = active ? p.col+'44' : '#1c2a1e'; ctx.lineWidth = active ? 2 : 1; ctx.stroke();
+    const arr = pdata[p.key];
+    const want = active ? Math.min(14, Math.ceil(p.kw*3*density)) : 0;
+    while (arr.length < want) arr.push(Math.random());
+    while (arr.length > want) arr.pop();
+    const speed = 0.002 + p.kw*0.0022;
+    ctx.shadowBlur = 8;
+    for (let i = 0; i < arr.length; i++) {
+      arr[i] = (arr[i]+speed)%1;
+      const t = arr[i], it = 1-t;
+      const x = it*it*p.a.x + 2*it*t*mx + t*t*p.b.x;
+      const y = it*it*p.a.y + 2*it*t*my + t*t*p.b.y;
+      ctx.shadowColor = p.col; ctx.fillStyle = p.col;
+      ctx.beginPath(); ctx.arc(x,y,2.2,0,7); ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+  });
+  const pulse = 1 + Math.sin(Date.now()/500)*0.12;
+  Object.values(N).forEach(n => {
+    const dead = n.label === 'GRID ✕';
+    ctx.beginPath(); ctx.arc(n.x, n.y, 17*(dead?1:pulse), 0, 7);
+    ctx.fillStyle = '#0c130d'; ctx.fill();
+    ctx.strokeStyle = dead ? '#6e2019' : n.col; ctx.lineWidth = 2;
+    ctx.shadowColor = n.col; ctx.shadowBlur = dead ? 4 : 14; ctx.stroke(); ctx.shadowBlur = 0;
+    ctx.font = "700 10px 'JetBrains Mono',monospace"; ctx.textAlign = 'center';
+    ctx.fillStyle = dead ? '#e05a50' : '#7d937f';
+    ctx.fillText(n.label, n.x, n.y - 26);
+    ctx.fillStyle = dead ? '#6e2019' : n.col;
+    ctx.font = "700 12px 'JetBrains Mono',monospace";
+    ctx.fillText(dead ? 'DOWN' : Math.abs(n.kw).toFixed(2) + ' kW', n.x, n.y + 38);
+  });
+}
+
+// ── Animation loop ───────────────────────────────────────────────────
+(function raf(){
+  const k = 0.07;
+  const lerp = (key, target) => { D[key] += (target - D[key]) * k; if (Math.abs(D[key]-target) < 0.0004) D[key] = target; };
+  lerp('soc', S.soc); lerp('solar', S.solar); lerp('load', S.load);
+  lerp('kwh', S.soc/100*S.cap); lerp('saved', S.savedToday); lerp('savings', savTarget);
+  renderLerp();
+  drawFlow();
+  requestAnimationFrame(raf);
+})();
+setInterval(renderHeader, 1000);
+setInterval(renderTou, 30000);
+
+// ── Data: live vs demo ───────────────────────────────────────────────
+function resample(samples, dayStart){
+  // bucket raw readings into 96 × 15-min slots for one day window
+  const out = [];
+  for (let i = 0; i < 96; i++) {
+    const t0 = dayStart + i*15*60000;
+    const inSlot = samples.filter(s => { const t = new Date(s.ts).getTime(); return t >= t0 && t < t0 + 15*60000; });
+    if (inSlot.length) {
+      const avg = k => inSlot.reduce((a,s) => a + s[k], 0)/inSlot.length;
+      out.push({ t: fmtTime(new Date(t0)), soc: avg('soc'), solar: avg('solar_kw'), load: avg('load_kw') });
+    }
+  }
+  return out;
+}
+async function J(url){ const r = await fetch(url); if (!r.ok) throw new Error(url + ' ' + r.status); return r.json(); }
+
+async function pollFast(){
+  try {
+    const c = await J('/api/current');
+    if (c.ok) {
+      S.cap = c.battery_capacity_kwh || CAP0;
+      S.soc = c.soc_pct; S.solar = c.solar_kw; S.load = c.home_load_kw;
+      S.grid = c.grid_kw; S.exp = Math.max(0, -c.grid_kw);
+      S.chg = Math.max(0, -c.battery_kw); S.dis = Math.max(0, c.battery_kw);
+      const wasOut = S.gridStatus !== 'normal';
+      S.gridStatus = c.grid_status || 'normal';
+      const isOut = S.gridStatus !== 'normal';
+      if (isOut !== wasOut) flash(isOut ? '#3a0d0d' : '#0d3a1a');
+      S.onPeak = !!c.on_peak;
+      S.savedToday = c.saved_today || 0;
+      S.lastPoll = c.last_poll; S.nextPoll = c.next_poll;
+      renderBanners(); sweep();
+    }
+    const a = await J('/api/alerts?limit=30');
+    ingestAlerts(a.alerts, pollFast._first === undefined);
+    pollFast._first = false;
+  } catch(e) { /* server briefly away — keep last values */ }
+}
+async function pollSlow(){
+  try {
+    const [h, f, acc, tou, bill, rec] = await Promise.all([
+      J('/api/history?hours=48'), J('/api/forecast'), J('/api/accuracy'),
+      J('/api/tou'), J('/api/bill'), J('/api/recommendation'),
+    ]);
+    const now = Date.now();
+    const todayStart = now - 24*3600000;
+    S.hist = resample(h.samples, todayStart);
+    S.histY = resample(h.samples, todayStart - 24*3600000);
+    S.forecast = (f.hours || []).slice(0, 12);
+    S.cap = f.battery_capacity_kwh || S.cap;
+    S.acc = acc.days; S.tou = tou; S.bill = bill;
+    S.rec = rec.recommendation || null; S.eb = rec.eb_plan;
+    renderHistory(); renderForecast(); renderAccuracy(); renderTou(); renderBill(); renderMode();
+  } catch(e) { /* retry next cycle */ }
+}
+
+// ── Demo simulation (?demo=1) — prototype engine, no server needed ──
+const solarCurve = hf => (hf < 6.2 || hf > 19.8) ? 0 : Math.sin((hf-6.2)/13.6*Math.PI)*4.9;
+let jumpedFrom = null, outageStart = null, outageSoc = 0, firedEB = false, firedLow = false;
+function doJump(h, m){
+  if (!jumpedFrom) jumpedFrom = new Date(S.simTime);
+  const t = new Date(S.simTime); t.setHours(h,m,0,0);
+  if (t <= S.simTime) t.setDate(t.getDate()+1);
+  S.simTime = new Date(t.getTime()-1000);
+  S.jumped = true; demoPoll(0.5); D.solar = S.solar; D.load = S.load; buildToolbar();
+}
+function backToLive(){ if (!jumpedFrom) return; S.simTime = new Date(jumpedFrom); jumpedFrom = null; S.jumped = false; demoPoll(0.5); D.solar=S.solar; D.load=S.load; buildToolbar(); }
+function toggleOutage(){
+  S.outage = !S.outage;
+  S.gridStatus = S.outage ? 'down' : 'normal';
+  flash(S.outage ? '#3a0d0d' : '#0d3a1a');
+  if (S.outage) { outageStart = new Date(S.simTime); outageSoc = S.soc;
+    demoAlert('GRID', `🔴 <b>GRID DOWN at ${fmtTime(S.simTime)}.</b> Load ${S.load.toFixed(2)} kW · Solar ${S.solar.toFixed(2)} kW · ~${tteStr()} to empty. Conserve: AC, EV, dryer, pool pump.`, true);
+  } else {
+    const mins = Math.max(1, Math.round((S.simTime - outageStart)/60000));
+    demoAlert('GRID', `🟢 <b>GRID RESTORED at ${fmtTime(S.simTime)}.</b> Outage lasted ${mins >= 60 ? (mins/60).toFixed(1)+'h' : mins+' min'} · ~${Math.max(0,(outageSoc-S.soc)/100*S.cap).toFixed(1)} kWh used from battery.`);
+  }
+  renderBanners(); buildToolbar();
+}
+function demoAlert(cat, body, red){ ingestAlerts([{ ts: new Date().toISOString(), body }], false); }
+function demoPoll(dtSecs){
+  const t = S.simTime, hf = t.getHours() + t.getMinutes()/60;
+  const inPeak = hf >= 16 && hf < 21;
+  S.solar = Math.max(0, solarCurve(hf) * (0.88 + Math.random()*0.14));
+  S.load = Math.max(0.4, (hf >= 17 && hf < 22 ? 1.7 : 0.95) + (Math.random()-0.5)*0.5);
+  const surplus = S.solar - S.load;
+  if (S.outage) { S.grid = 0; S.exp = 0; S.chg = Math.max(0, Math.min(surplus, 5, (100-S.soc)*0.4)); S.dis = Math.max(0, -surplus); }
+  else if (surplus >= 0) { S.dis = 0; S.chg = S.soc >= 99.5 ? 0 : Math.min(surplus, 5); S.exp = surplus - S.chg; S.grid = 0; }
+  else if (inPeak || S.soc > 12) { S.chg = 0; S.exp = 0; S.dis = Math.min(-surplus, 5); S.grid = Math.max(0, -surplus - S.dis); }
+  else { S.chg = 0; S.exp = 0; S.dis = 0; S.grid = -surplus; }
+  const dtH = dtSecs/3600;
+  S.soc = Math.max(2, Math.min(100, S.soc + (S.chg - S.dis)/S.cap*100*dtH*60));
+  S.savedToday += (S.dis*0.529 + S.exp*0.05 + (inPeak ? Math.min(S.solar,S.load)*0.529 : 0))*dtH*60;
+  S.onPeak = inPeak && !S.outage;
+  S.lastPoll = new Date().toISOString(); S.nextPoll = new Date(Date.now()+4000).toISOString();
+  if (S.soc >= 80 && !firedEB) { firedEB = true; demoAlert('BATTERY', `🟢 Battery at 80% — <b>Emergency Backup target reached</b>. Battery ready before 4 PM peak. Solar ${S.solar.toFixed(2)} kW · Load ${S.load.toFixed(2)} kW.`); }
+  if (S.soc < 20 && !firedLow) { firedLow = true; demoAlert('BATTERY', `🪫 <b>Battery below 20% — reserve threshold hit.</b> Conserve load or schedule an EB charge in the next super off-peak window.`, true); }
+  if (S.soc > 30) firedLow = false;
+  renderBanners(); sweep();
+}
+function demoData(){
+  S.soc = 78; S.savedToday = 3.12; S.simTime = new Date(); S.simTime.setHours(14,32,0,0);
+  // history
+  const gen = (seedv, socStart, dim) => { let seed = seedv, soc = socStart; const arr = [];
+    const rnd = () => { seed = (seed*16807)%2147483647; return seed/2147483647; };
+    const start = new Date(S.simTime.getTime() - 24*3600000);
+    for (let i = 0; i < 96; i++) { const tm = new Date(start.getTime()+i*15*60000); const hf = tm.getHours()+tm.getMinutes()/60;
+      const solar = Math.max(0, solarCurve(hf)*(dim + rnd()*0.2));
+      const load = Math.max(0.4,(hf>=17&&hf<22?1.8:hf<6?0.6:1.0)+(rnd()-0.5)*0.5);
+      const surplus = solar-load; const chg = surplus>0&&soc<99.5?Math.min(surplus,5):0; const dis = surplus<0&&(hf>=16&&hf<21||soc>25)?Math.min(-surplus,5):0;
+      soc = Math.max(5, Math.min(100, soc + (chg-dis)/13.6*100*0.25*4));
+      arr.push({ t: fmtTime(tm), soc, solar, load }); }
+    return arr; };
+  S.hist = gen(7, 62, 0.82); S.histY = gen(12345, 62, 0.58);
+  // forecast (matches prototype table)
+  const labels = ['3P','4P','5P','6P','7P','8P','9P','10P','11P','12A','1A','2A'];
+  const kws = [3.6,2.9,2.1,1.2,0.5,0.1,0,0,0,0,0,0];
+  const socs = [86,91,88,84,79,74,69,66,63,60,58,56];
+  S.forecast = labels.map((label,i) => ({ ts: new Date(Date.now()+i*3600000).toISOString(), label, solar_kw: kws[i], soc: socs[i],
+    period: i===0?'OFF PEAK':i<6?'ON PEAK':i<9?'OFF PEAK':'SUPER OFF PEAK',
+    rate: i===0?0.473:i<6?0.529:i<9?0.473:0.117, on_peak: i>=1&&i<6 }));
+  S.eb = { soc_at_peak: 91, net_peak_draw: 3.1, shortfall_kwh: 0, hint_str: '✓ No EB charge needed — battery projects past the 10% buffer. Cheap-charge window (super off-peak $0.117/kWh) closed at 2 PM.' };
+  S.rec = { recommended_mode: 'time_of_use', needs_action: true, reason: 'Battery projects to cover the 4–9 PM peak without EB charging — hold charge and export surplus.' };
+  S.acc = [[26.0,28.5],[27.5,26.9],[24.1,22.8],[28.0,29.2],[25.2,26.0],[26.8,28.1],[26.0,27.4]].map(([p,a],i) => ({ label:'J'+(9+i), predicted:p, actual:a }));
+  S.tou = { period:'OFF PEAK', rate:0.473, ring: Array.from({length:24},(_,h) => ({ hour:h, period: h<6?'SUPER OFF PEAK':h<10?'OFF PEAK':h<14?'SUPER OFF PEAK':h<16?'OFF PEAK':h<21?'ON PEAK':'OFF PEAK', rate: h>=16&&h<21?0.529:(h<6||(h>=10&&h<14))?0.117:0.473 })) };
+  S.bill = { cycle_start:'2026-06-19', cycle_end:'2026-07-18', day:29, days:30, net_mtd:49.97, projected:52.89, prior_net:61.20, saved_mtd:118.40 };
+  ingestAlerts([
+    { ts: new Date(Date.now()-120000).toISOString(), body: '⚡ Switch to <b>Time-of-Use</b> mode. Battery at 78% with 14 kWh of solar still expected — hold charge for the 4–9 PM peak window and export at <b>$0.529/kWh</b>.' },
+    { ts: new Date(Date.now()-120000).toISOString(), body: 'Heads up: grid peak pricing starts in 1h 28m. Current plan saves an estimated <b>$4.80</b> today vs Self-Use.' },
+  ], true);
+  renderHistory(); renderForecast(); renderAccuracy(); renderTou(); renderBill(); renderMode();
+  $('m-apply').addEventListener('click', () => {
+    if (S.applying || S.modeApplied) return;
+    S.applying = true; $('m-apply').textContent = '◈ SWITCHING…';
+    setTimeout(() => {
+      S.applying = false; S.modeApplied = true; savTarget = 4.80;
+      $('m-apply').textContent = '✓ TIME-OF-USE ACTIVE';
+      $('m-apply').style.cssText += 'background:rgba(87,227,137,.12);color:#57e389;border-color:#2e5c3a;';
+      $('m-burst').style.display = 'block'; setTimeout(() => $('m-burst').style.display = 'none', 950);
+      $('m-sav').style.display = 'block';
+      demoAlert('MODE', `✅ Mode switched to <b>Time-of-Use</b> at ${fmtTime(S.simTime)}. Battery will hold charge for 4–9 PM and export surplus.`);
+    }, 1400);
+  });
+  $('m-apply').textContent = 'APPLY TIME-OF-USE';
+  let elapsed = 0;
+  const queue = [
+    { at: 20, body: `💰 Peak export opportunity today. Battery ${Math.round(S.soc)}% — hold and export ~5.2 kWh to grid during 4–9 PM ≈ <b>$2.75 credit</b>. Recharge afterward from solar.` },
+    { at: 48, body: `🔥 Heat wave prep: <b>97°F</b> forecast tomorrow — expect an AC load spike 2–8 PM. Battery healthy; no pre-charge needed tonight.` },
+  ];
+  setInterval(() => {
+    if (S.speed > 0) { S.simTime = new Date(S.simTime.getTime() + S.speed*1000); elapsed++; }
+    queue.forEach(q => { if (!q.fired && elapsed >= q.at) { q.fired = true; demoAlert('BILLING', q.body); } });
+    const h = S.simTime.getHours();
+    const nowPeak = h >= 16 && h < 21 && !S.outage;
+    if (nowPeak && !S.onPeak) demoAlert('BILLING', `🔶 On-peak started (4–9 PM, <b>$0.529/kWh</b>). Battery covering home load — grid import blocked.`);
+    S.onPeak = nowPeak;
+    renderBanners();
+    renderTou();
+  }, 1000);
+  setInterval(() => { if (S.speed > 0) demoPoll(4); }, 4000);
+  demoPoll(0.5);
+}
+
+// ── Boot ─────────────────────────────────────────────────────────────
+buildToolbar();
+applyPanelStyles();
+renderDigests();
+renderAlerts();
+if (DEMO) {
+  demoData();
+} else {
+  pollFast(); pollSlow();
+  setInterval(pollFast, 10000);
+  setInterval(pollSlow, 5*60000);
+}
+</script>
+</body>
+</html>
