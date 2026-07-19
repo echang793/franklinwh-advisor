@@ -1015,7 +1015,7 @@ def cmd_advise(
                 _warn(_lic.message)
 
         _consec_errors   = 0
-        _ERROR_THRESHOLD = 3
+        _ERROR_THRESHOLD = 8
         _last_stats      = None  # cached for time-gated alerts during API outages
         _lic_warn_date   = ""    # one grace-period Telegram warning per day
 
