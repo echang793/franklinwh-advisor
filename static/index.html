@@ -131,8 +131,8 @@ const DEMO = new URLSearchParams(location.search).get('demo') === '1';
 const CAP0 = 13.6;
 const $ = id => document.getElementById(id);
 const M = "'JetBrains Mono',monospace";
-const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','alerts','digests'];
-const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',alerts:'ALERTS',digests:'DIGESTS'};
+const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','batteryhealth','alerts','digests'];
+const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',alerts:'ALERTS',digests:'DIGESTS'};
 
 // ── Live state ───────────────────────────────────────────────────────
 const S = {
@@ -338,6 +338,14 @@ mkPanel('accuracy', `
   <div id="acc-bars" style="display:flex;align-items:flex-end;gap:12px;margin-top:18px;height:96px;"></div>
   <div id="acc-foot" class="mono" style="font-size:10.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
 
+mkPanel('batteryhealth', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div class="plabel">BATTERY HEALTH · EFFECTIVE CAPACITY</div>
+    <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#3f5244;">WEEKLY MEDIAN · 12W</div>
+  </div>
+  <div id="bh-bars" style="display:flex;align-items:flex-end;gap:8px;margin-top:18px;height:96px;"></div>
+  <div id="bh-foot" class="mono" style="font-size:10.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+
 mkPanel('alerts', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel">ALERTS · LIVE</div>
@@ -406,7 +414,7 @@ function snapshot(){
 }
 
 // ── Layout system ────────────────────────────────────────────────────
-function defaultLayout(){ return { left:['battery','flow','forecast','ebplan','accuracy','alerts'], right:['history','bill','mode','touclock','digests'] }; }
+function defaultLayout(){ return { left:['battery','flow','forecast','ebplan','accuracy','alerts'], right:['history','bill','mode','touclock','batteryhealth','digests'] }; }
 let layout = (() => { try { const l = JSON.parse(localStorage.getItem('fwh-dash-cols')); if (l && Array.isArray(l.left) && Array.isArray(l.right) && l.left.concat(l.right).sort().join() === PANEL_IDS.slice().sort().join()) return l; } catch(e){} return defaultLayout(); })();
 function getHidden(){ try { const h = JSON.parse(localStorage.getItem('fwh-dash-hidden')); if (Array.isArray(h)) return h.filter(id => PANEL_IDS.includes(id)); } catch(e){} return []; }
 function hidePanel(id, on){ const h = getHidden().filter(x => x !== id); if (on) h.push(id); localStorage.setItem('fwh-dash-hidden', JSON.stringify(h)); applyPanelStyles(); buildToolbar(); }
@@ -760,6 +768,21 @@ function renderAccuracy(){
   const mean = days.reduce((a,d) => a + Math.abs((d.actual-d.predicted)/d.predicted*100), 0)/days.length;
   $('acc-foot').textContent = `🎯 Mean error ±${mean.toFixed(1)}% · per-hour bias correction map active (learned from every poll).`;
 }
+function renderBatteryHealth(){
+  const weeks = S.batteryHealth || [];
+  if (!weeks.length) { $('bh-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#4c5f50;align-self:center;width:100%;text-align:center;">not enough discharge history yet</div>'; $('bh-foot').textContent=''; return; }
+  const mx = Math.max(...weeks.map(w => w.capacity_kwh), 1);
+  $('bh-bars').innerHTML = weeks.map(w => {
+    const col = w.pct_of_nameplate < 85 ? '#f5b942' : '#57e389';
+    return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:5px;height:100%;">
+      <div class="mono" style="font-size:9px;color:${col};">${w.pct_of_nameplate.toFixed(0)}%</div>
+      <div style="width:60%;height:${Math.round(w.capacity_kwh/mx*64)}px;border-radius:3px 3px 0 0;background:linear-gradient(180deg,#57e389,#1f7a44);"></div>
+      <div class="mono" style="font-size:9px;color:#4c5f50;">${w.label}</div></div>`;
+  }).join('');
+  const first = weeks[0], last = weeks[weeks.length-1];
+  const drift = last.pct_of_nameplate - first.pct_of_nameplate;
+  $('bh-foot').textContent = `🔋 ${last.capacity_kwh.toFixed(1)} kWh effective (${last.pct_of_nameplate.toFixed(0)}% of ${S.batteryHealthNameplate.toFixed(1)} kWh nameplate) · ${drift>=0?'+':''}${drift.toFixed(1)}pt vs ${first.label}.`;
+}
 function renderTou(){
   const t = S.tou;
   const now = nowT();
@@ -1076,9 +1099,10 @@ async function pollFast(){
 }
 async function pollSlow(){
   try {
-    const [h, f, acc, tou, bill, rec, health] = await Promise.all([
+    const [h, f, acc, tou, bill, rec, health, bh] = await Promise.all([
       J('/api/history?hours=48'), J('/api/forecast'), J('/api/accuracy'),
       J('/api/tou'), J('/api/bill'), J('/api/recommendation'), J('/api/health'),
+      J('/api/battery-health'),
     ]);
     const now = Date.now();
     const todayStart = now - 24*3600000;
@@ -1090,6 +1114,7 @@ async function pollSlow(){
     S.acc = acc.days; S.tou = tou; S.bill = bill;
     S.rec = rec.recommendation || null; S.eb = rec.eb_plan;
     S.apiHealth = health;
+    S.batteryHealth = bh.weeks || []; S.batteryHealthNameplate = bh.nameplate_kwh || 0;
     const badge = $('hd-apierrors');
     if (health && health.consec_errors > 0) {
       badge.style.display = '';
@@ -1097,7 +1122,7 @@ async function pollSlow(){
     } else {
       badge.style.display = 'none';
     }
-    renderHistory(); renderForecast(); renderAccuracy(); renderTou(); renderBill(); renderMode();
+    renderHistory(); renderForecast(); renderAccuracy(); renderBatteryHealth(); renderTou(); renderBill(); renderMode();
   } catch(e) { /* retry next cycle */ }
 }
 
@@ -1169,13 +1194,19 @@ function demoData(){
   S.eb = { soc_at_peak: 91, net_peak_draw: 3.1, shortfall_kwh: 0, hint_str: '✓ No EB charge needed — battery projects past the 10% buffer. Cheap-charge window (super off-peak $0.117/kWh) closed at 2 PM.' };
   S.rec = { recommended_mode: 'time_of_use', needs_action: true, reason: 'Battery projects to cover the 4–9 PM peak without EB charging — hold charge and export surplus.' };
   S.acc = [[26.0,28.5],[27.5,26.9],[24.1,22.8],[28.0,29.2],[25.2,26.0],[26.8,28.1],[26.0,27.4]].map(([p,a],i) => ({ label:'J'+(9+i), predicted:p, actual:a }));
+  S.batteryHealthNameplate = 13.6;
+  S.batteryHealth = [13.4,13.3,13.3,13.2,13.1,13.1,13.0,13.0,12.9,12.8,12.8,12.7].map((kwh,i) => ({
+    week_start: new Date(Date.now()-(12-i)*7*86400000).toISOString().slice(0,10),
+    label: new Date(Date.now()-(12-i)*7*86400000).toLocaleDateString('en-US',{month:'short',day:'numeric'}),
+    capacity_kwh: kwh, pct_of_nameplate: kwh/13.6*100, samples: 4+i%3,
+  }));
   S.tou = { period:'OFF PEAK', rate:0.473, ring: Array.from({length:24},(_,h) => ({ hour:h, period: h<6?'SUPER OFF PEAK':h<10?'OFF PEAK':h<14?'SUPER OFF PEAK':h<16?'OFF PEAK':h<21?'ON PEAK':'OFF PEAK', rate: h>=16&&h<21?0.529:(h<6||(h>=10&&h<14))?0.117:0.473 })) };
   S.bill = { cycle_start:'2026-06-19', cycle_end:'2026-07-18', day:29, days:30, net_mtd:49.97, projected:52.89, prior_net:61.20, saved_mtd:118.40 };
   ingestAlerts([
     { ts: new Date(Date.now()-120000).toISOString(), body: '⚡ Switch to <b>Time-of-Use</b> mode. Battery at 78% with 14 kWh of solar still expected — hold charge for the 4–9 PM peak window and export at <b>$0.529/kWh</b>.' },
     { ts: new Date(Date.now()-120000).toISOString(), body: 'Heads up: grid peak pricing starts in 1h 28m. Current plan saves an estimated <b>$4.80</b> today vs Self-Use.' },
   ], true);
-  renderHistory(); renderForecast(); renderAccuracy(); renderTou(); renderBill(); renderMode();
+  renderHistory(); renderForecast(); renderAccuracy(); renderBatteryHealth(); renderTou(); renderBill(); renderMode();
   $('m-apply').addEventListener('click', () => {
     if (S.applying || S.modeApplied) return;
     S.applying = true; $('m-apply').textContent = '◈ SWITCHING…';
