@@ -222,6 +222,7 @@ class TelegramChatBot:
                             "/tip      — best action right now\n"
                             "/modes    — explain battery modes\n"
                             "/until N  — time to reach N% SoC at current rate\n"
+                            "/sundown  — projected SoC when today's solar is done\n"
                             "/clear    — reset conversation history"
                         )
                         continue
@@ -301,6 +302,17 @@ class TelegramChatBot:
                         threading.Thread(
                             target=self._send_until,
                             args=(chat_id, _tgt),
+                            daemon=True,
+                        ).start()
+                        continue
+                    # /sundown or natural language — projected SoC once today's solar is done
+                    if text.lower() == "/sundown" or re.search(
+                        r'sun\s*(down|set)|end\s+of\s+(the\s+)?day|solar.{0,15}(over|done|finish)',
+                        text.lower()
+                    ):
+                        threading.Thread(
+                            target=self._send_sundown,
+                            args=(chat_id,),
                             daemon=True,
                         ).start()
                         continue
@@ -710,6 +722,53 @@ class TelegramChatBot:
             )
         except Exception as e:
             logger.warning("_send_projection error: %s", e)
+
+    def _send_sundown(self, chat_id: str) -> None:
+        """Respond to /sundown — project SoC forward from now to the last hour
+        today's forecast still expects meaningful solar, i.e. the SoC once
+        today's generation is done for the day."""
+        try:
+            with self._lock:
+                stats    = self._stats
+                forecast = self._usage_forecast
+            if stats is None:
+                self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+                return
+            if forecast is None or forecast.confidence == "none":
+                self._send(chat_id, "Not enough usage history yet for a forecast-based projection.")
+                return
+
+            cap = getattr(self._cfg, "battery_capacity_kwh", 13.6)
+            c   = stats.current
+            soc = c.battery_soc_pct
+            kwh = soc / 100.0 * cap
+
+            now = datetime.now()
+            # Last forecast hour today still expecting real solar — mirrors the
+            # sunrise-detection approach in alerts._alert_eod_digest, just for
+            # the trailing edge of the day instead of the leading edge.
+            today_sun_hours = [
+                h for h in forecast.hours
+                if h.dt > now and h.dt.date() == now.date() and h.predicted_solar_kw > 0.1
+            ]
+            if not today_sun_hours:
+                self._send(chat_id, "☀️ Looks like solar generation for today is already done (or not enough forecast data left today).")
+                return
+            sundown_dt = today_sun_hours[-1].dt
+
+            for h in forecast.hours:
+                if h.dt <= now or h.dt > sundown_dt:
+                    continue
+                kwh = max(0.0, min(cap, kwh + h.predicted_solar_kw - h.predicted_load_kw))
+
+            end_pct = kwh / cap * 100.0
+            self._send(chat_id,
+                f"🌇 Projected SoC at sundown (~{sundown_dt.strftime('%-I:%M %p')}, using solar+load forecast)\n"
+                f"Now: <b>{soc:.0f}%</b>  →  Sundown: ~<b>{end_pct:.0f}%</b>\n"
+                f"<i>{forecast.confidence.title()} confidence, {forecast.data_days}d data — actual weather/load will vary.</i>"
+            )
+        except Exception as e:
+            logger.warning("_send_sundown error: %s", e)
             self._send(chat_id, f"Error: {e}")
 
     def _send(self, chat_id: str, text: str) -> None:

@@ -741,3 +741,50 @@ def test_rollup_old_readings_preserves_hourly_slots(tmp_path):
         "SELECT COUNT(*) FROM readings WHERE timestamp LIKE ?", (f"{recent_day}%",)
     ).fetchone()
     assert recent_rows[0] == 2  # untouched
+
+
+def test_send_sundown_projects_soc_to_last_solar_hour():
+    """/sundown should project SoC forward using the forecast, stopping at
+    the last hour today still expecting real solar — not a fixed horizon."""
+    import types
+    from franklinwh_scraper import chatbot as chatbot_mod
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 15, 12, 0, 0)  # noon
+    hours = []
+    t = now
+    while t.date() == now.date() and t.hour <= 23:
+        solar = 3.0 if 12 <= t.hour < 18 else 0.0  # sun down at 6pm today
+        hours.append(HourPrediction(
+            dt=t, predicted_load_kw=1.0, predicted_solar_kw=solar,
+            net_kw=solar - 1.0, confidence="high",
+        ))
+        t += timedelta(hours=1)
+    forecast = UsageForecast(hours=hours, total_load_kwh=24.0, total_solar_kwh=18.0,
+                             net_kwh=-6.0, peak_load_kw=1.0, confidence="high", data_days=30)
+
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._stats = types.SimpleNamespace(
+        current=types.SimpleNamespace(battery_soc_pct=27.0),
+    )
+    bot._usage_forecast = forecast
+
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+
+    real_datetime = chatbot_mod.datetime
+    try:
+        class _FakeDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        chatbot_mod.datetime = _FakeDatetime
+        bot._send_sundown("123")
+    finally:
+        chatbot_mod.datetime = real_datetime
+
+    assert "text" in sent
+    assert "27%" in sent["text"]
+    # 6h of net +2.0 kW (3.0 solar - 1.0 load) = +12 kWh -> capped at 100% of 13.6 kWh cap
+    assert "100%" in sent["text"]
+    assert "5:00 PM" in sent["text"]
