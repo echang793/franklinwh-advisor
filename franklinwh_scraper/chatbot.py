@@ -762,6 +762,21 @@ class TelegramChatBot:
                 kwh = max(0.0, min(cap, kwh + h.predicted_solar_kw - h.predicted_load_kw))
 
             end_pct = kwh / cap * 100.0
+
+            # Persist the prediction so the EOD digest can report how it did —
+            # only meaningful if the user actually asked, so this is opt-in
+            # per-day rather than something the advisor predicts on its own.
+            from pathlib import Path
+            from .alerts import _load_peak_state, _save_peak_state
+            out = Path(getattr(self._cfg, "output_dir", "output"))
+            state = _load_peak_state(out)
+            state[f"sundown_pred_{now.strftime('%Y-%m-%d')}"] = {
+                "pct": round(end_pct, 1),
+                "dt": sundown_dt.isoformat(),
+                "requested_at": now.isoformat(),
+            }
+            _save_peak_state(out, state)
+
             self._send(chat_id,
                 f"🌇 Projected SoC at sundown (~{sundown_dt.strftime('%-I:%M %p')}, using solar+load forecast)\n"
                 f"Now: <b>{soc:.0f}%</b>  →  Sundown: ~<b>{end_pct:.0f}%</b>\n"

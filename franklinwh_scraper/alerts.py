@@ -218,7 +218,7 @@ _DATE_KEYED_PREFIXES = (
     # and previously matched none of the prune rules — the state file grew
     # by one key per day per prefix, forever, for the life of the install.
     "predicted_kwh_", "predicted_avg_ghi_", "daily_import_cost_",
-    "outages_",
+    "outages_", "sundown_pred_",
 )
 
 
@@ -674,6 +674,22 @@ def _alert_eod_digest(
             f"  Delta:     {delta_str} kWh ({sign}{delta_kwh / predicted_kwh * 100:.0f}%)</code>"
         )
 
+    sundown_acc_str = ""
+    sundown_pred = state.get(f"sundown_pred_{today}")
+    if sundown_pred:
+        pred_pct = sundown_pred["pct"]
+        actual_pct = None
+        if store is not None:
+            actual_pct = store.soc_near(sundown_pred["dt"])
+        if actual_pct is None:
+            actual_pct = soc  # fall back to current SoC if no reading near the predicted time
+        delta = actual_pct - pred_pct
+        pred_dt = datetime.fromisoformat(sundown_pred["dt"])
+        sundown_acc_str = (
+            f"\n🌇 /sundown accuracy (~{pred_dt.strftime('%-I:%M %p')}): "
+            f"predicted {pred_pct:.0f}%, actual {actual_pct:.0f}% ({delta:+.0f} pt)"
+        )
+
     soc_6am_str = ""
     if usage_forecast and usage_forecast.hours:
         # Find the first forecasted hour tomorrow where solar meaningfully starts,
@@ -801,7 +817,7 @@ def _alert_eod_digest(
         f"Batt dis: {batt_dis_kwh:.1f} kWh\n"
         f"Home:     {home_kwh:.1f} kWh</code>{self_suff_str}{peak_cov_str}{tou_str}{outage_str}\n"
         f"<code>─────────────────────</code>\n"
-        f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{tmrw_solar_str}{precharge_str}"
+        f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{precharge_str}"
     )
 
 

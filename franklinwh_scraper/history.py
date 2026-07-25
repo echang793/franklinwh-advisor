@@ -440,6 +440,21 @@ class HistoryStore:
         ).fetchall()
         return [(r[0], float(r[1]), float(r[2]), float(r[3])) for r in rows]
 
+    def soc_near(self, timestamp: str) -> float | None:
+        """Battery SoC from the reading closest to `timestamp` (ISO string),
+        searching a +/-30 min window. None if no reading is that close."""
+        row = self._conn.execute(
+            "SELECT battery_soc, timestamp FROM readings "
+            "WHERE timestamp >= ? AND timestamp <= ? "
+            "ORDER BY ABS(strftime('%s', timestamp) - strftime('%s', ?)) LIMIT 1",
+            (
+                (datetime.fromisoformat(timestamp) - timedelta(minutes=30)).isoformat(),
+                (datetime.fromisoformat(timestamp) + timedelta(minutes=30)).isoformat(),
+                timestamp,
+            ),
+        ).fetchone()
+        return float(row[0]) if row else None
+
     def capacity_samples(
         self, start_date: str, end_date: str, min_soc_drop: float = 30.0,
     ) -> list[float]:
