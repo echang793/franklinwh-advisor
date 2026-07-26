@@ -234,6 +234,7 @@ class TelegramChatBot:
                             "/modes    — explain battery modes\n"
                             "/until N  — time to reach N% SoC at current rate\n"
                             "/sundown  — projected SoC when today's solar is done\n"
+                            "/sundown H — projected SoC in H hours (1-24)\n"
                             "/clear    — reset conversation history"
                         )
                         continue
@@ -317,7 +318,20 @@ class TelegramChatBot:
                             daemon=True,
                         ).start()
                         continue
-                    # /sundown or natural language — projected SoC once today's solar is done
+                    # /sundown [H] — no argument: projected SoC once today's
+                    # solar is done. With an hour count, it's just a friendlier
+                    # name for /willmake H (same projection math) — the two
+                    # otherwise-near-duplicate commands stayed separate, so a
+                    # user reaching for /sundown to ask "in 3 hours" shouldn't
+                    # have to remember /willmake exists instead.
+                    _sd_hrs = re.search(r'/sundown\s+(\d+)', text.lower())
+                    if _sd_hrs:
+                        threading.Thread(
+                            target=self._send_projection,
+                            args=(chat_id, int(_sd_hrs.group(1))),
+                            daemon=True,
+                        ).start()
+                        continue
                     if text.lower() == "/sundown" or re.search(
                         r'sun\s*(down|set)|end\s+of\s+(the\s+)?day|solar.{0,15}(over|done|finish)',
                         text.lower()
