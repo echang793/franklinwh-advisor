@@ -5,9 +5,14 @@ from __future__ import annotations
 
 def soc_bar(pct: float) -> str:
     """10-block SoC progress bar with color indicator: 🟢 ████████░░ 74%"""
-    filled    = round(max(0.0, min(100.0, pct)) / 10)
-    indicator = "🟢" if pct >= 60 else ("🟡" if pct >= 30 else "🔴")
-    return f"{indicator} {'█' * filled}{'░' * (10 - filled)} {pct:.0f}%"
+    # A glitchy/out-of-range API reading (this codebase has hit that before —
+    # see the empty-runtimeData retry logic) used to render a visually
+    # pinned/empty bar next to the raw, contradictory number, e.g.
+    # "🟢 ██████████ 142%". Clamp what's printed too, not just the bar.
+    clamped   = max(0.0, min(100.0, pct))
+    filled    = round(clamped / 10)
+    indicator = "🟢" if clamped >= 60 else ("🟡" if clamped >= 30 else "🔴")
+    return f"{indicator} {'█' * filled}{'░' * (10 - filled)} {clamped:.0f}%"
 
 
 def time_to_pct(

@@ -30,8 +30,31 @@ def export_csv(records: list[dict[str, Any]], path: Path, append: bool = False) 
     write_header = not (append and path.exists())
     mode = "a" if append else "w"
 
+    if append and path.exists():
+        # Only checked file existence before, never whether the on-disk
+        # header still matches the current field set — a schema change
+        # (a field added/removed/renamed) resuming an append against a
+        # pre-existing file silently shifted every subsequent row's values
+        # under the wrong column header. Reuse the file's own header for
+        # column order so alignment is always preserved; anything the old
+        # header lacks is dropped (ignore) or left blank (restval), and a
+        # mismatch is logged so it isn't silently invisible.
+        try:
+            with open(path, newline="", encoding="utf-8") as f:
+                existing_header = next(csv.reader(f), None)
+        except OSError:
+            existing_header = None
+        if existing_header and set(existing_header) != set(fieldnames):
+            logger.warning(
+                "CSV schema drift on %s — on-disk header has %s, current fields are %s; "
+                "keeping the on-disk column order (mismatched fields ignored/blank)",
+                path, existing_header, fieldnames,
+            )
+        if existing_header:
+            fieldnames = existing_header
+
     with open(path, mode, newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore", restval="")
         if write_header:
             writer.writeheader()
         writer.writerows(flat_records)

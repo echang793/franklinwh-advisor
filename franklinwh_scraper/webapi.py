@@ -287,7 +287,11 @@ def api_accuracy(days: int = Query(7, ge=1, le=30)):
                 actual = history.daily_solar_kwh_api(ds) or history.daily_solar_kwh(ds)
                 if actual <= 0:
                     continue
-                out.append({"date": ds, "label": d.strftime("J%d").replace("J0", "J"),
+                # Was strftime("J%d") — "J" there is a literal character, not
+                # a month directive, so every date showed the same "J23"-style
+                # label regardless of month; a 30-day lookback spanning a
+                # month boundary showed two different dates identically.
+                out.append({"date": ds, "label": d.strftime("%b %-d"),
                             "predicted": pred, "actual": round(actual, 1)})
         return {"days": out, "error": False}
     except Exception:

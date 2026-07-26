@@ -727,7 +727,11 @@ class TelegramChatBot:
                 f"<i>{forecast.confidence.title()} confidence, {forecast.data_days}d data — actual weather/load will vary.</i>"
             )
         except Exception as e:
+            # Was log-only — every other handler sends the user something on
+            # failure; this one left /willmake looking indistinguishable
+            # from the bot being dead if the projection math ever raised.
             logger.warning("_send_projection error: %s", e)
+            self._send(chat_id, "Couldn't run that projection right now — try again in a bit.")
 
     def _send_sundown(self, chat_id: str) -> None:
         """Respond to /sundown — project SoC forward from now to the last hour

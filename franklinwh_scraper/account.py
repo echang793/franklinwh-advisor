@@ -21,6 +21,21 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://energy.franklinwh.com/"
 
 
+def _safe_json(resp) -> dict:
+    """resp.json() with a clear error instead of a raw JSON-parse traceback.
+
+    raise_for_status() only catches non-2xx responses — a maintenance/error
+    page served with HTTP 200 but an HTML body (a real possibility for a
+    reverse-engineered API) would otherwise bypass every deliberate
+    ValueError/RuntimeError message this module builds and surface a bare
+    JSONDecodeError instead.
+    """
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise RuntimeError(f"Unexpected non-JSON response from FranklinWH API: {e}") from e
+
+
 # ------------------------------------------------------------------ #
 # Data classes                                                         #
 # ------------------------------------------------------------------ #
@@ -97,7 +112,7 @@ class AccountClient:
             "type": 1,
         }, timeout=self.timeout)
         resp.raise_for_status()
-        js = resp.json()
+        js = _safe_json(resp)
         if js.get("code") == 401:
             raise ValueError(f"Invalid credentials: {js.get('message')}")
         if js.get("code") == 400:
@@ -131,7 +146,7 @@ class AccountClient:
             timeout=self.timeout,
         )
         resp.raise_for_status()
-        js = resp.json()
+        js = _safe_json(resp)
         if js.get("code") == 401:
             if _retried:
                 raise ConnectionError(f"Still unauthorized after re-login: {js.get('message')}")
@@ -184,7 +199,7 @@ class AccountClient:
             timeout=self.timeout,
         )
         resp.raise_for_status()
-        js = resp.json()
+        js = _safe_json(resp)
         if js.get("code") == 401:
             if _retried:
                 raise ConnectionError(f"Still unauthorized after re-login: {js.get('message')}")
@@ -249,13 +264,6 @@ class AccountClient:
             grid_status = "down"
         else:
             grid_status = "off"
-
-        # smart-switch data (may fail if no smart circuits installed)
-        sw: dict[str, Any] = {}
-        try:
-            sw = self.get_switch_usage(gateway)
-        except Exception as e:
-            logger.debug("Smart switch data unavailable: %s", e)
 
         current = Current(
             solar_production_kw=data.get("p_sun", 0.0),

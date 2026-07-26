@@ -1067,3 +1067,21 @@ def test_send_sundown_writes_state_under_the_shared_lock(monkeypatch, tmp_path):
         chatbot_mod.datetime = real_datetime
 
     assert calls == ["enter", "exit"]
+
+
+def test_export_csv_preserves_column_alignment_on_schema_drift(tmp_path):
+    """Resuming an append after a field was added/removed must not shift
+    existing columns — the on-disk header's column order must win, not a
+    freshly recomputed one."""
+    from franklinwh_scraper.exporters import export_csv
+
+    path = tmp_path / "log.csv"
+    export_csv([{"a": 1, "b": 2}], path, append=True)
+
+    # Simulate a later software version that adds a field "c".
+    export_csv([{"a": 3, "b": 4, "c": 5}], path, append=True)
+
+    lines = path.read_text().strip().splitlines()
+    assert lines[0] == "a,b"           # header unchanged — old column order preserved
+    assert lines[1] == "1,2"
+    assert lines[2] == "3,4"           # new field "c" dropped, not misaligned into column "a"/"b"

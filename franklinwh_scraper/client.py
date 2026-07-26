@@ -56,6 +56,12 @@ class FranklinWHClient:
             except requests.RequestException as e:
                 last_exc = e
                 self._last_request_time = time.time()
+                # A permanent client error (404/403/etc.) will never succeed
+                # on retry, unlike a transient network blip or 5xx — retrying
+                # it just burns up to ~10s on every run against a broken URL.
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status is not None and status < 500:
+                    break
                 if attempt < _RETRIES - 1:
                     delay = min(30, 2 * 2 ** attempt) * (0.5 + random.random())
                     logger.debug("GET %s failed (attempt %d/%d): %s — retrying in %.1fs",

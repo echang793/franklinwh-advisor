@@ -33,18 +33,22 @@ def geocode(city: str, timeout: int = 10) -> GeoLocation | None:
         }, timeout=timeout)
         resp.raise_for_status()
         results = resp.json().get("results")
+        if not results:
+            return None
+        r = results[0]
+        return GeoLocation(
+            name=r.get("name", city),
+            lat=r["latitude"],
+            lon=r["longitude"],
+            country=r.get("country", ""),
+        )
     except Exception as e:
+        # Was two try blocks — the lat/lon KeyError access sat outside the
+        # guarded one, so a malformed 200 response (missing those keys)
+        # crashed the setup wizard instead of returning None like this
+        # function's own docstring promises.
         logger.debug("Geocode lookup failed for %r: %s", city, e)
         return None
-    if not results:
-        return None
-    r = results[0]
-    return GeoLocation(
-        name=r.get("name", city),
-        lat=r["latitude"],
-        lon=r["longitude"],
-        country=r.get("country", ""),
-    )
 
 
 @dataclass
@@ -155,10 +159,20 @@ class SolarOutlook:
         return sum(h.ghi_wm2 for h in window) / len(window)
 
     def ghi_at(self, dt: datetime) -> float:
-        """Return GHI (W/m²) for the hour containing dt, 0 if not in forecast."""
+        """Return GHI (W/m²) for the hour containing dt, 0 if not in forecast.
+
+        `dt` is machine-local (predictor.py's only caller passes
+        `datetime.now() + timedelta(hours=h)`) — every sibling method on
+        this class was fixed to route through _local_now() so a process
+        running in a different timezone from the panels (e.g. a commercial
+        install in a UTC container) doesn't silently mismatch; this one was
+        missed. Converting via "how far ahead is dt" rather than an absolute
+        wall-clock comparison keeps it correct without changing the caller.
+        """
+        local_dt = self._local_now() + (dt - datetime.now())
         for h in self.hours:
-            if (h.time.year == dt.year and h.time.month == dt.month
-                    and h.time.day == dt.day and h.time.hour == dt.hour):
+            if (h.time.year == local_dt.year and h.time.month == local_dt.month
+                    and h.time.day == local_dt.day and h.time.hour == local_dt.hour):
                 return h.ghi_wm2
         return 0.0
 
