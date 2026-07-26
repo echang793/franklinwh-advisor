@@ -416,7 +416,23 @@ function snapshot(){
 
 // ── Layout system ────────────────────────────────────────────────────
 function defaultLayout(){ return { left:['battery','flow','forecast','ebplan','accuracy','alerts'], right:['history','bill','mode','touclock','batteryhealth','digests'] }; }
-let layout = (() => { try { const l = JSON.parse(localStorage.getItem('fwh-dash-cols')); if (l && Array.isArray(l.left) && Array.isArray(l.right) && l.left.concat(l.right).sort().join() === PANEL_IDS.slice().sort().join()) return l; } catch(e){} return defaultLayout(); })();
+// Merge a saved layout against the current PANEL_IDS instead of requiring
+// an exact set match — previously, adding (or renaming) even one panel
+// silently discarded every user's custom drag arrangement back to default,
+// and would keep doing so on every future panel change. Drop ids that no
+// longer exist, append new ones (in defaultLayout's column) at the end.
+function migrateLayout(saved){
+  if (!saved || !Array.isArray(saved.left) || !Array.isArray(saved.right)) return defaultLayout();
+  const known = new Set(PANEL_IDS);
+  const left = saved.left.filter(id => known.has(id));
+  const right = saved.right.filter(id => known.has(id));
+  const present = new Set([...left, ...right]);
+  const def = defaultLayout();
+  def.left.forEach(id => { if (!present.has(id)) left.push(id); });
+  def.right.forEach(id => { if (!present.has(id)) right.push(id); });
+  return { left, right };
+}
+let layout = (() => { try { return migrateLayout(JSON.parse(localStorage.getItem('fwh-dash-cols'))); } catch(e){} return defaultLayout(); })();
 function getHidden(){ try { const h = JSON.parse(localStorage.getItem('fwh-dash-hidden')); if (Array.isArray(h)) return h.filter(id => PANEL_IDS.includes(id)); } catch(e){} return []; }
 function hidePanel(id, on){ const h = getHidden().filter(x => x !== id); if (on) h.push(id); localStorage.setItem('fwh-dash-hidden', JSON.stringify(h)); applyPanelStyles(); buildToolbar(); }
 function applyLayout(l){ layout = l; localStorage.setItem('fwh-dash-cols', JSON.stringify(l)); }
@@ -543,10 +559,12 @@ window.addEventListener('resize', () => { const n = window.innerWidth < 920; if 
 window.addEventListener('keydown', e => {
   if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
   if (e.key === 'Escape') { if (S.dragId) cancelDrag(); else if (S.focusId) flip(() => { S.focusId = null; }); }
-  else if (e.key === 'ArrowRight') { e.preventDefault(); S.scrubIdx = Math.min(11, (S.scrubIdx < 0 ? -1 : S.scrubIdx) + 1); renderForecast(); }
-  else if (e.key === 'ArrowLeft')  { e.preventDefault(); S.scrubIdx = Math.max(0, (S.scrubIdx < 0 ? 12 : S.scrubIdx) - 1); renderForecast(); }
-  else if (e.key === 'ArrowUp')    { e.preventDefault(); S.histIdx = Math.min(95, (S.histIdx < 0 ? 47 : S.histIdx) + 4); renderHistCursor(); }
-  else if (e.key === 'ArrowDown')  { e.preventDefault(); S.histIdx = Math.max(0, (S.histIdx < 0 ? 47 : S.histIdx) - 4); renderHistCursor(); }
+  // Scoped to the hovered panel — arrow keys used to hijack page scroll
+  // globally even when no chart-scrubbable panel was in view at all.
+  else if (e.key === 'ArrowRight' && hoverId === 'forecast') { e.preventDefault(); S.scrubIdx = Math.min(11, (S.scrubIdx < 0 ? -1 : S.scrubIdx) + 1); renderForecast(); }
+  else if (e.key === 'ArrowLeft'  && hoverId === 'forecast') { e.preventDefault(); S.scrubIdx = Math.max(0, (S.scrubIdx < 0 ? 12 : S.scrubIdx) - 1); renderForecast(); }
+  else if (e.key === 'ArrowUp'    && hoverId === 'history')  { e.preventDefault(); S.histIdx = Math.min(95, (S.histIdx < 0 ? 47 : S.histIdx) + 4); renderHistCursor(); }
+  else if (e.key === 'ArrowDown'  && hoverId === 'history')  { e.preventDefault(); S.histIdx = Math.max(0, (S.histIdx < 0 ? 47 : S.histIdx) - 4); renderHistCursor(); }
   else if (e.key === 'h' || e.key === 'H') { if (hoverId) hidePanel(hoverId, true); }
 });
 
@@ -779,7 +797,7 @@ function renderAccuracy(){
   if (!days.length) { $('acc-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#4c5f50;align-self:center;width:100%;text-align:center;">no prediction history yet</div>'; $('acc-foot').textContent=''; return; }
   const mx = Math.max(...days.map(d => Math.max(d.predicted, d.actual)), 1);
   $('acc-bars').innerHTML = days.map(d => {
-    const dl = (d.actual - d.predicted)/d.predicted*100;
+    const dl = d.predicted > 0 ? (d.actual - d.predicted)/d.predicted*100 : 0;
     const col = Math.abs(dl) > errTh ? '#f5b942' : '#57e389';
     return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:5px;height:100%;">
       <div class="mono" style="font-size:9px;color:${col};">${dl>=0?'+':''}${dl.toFixed(0)}%</div>
@@ -789,7 +807,7 @@ function renderAccuracy(){
       </div>
       <div class="mono" style="font-size:9px;color:#4c5f50;">${d.label}</div></div>`;
   }).join('');
-  const mean = days.reduce((a,d) => a + Math.abs((d.actual-d.predicted)/d.predicted*100), 0)/days.length;
+  const mean = days.reduce((a,d) => a + (d.predicted > 0 ? Math.abs((d.actual-d.predicted)/d.predicted*100) : 0), 0)/days.length;
   $('acc-foot').textContent = `🎯 Mean error ±${mean.toFixed(1)}% · per-hour bias correction map active (learned from every poll).`;
 }
 function renderBatteryHealth(){
@@ -817,9 +835,15 @@ function renderTou(){
   const colFor = p => p.includes('ON') && !p.includes('OFF') ? '#f5b942' : p.includes('SUPER') ? '#17351f' : '#2e5c3a';
   const stops = t.ring.map((r, h) => `${colFor(r.period)} ${(h/24*100).toFixed(2)}% ${((h+1)/24*100).toFixed(2)}%`).join(', ');
   $('tc-ring').style.background = `conic-gradient(${stops})`;
-  $('tc-period').textContent = t.period;
-  $('tc-period').style.color = t.period === 'ON PEAK' ? '#f5b942' : t.period === 'OFF PEAK' ? '#8df0b0' : '#57e389';
-  $('tc-rate').textContent = '$' + t.rate.toFixed(3) + '/kWh';
+  // Derive the CURRENT period/rate from the ring (a full day's schedule,
+  // fetched once and stable) by indexing the current hour, instead of the
+  // top-level t.period/t.rate fields — those reflect whatever hour it was
+  // when pollSlow last fetched (up to 5min stale), which could visibly
+  // disagree with the header's on-peak banner (refreshed every 10s).
+  const nowRing = t.ring[now.getHours()] || { period: t.period, rate: t.rate };
+  $('tc-period').textContent = nowRing.period;
+  $('tc-period').style.color = nowRing.period === 'ON PEAK' ? '#f5b942' : nowRing.period === 'OFF PEAK' ? '#8df0b0' : '#57e389';
+  $('tc-rate').textContent = '$' + nowRing.rate.toFixed(3) + '/kWh';
   const rates = {};
   t.ring.forEach(r => { rates[r.period] = r.rate; });
   $('tc-legend').innerHTML = [
@@ -1301,7 +1325,11 @@ function demoData(){
     renderBanners();
     renderTou();
   }, 1000);
-  setInterval(() => { if (S.speed > 0) demoPoll(4); }, 4000);
+  // dtSecs must scale with S.speed like the clock-advance interval above
+  // does — it was hardcoded to 4 regardless of speed, so at 60x the sim
+  // clock raced ahead while SoC/kWh/backup-time kept integrating as if
+  // only 4 sim-seconds (not 240) had passed each tick, defeating fast-forward.
+  setInterval(() => { if (S.speed > 0) demoPoll(4 * S.speed); }, 4000);
   demoPoll(0.5);
 }
 
