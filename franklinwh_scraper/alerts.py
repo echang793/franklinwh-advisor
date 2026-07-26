@@ -681,14 +681,26 @@ def _alert_eod_digest(
         actual_pct = None
         if store is not None:
             actual_pct = store.soc_near(sundown_pred["dt"])
-        if actual_pct is None:
-            actual_pct = soc  # fall back to current SoC if no reading near the predicted time
-        delta = actual_pct - pred_pct
         pred_dt = datetime.fromisoformat(sundown_pred["dt"])
-        sundown_acc_str = (
-            f"\n🌇 /sundown accuracy (~{pred_dt.strftime('%-I:%M %p')}): "
-            f"predicted {pred_pct:.0f}%, actual {actual_pct:.0f}% ({delta:+.0f} pt)"
-        )
+        if actual_pct is None:
+            # No reading landed within soc_near's +/-30min window around the
+            # predicted time — falling back to the current (digest-time,
+            # ~9-10pm) SoC used to get silently presented as if it were the
+            # sundown-time reading. The battery keeps discharging through
+            # the evening between sundown and the digest, so that made an
+            # accurate prediction look like a large miss. Label it instead.
+            actual_pct = soc
+            delta = actual_pct - pred_pct
+            sundown_acc_str = (
+                f"\n🌇 /sundown accuracy: predicted {pred_pct:.0f}% at ~{pred_dt.strftime('%-I:%M %p')} — "
+                f"no reading near that time, using now's {actual_pct:.0f}% instead ({delta:+.0f} pt, not directly comparable)."
+            )
+        else:
+            delta = actual_pct - pred_pct
+            sundown_acc_str = (
+                f"\n🌇 /sundown accuracy (~{pred_dt.strftime('%-I:%M %p')}): "
+                f"predicted {pred_pct:.0f}%, actual {actual_pct:.0f}% ({delta:+.0f} pt)"
+            )
 
     soc_6am_str = ""
     if usage_forecast and usage_forecast.hours:

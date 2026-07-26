@@ -145,6 +145,11 @@ class TelegramChatBot:
         self._offset          = 0
         self._convos: dict[str, list[dict]] = {}
         self._lock            = threading.Lock()
+        # Separate from self._lock, which the main watch loop's update_state()
+        # also takes every ~5 min to refresh stats/outlook — sharing one lock
+        # meant a slow Claude/Ollama call (up to the 120s Ollama timeout)
+        # could delay that update and, downstream, time-sensitive alerts.
+        self._convo_lock      = threading.Lock()
         self._stats           = None
         self._hist_store      = None
         self._outlook         = None
@@ -239,7 +244,7 @@ class TelegramChatBot:
                         )
                         continue
                     if text.lower() == "/clear":
-                        with self._lock:
+                        with self._convo_lock:
                             self._convos.pop(chat_id, None)
                         self._send(chat_id, "Conversation cleared.")
                         continue
@@ -590,7 +595,7 @@ class TelegramChatBot:
         # dropping one message's turn from the conversation.
         import anthropic
         client = anthropic.Anthropic(api_key=self._api_key)
-        with self._lock:
+        with self._convo_lock:
             history = list(self._convos.get(chat_id, []))
 
             history.append({"role": "user", "content": f"{context}\n\nQuestion: {question}"})
@@ -606,7 +611,7 @@ class TelegramChatBot:
         return reply
 
     def _call_ollama(self, chat_id: str, question: str, context: str) -> str:
-        with self._lock:
+        with self._convo_lock:
             history = list(self._convos.get(chat_id, []))
             history.append({"role": "user", "content": f"{context}\n\nQuestion: {question}"})
 

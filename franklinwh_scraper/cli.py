@@ -1093,7 +1093,15 @@ def cmd_advise(
                 _today_iso = datetime.now().strftime("%Y-%m-%d")
                 try:
                     _last_rollup = _rollup_marker.read_text().strip()
-                except OSError:
+                    datetime.strptime(_last_rollup, "%Y-%m-%d")  # validate format
+                except (OSError, ValueError):
+                    # A missing file is normal (first run). A malformed one
+                    # (e.g. truncated by a crash mid-write) used to raise
+                    # ValueError uncaught here, which the outer handler then
+                    # miscounted as a FranklinWH API poll error — and since
+                    # the marker was never corrected, every cycle after that
+                    # repeated the same false alert forever. Treating it the
+                    # same as "no marker yet" self-heals on the next write.
                     _last_rollup = ""
                 if not _last_rollup or (datetime.now() - datetime.strptime(_last_rollup, "%Y-%m-%d")).days >= 7:
                     _removed = history.rollup_old_readings()

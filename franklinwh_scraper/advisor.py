@@ -129,7 +129,12 @@ def _tou_eb_plan(
             run_until = now + timedelta(hours=run_hours)
 
     # ── Build hint string ────────────────────────────────────────────
-    if now >= peak_start:
+    # Was `now >= peak_start` with no upper bound — every hour from 9pm
+    # (peak_end) to midnight, genuinely back to off-peak pricing, was still
+    # labeled "peak-priced," contradicting the correct off-peak rate quoted
+    # right next to it and potentially discouraging EB use during a real
+    # cheap window.
+    if peak_start <= now < peak_end:
         hint = (
             f"Grid import is peak-priced (${current_rate:.3f}/kWh) — "
             "run EB only if critical."

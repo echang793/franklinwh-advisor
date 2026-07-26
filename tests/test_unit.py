@@ -849,6 +849,45 @@ def test_eod_digest_reports_sundown_prediction_accuracy():
     assert "-6 pt" in msg
 
 
+def test_eod_digest_labels_sundown_fallback_when_no_reading_near_predicted_time():
+    """When no DB reading lands near the predicted sundown time, the digest
+    must label the substitute (current, digest-time) SoC explicitly instead
+    of silently presenting it as if it were measured at the predicted time —
+    a real prediction can otherwise look like a large miss just because the
+    battery kept discharging for hours after sundown before the digest ran."""
+    import types
+    from franklinwh_scraper import alerts
+
+    today = "2026-07-20"
+    now = datetime(2026, 7, 20, 21, 0, 0)
+    sundown_dt = datetime(2026, 7, 20, 17, 30, 0)
+
+    state = {f"sundown_pred_{today}": {"pct": 85.0, "dt": sundown_dt.isoformat(), "requested_at": "2026-07-20T12:00:00"}}
+
+    stats = types.SimpleNamespace(
+        current=types.SimpleNamespace(battery_soc_pct=58.0),
+        totals=types.SimpleNamespace(
+            solar_kwh=0.0, battery_charge_kwh=0.0, battery_discharge_kwh=0.0,
+            grid_load_kwh=0.0, grid_export_kwh=0.0, home_use_kwh=0.0,
+        ),
+    )
+
+    class _FakeStore:
+        def daily_solar_kwh_api(self, d): return 0.0
+        def daily_solar_kwh(self, d): return 0.0
+        def daily_battery_kwh(self, d): return (0.0, 0.0)
+        def weekly_readings(self, s, e): return []
+        def soc_near(self, ts): return None  # no reading landed near sundown
+
+    cfg = Config(battery_capacity_kwh=13.6)
+    msg = alerts._alert_eod_digest(state, today, now, stats, cfg, None, None, store=_FakeStore())
+
+    assert msg is not None
+    assert "no reading near that time" in msg
+    assert "using now's 58%" in msg
+    assert "not directly comparable" in msg
+
+
 # ── Audit fixes (2026-07-26) ────────────────────────────────────────────
 
 def test_notify_email_reports_real_failure(monkeypatch):
