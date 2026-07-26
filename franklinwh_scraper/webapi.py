@@ -224,15 +224,25 @@ def api_forecast():
     cloudy = False
     perf_ratio = 1.0
     sp = None
-    with HistoryStore(_OUT / "history.db") as history:
-        outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
-        sp = _get_system_peak_kw(state)
-        cloudy = bool(outlook and outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD)
-        perf_ratio = _get_performance_ratio(state, cloudy=cloudy)
-        hourly_bias = _get_hourly_bias(state)
-        fc = (predict(history, 12, outlook=outlook, system_peak_kw=sp,
-                      perf_ratio=perf_ratio, hourly_bias=hourly_bias)
-              if history.has_enough_data() else None)
+    fc = None
+    error = False
+    try:
+        with HistoryStore(_OUT / "history.db") as history:
+            outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
+            sp = _get_system_peak_kw(state)
+            cloudy = bool(outlook and outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD)
+            perf_ratio = _get_performance_ratio(state, cloudy=cloudy)
+            hourly_bias = _get_hourly_bias(state)
+            fc = (predict(history, 12, outlook=outlook, system_peak_kw=sp,
+                          perf_ratio=perf_ratio, hourly_bias=hourly_bias)
+                  if history.has_enough_data() else None)
+    except Exception:
+        # Degrade to an empty-but-valid forecast instead of a 500 — one bad
+        # cycle (e.g. a transient weather-API hiccup) shouldn't blank the
+        # panel; the frontend's existing "not enough data" empty state
+        # already handles hours=[] gracefully.
+        fc = None
+        error = True
     kwh = soc / 100 * _BAT_CAP
     if fc:
         for h in fc.hours:
@@ -258,6 +268,7 @@ def api_forecast():
         "perf_ratio": round(perf_ratio, 3),
         "cloudy_today": cloudy,
         "system_peak_kw": round(sp, 2) if sp is not None else None,
+        "error": error,
     }
 
 
@@ -265,19 +276,22 @@ def api_forecast():
 def api_accuracy(days: int = Query(7, ge=1, le=30)):
     state = _load_peak_state(_OUT)
     out = []
-    with HistoryStore(_OUT / "history.db") as history:
-        for i in range(days, 0, -1):
-            d = (date.today() - timedelta(days=i))
-            ds = d.isoformat()
-            pred = state.get(f"predicted_kwh_{ds}")
-            if pred is None:
-                continue
-            actual = history.daily_solar_kwh_api(ds) or history.daily_solar_kwh(ds)
-            if actual <= 0:
-                continue
-            out.append({"date": ds, "label": d.strftime("J%d").replace("J0", "J"),
-                        "predicted": pred, "actual": round(actual, 1)})
-    return {"days": out}
+    try:
+        with HistoryStore(_OUT / "history.db") as history:
+            for i in range(days, 0, -1):
+                d = (date.today() - timedelta(days=i))
+                ds = d.isoformat()
+                pred = state.get(f"predicted_kwh_{ds}")
+                if not pred:  # skips both missing and a legitimately-zero forecast
+                    continue
+                actual = history.daily_solar_kwh_api(ds) or history.daily_solar_kwh(ds)
+                if actual <= 0:
+                    continue
+                out.append({"date": ds, "label": d.strftime("J%d").replace("J0", "J"),
+                            "predicted": pred, "actual": round(actual, 1)})
+        return {"days": out, "error": False}
+    except Exception:
+        return {"days": [], "error": True}
 
 
 @app.get("/api/battery-health", dependencies=_authed)
@@ -287,24 +301,27 @@ def api_battery_health(weeks: int = Query(12, ge=1, le=52)):
     (history.capacity_samples) — surfaced here for a dashboard trend view
     instead of only ever appearing as a one-off alert message."""
     out = []
-    with HistoryStore(_OUT / "history.db") as history:
-        today = date.today()
-        for i in range(weeks, 0, -1):
-            week_start = today - timedelta(days=7 * i)
-            week_end = week_start + timedelta(days=6)
-            samples = history.capacity_samples(week_start.isoformat(), week_end.isoformat())
-            if not samples:
-                continue
-            samples.sort()
-            median = samples[len(samples) // 2]
-            out.append({
-                "week_start": week_start.isoformat(),
-                "label": week_start.strftime("%b %-d"),
-                "capacity_kwh": round(median, 1),
-                "pct_of_nameplate": round(median / _BAT_CAP * 100, 1),
-                "samples": len(samples),
-            })
-    return {"weeks": out, "nameplate_kwh": _BAT_CAP}
+    try:
+        with HistoryStore(_OUT / "history.db") as history:
+            today = date.today()
+            for i in range(weeks, 0, -1):
+                week_start = today - timedelta(days=7 * i)
+                week_end = week_start + timedelta(days=6)
+                samples = history.capacity_samples(week_start.isoformat(), week_end.isoformat())
+                if not samples:
+                    continue
+                samples.sort()
+                median = samples[len(samples) // 2]
+                out.append({
+                    "week_start": week_start.isoformat(),
+                    "label": week_start.strftime("%b %-d"),
+                    "capacity_kwh": round(median, 1),
+                    "pct_of_nameplate": round(median / _BAT_CAP * 100, 1),
+                    "samples": len(samples),
+                })
+        return {"weeks": out, "nameplate_kwh": _BAT_CAP, "error": False}
+    except Exception:
+        return {"weeks": [], "nameplate_kwh": _BAT_CAP, "error": True}
 
 
 @app.get("/api/until", dependencies=_authed)
@@ -336,14 +353,17 @@ def api_willmake(hours: int = Query(..., ge=1, le=24)):
         return {"ok": False, "error": "no readings yet"}
     soc = r["battery_soc"]
     state = _load_peak_state(_OUT)
-    with HistoryStore(_OUT / "history.db") as history:
-        outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
-        sp = _get_system_peak_kw(state)
-        cloudy = bool(outlook and outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD)
-        fc = (predict(history, 24, outlook=outlook, system_peak_kw=sp,
-                      perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
-                      hourly_bias=_get_hourly_bias(state))
-              if history.has_enough_data() else None)
+    try:
+        with HistoryStore(_OUT / "history.db") as history:
+            outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
+            sp = _get_system_peak_kw(state)
+            cloudy = bool(outlook and outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD)
+            fc = (predict(history, 24, outlook=outlook, system_peak_kw=sp,
+                          perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
+                          hourly_bias=_get_hourly_bias(state))
+                  if history.has_enough_data() else None)
+    except Exception:
+        return {"ok": False, "error": "forecast_unavailable"}
     if fc is None or fc.confidence == "none":
         return {"ok": False, "error": "insufficient_forecast"}
 

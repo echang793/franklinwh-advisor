@@ -1045,18 +1045,30 @@ function resample(samples, dayStart){
   return out;
 }
 let _dashToken = localStorage.getItem('fwh-dash-token') || '';
-async function J(url){
-  const headers = _dashToken ? { 'X-Dashboard-Token': _dashToken } : {};
-  const r = await fetch(url, { headers });
-  if (r.status === 401) {
-    // Server has dashboard_token set but we don't have it (or it's wrong) —
-    // prompt once, store it, and retry this call.
+let _tokenPromptPromise = null;
+async function _promptForToken(){
+  // pollFast/pollSlow fire ~9 concurrent requests; without dedup every one
+  // of them hitting 401 pops its own blocking prompt() — up to 9 stacked
+  // dialogs on first load (or every cycle if the user cancels/mistypes).
+  // Share one in-flight prompt so concurrent 401s all await the same result.
+  if (_tokenPromptPromise) return _tokenPromptPromise;
+  _tokenPromptPromise = (async () => {
     const entered = prompt('Dashboard token required (set in ~/.franklinwh.json):');
     if (entered) {
       _dashToken = entered;
       localStorage.setItem('fwh-dash-token', entered);
-      return J(url);
     }
+    _tokenPromptPromise = null;
+    return entered;
+  })();
+  return _tokenPromptPromise;
+}
+async function J(url){
+  const headers = _dashToken ? { 'X-Dashboard-Token': _dashToken } : {};
+  const r = await fetch(url, { headers });
+  if (r.status === 401) {
+    const entered = await _promptForToken();
+    if (entered) return J(url);
   }
   if (!r.ok) throw new Error(url + ' ' + r.status);
   return r.json();
@@ -1129,32 +1141,54 @@ async function pollFast(){
   }
 }
 async function pollSlow(){
-  try {
-    const [h, f, acc, tou, bill, rec, health, bh] = await Promise.all([
-      J('/api/history?hours=48'), J('/api/forecast'), J('/api/accuracy'),
-      J('/api/tou'), J('/api/bill'), J('/api/recommendation'), J('/api/health'),
-      J('/api/battery-health'),
-    ]);
-    const now = Date.now();
-    const todayStart = now - 24*3600000;
-    S.hist = resample(h.samples, todayStart);
-    S.histY = resample(h.samples, todayStart - 24*3600000);
-    S.forecast = (f.hours || []).slice(0, 12);
-    S.cap = f.battery_capacity_kwh || S.cap;
-    S.forecastHealth = { perfRatio: f.perf_ratio, cloudy: f.cloudy_today, systemPeakKw: f.system_peak_kw };
-    S.acc = acc.days; S.tou = tou; S.bill = bill;
-    S.rec = rec.recommendation || null; S.eb = rec.eb_plan;
-    S.apiHealth = health;
-    S.batteryHealth = bh.weeks || []; S.batteryHealthNameplate = bh.nameplate_kwh || 0;
-    const badge = $('hd-apierrors');
-    if (health && health.consec_errors > 0) {
-      badge.style.display = '';
-      badge.title = `${health.consec_errors} consecutive poll failures — ${health.last_error || 'unknown error'}`;
-    } else {
-      badge.style.display = 'none';
-    }
-    renderHistory(); renderForecast(); renderAccuracy(); renderBatteryHealth(); renderTou(); renderBill(); renderMode();
-  } catch(e) { /* retry next cycle */ }
+  // allSettled (not all) so one failing endpoint only skips its own panel's
+  // update instead of blanking all 7 slow-refresh panels for the cycle —
+  // each panel keeps showing its last-known-good data until that specific
+  // endpoint recovers.
+  const [h, f, acc, tou, bill, rec, health, bh] = await Promise.allSettled([
+    J('/api/history?hours=48'), J('/api/forecast'), J('/api/accuracy'),
+    J('/api/tou'), J('/api/bill'), J('/api/recommendation'), J('/api/health'),
+    J('/api/battery-health'),
+  ]);
+  const ok = r => r.status === 'fulfilled' ? r.value : null;
+  const now = Date.now();
+  const todayStart = now - 24*3600000;
+
+  const hv = ok(h);
+  if (hv) { S.hist = resample(hv.samples, todayStart); S.histY = resample(hv.samples, todayStart - 24*3600000); renderHistory(); }
+
+  const fv = ok(f);
+  if (fv) {
+    S.forecast = (fv.hours || []).slice(0, 12);
+    S.cap = fv.battery_capacity_kwh || S.cap;
+    S.forecastHealth = { perfRatio: fv.perf_ratio, cloudy: fv.cloudy_today, systemPeakKw: fv.system_peak_kw };
+    renderForecast();
+  }
+
+  const accv = ok(acc);
+  if (accv) { S.acc = accv.days; renderAccuracy(); }
+
+  const touv = ok(tou);
+  if (touv) { S.tou = touv; renderTou(); }
+
+  const billv = ok(bill);
+  if (billv) { S.bill = billv; renderBill(); }
+
+  const recv = ok(rec);
+  if (recv) { S.rec = recv.recommendation || null; S.eb = recv.eb_plan; renderMode(); }
+
+  const bhv = ok(bh);
+  if (bhv) { S.batteryHealth = bhv.weeks || []; S.batteryHealthNameplate = bhv.nameplate_kwh || 0; renderBatteryHealth(); }
+
+  const healthv = ok(health);
+  S.apiHealth = healthv || S.apiHealth;
+  const badge = $('hd-apierrors');
+  if (healthv && healthv.consec_errors > 0) {
+    badge.style.display = '';
+    badge.title = `${healthv.consec_errors} consecutive poll failures — ${healthv.last_error || 'unknown error'}`;
+  } else if (healthv) {
+    badge.style.display = 'none';
+  }
 }
 
 // ── Demo simulation (?demo=1) — prototype engine, no server needed ──
