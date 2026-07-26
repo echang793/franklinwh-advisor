@@ -250,7 +250,15 @@ def setup() -> None:
             _ok(f"Gateway detected: {cfg.gateway}")
         else:
             _warn("No gateways found — you can add one later.")
-    except ValueError as e:
+    except Exception as e:
+        # Was `except ValueError` only — login()/get_gateways() can also
+        # raise RuntimeError (non-standard API response code) or a raw
+        # requests/JSON exception (network blip, API 5xx, maintenance
+        # window), none of which are ValueError. Any of those used to crash
+        # the wizard with a raw traceback before save_config() ever ran,
+        # discarding every answer already entered — broadened to match the
+        # same graceful "FAILED, continue anyway?" recovery the ValueError
+        # case already had.
         click.echo(click.style(" FAILED", fg="red"))
         _err(str(e))
         if not click.confirm("  Continue saving anyway?", default=False):
