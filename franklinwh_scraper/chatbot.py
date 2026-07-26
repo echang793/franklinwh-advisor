@@ -239,7 +239,8 @@ class TelegramChatBot:
                         )
                         continue
                     if text.lower() == "/clear":
-                        self._convos.pop(chat_id, None)
+                        with self._lock:
+                            self._convos.pop(chat_id, None)
                         self._send(chat_id, "Conversation cleared.")
                         continue
                     # daemon=True below (all handler threads): matches the
@@ -767,15 +768,16 @@ class TelegramChatBot:
             # only meaningful if the user actually asked, so this is opt-in
             # per-day rather than something the advisor predicts on its own.
             from pathlib import Path
-            from .alerts import _load_peak_state, _save_peak_state
+            from .alerts import _load_peak_state, _save_peak_state, _state_lock
             out = Path(getattr(self._cfg, "output_dir", "output"))
-            state = _load_peak_state(out)
-            state[f"sundown_pred_{now.strftime('%Y-%m-%d')}"] = {
-                "pct": round(end_pct, 1),
-                "dt": sundown_dt.isoformat(),
-                "requested_at": now.isoformat(),
-            }
-            _save_peak_state(out, state)
+            with _state_lock(out):
+                state = _load_peak_state(out)
+                state[f"sundown_pred_{now.strftime('%Y-%m-%d')}"] = {
+                    "pct": round(end_pct, 1),
+                    "dt": sundown_dt.isoformat(),
+                    "requested_at": now.isoformat(),
+                }
+                _save_peak_state(out, state)
 
             self._send(chat_id,
                 f"🌇 Projected SoC at sundown (~{sundown_dt.strftime('%-I:%M %p')}, using solar+load forecast)\n"

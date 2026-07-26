@@ -126,6 +126,18 @@ def _write_health_marker(out: Path, consec_errors: int, last_error: str | None) 
         pass
 
 
+def _read_consec_errors(out: Path) -> int:
+    """Load the error streak persisted by the last process, so a cron-based
+    (non --watch) install — where every invocation is a fresh short-lived
+    process — can still accumulate a multi-cycle streak instead of the
+    counter silently resetting to 0 on every single run."""
+    try:
+        data = json.loads((out / ".health.json").read_text())
+        return int(data.get("consec_errors", 0))
+    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+        return 0
+
+
 
 def _dispatch_notifications(rec, cfg: Config, notify_flag: bool, last_mode: str | None, outdir: Path | None = None) -> None:
     """Send macOS + iMessage notifications when the recommendation changes or is critical."""
@@ -335,9 +347,12 @@ def setup() -> None:
         # Test
         click.echo("  Sending test email…", nl=False)
         try:
-            notify_email("FranklinWH advisor connected ✓\nThis is your test message.", cfg)
-            click.echo(click.style(" Sent!", fg="green"))
-            _ok("Email alerts configured")
+            if notify_email("FranklinWH advisor connected ✓\nThis is your test message.", cfg):
+                click.echo(click.style(" Sent!", fg="green"))
+                _ok("Email alerts configured")
+            else:
+                click.echo(click.style(" Failed", fg="red"))
+                _warn("Email saved but test failed — double-check your credentials (see advisor.log for details).")
         except Exception as e:
             click.echo(click.style(f" Failed: {e}", fg="red"))
             _warn("Email saved but test failed — double-check your credentials.")
@@ -357,9 +372,12 @@ def setup() -> None:
         cfg.webhook_url = wh
         click.echo("  Sending test webhook…", nl=False)
         try:
-            notify_webhook("FranklinWH advisor connected ✓  This is your test message.", False, cfg)
-            click.echo(click.style(" Sent!", fg="green"))
-            _ok("Webhook configured")
+            if notify_webhook("FranklinWH advisor connected ✓  This is your test message.", False, cfg):
+                click.echo(click.style(" Sent!", fg="green"))
+                _ok("Webhook configured")
+            else:
+                click.echo(click.style(" Failed", fg="red"))
+                _warn("Webhook saved but test failed — check the URL (see advisor.log for details).")
         except Exception as e:
             click.echo(click.style(f" Failed: {e}", fg="red"))
             _warn("Webhook saved but test failed — check the URL.")
@@ -1014,7 +1032,11 @@ def cmd_advise(
             if _lic.state == "grace":
                 _warn(_lic.message)
 
-        _consec_errors   = 0
+        # Loaded from the persisted health marker (not reset to 0) so a
+        # cron-based install — a fresh process per invocation, no --watch —
+        # can still accumulate a multi-cycle failure streak instead of the
+        # "N poll errors in a row" alert being structurally unreachable.
+        _consec_errors   = _read_consec_errors(outdir)
         _ERROR_THRESHOLD = 8
         _last_stats      = None  # cached for time-gated alerts during API outages
         _lic_warn_date   = ""    # one grace-period Telegram warning per day

@@ -825,3 +825,118 @@ def test_eod_digest_reports_sundown_prediction_accuracy():
     assert "predicted 85%" in msg
     assert "actual 79%" in msg
     assert "-6 pt" in msg
+
+
+# ── Audit fixes (2026-07-26) ────────────────────────────────────────────
+
+def test_notify_email_reports_real_failure(monkeypatch):
+    """Setup's 'test email' must be able to actually fail, not just log and
+    return None like it did before the fix."""
+    from franklinwh_scraper import notifier
+
+    class _BoomSMTP:
+        def __init__(self, *a, **k):
+            raise OSError("Connection refused")
+
+    monkeypatch.setattr(notifier.time, "sleep", lambda s: None)
+    monkeypatch.setattr(notifier.smtplib, "SMTP", _BoomSMTP)
+    cfg = Config(smtp_host="smtp.example.com", email_to="a@b.c")
+    assert notifier.notify_email("test", cfg) is False
+
+
+def test_notify_email_reports_real_success(monkeypatch):
+    from franklinwh_scraper import notifier
+
+    class _FakeSMTP:
+        def __init__(self, *a, **k):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def ehlo(self): pass
+        def starttls(self): pass
+        def sendmail(self, *a, **k): pass
+
+    monkeypatch.setattr(notifier.smtplib, "SMTP", _FakeSMTP)
+    cfg = Config(smtp_host="smtp.example.com", email_to="a@b.c")
+    assert notifier.notify_email("test", cfg) is True
+
+
+def test_notify_webhook_reports_http_error_as_failure(monkeypatch):
+    """A webhook URL that resolves but returns 404/500 must count as a
+    failed test send, not a silent success."""
+    from franklinwh_scraper import notifier
+    import requests
+
+    class _BadResponse:
+        def raise_for_status(self):
+            raise requests.HTTPError("404 Client Error")
+
+    monkeypatch.setattr(notifier.time, "sleep", lambda s: None)
+    monkeypatch.setattr(notifier.requests, "post", lambda *a, **k: _BadResponse())
+    cfg = Config(webhook_url="https://example.com/hook")
+    assert notifier.notify_webhook("test", False, cfg) is False
+
+
+def test_read_consec_errors_persists_across_process_restart(tmp_path):
+    """A cron-based (no --watch) install runs a fresh process per invocation
+    — the error streak must survive that, or the 'N poll errors in a row'
+    alert can never fire under that deployment path."""
+    import json as _json
+    from franklinwh_scraper import cli
+
+    assert cli._read_consec_errors(tmp_path) == 0  # no health file yet
+
+    (tmp_path / ".health.json").write_text(_json.dumps({"consec_errors": 5, "last_error": "boom"}))
+    assert cli._read_consec_errors(tmp_path) == 5
+
+    (tmp_path / ".health.json").write_text("not json")
+    assert cli._read_consec_errors(tmp_path) == 0  # corrupt marker -> safe default
+
+
+def test_send_sundown_writes_state_under_the_shared_lock(monkeypatch, tmp_path):
+    """/sundown must use the same _state_lock as the main poll loop's own
+    state read-modify-write, or concurrent writes can revert each other's
+    changes (duplicate alerts, dropped predictions)."""
+    import types as _types
+    from contextlib import contextmanager
+    from franklinwh_scraper import chatbot as chatbot_mod
+    from franklinwh_scraper import alerts as alerts_mod
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    calls = []
+
+    @contextmanager
+    def _spy_lock(out):
+        calls.append("enter")
+        yield
+        calls.append("exit")
+
+    monkeypatch.setattr(alerts_mod, "_state_lock", _spy_lock)
+
+    now = datetime(2026, 7, 15, 12, 0, 0)
+    hours = [HourPrediction(dt=now + timedelta(hours=i), predicted_load_kw=1.0,
+                            predicted_solar_kw=3.0 if i < 4 else 0.0,
+                            net_kw=2.0 if i < 4 else -1.0, confidence="high")
+             for i in range(1, 8)]
+    forecast = UsageForecast(hours=hours, total_load_kwh=7.0, total_solar_kwh=12.0,
+                             net_kwh=5.0, peak_load_kw=1.0, confidence="high", data_days=30)
+
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6, output_dir=str(tmp_path)), api_key="x")
+    bot._stats = _types.SimpleNamespace(current=_types.SimpleNamespace(battery_soc_pct=50.0))
+    bot._usage_forecast = forecast
+    bot._send = lambda chat_id, text: None
+
+    real_datetime = chatbot_mod.datetime
+    try:
+        class _FakeDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        chatbot_mod.datetime = _FakeDatetime
+        bot._send_sundown("123")
+    finally:
+        chatbot_mod.datetime = real_datetime
+
+    assert calls == ["enter", "exit"]
