@@ -139,9 +139,15 @@ def build_context(stats, history, outlook, cfg) -> str:
 class TelegramChatBot:
     """Long-poll Telegram bot backed by Claude Haiku for energy Q&A."""
 
-    def __init__(self, cfg, api_key: str):
+    def __init__(self, cfg, api_key: str, outdir=None):
         self._cfg             = cfg
         self._api_key         = api_key
+        # The main watch loop resolves its actual output dir from `--out`
+        # (which can override cfg.output_dir) — without this, /sundown's
+        # state write independently re-derived from cfg alone and could
+        # silently split alert state across two directories when --out was
+        # set, so the EOD digest would never find the chatbot's prediction.
+        self._outdir           = outdir
         self._offset          = 0
         self._convos: dict[str, list[dict]] = {}
         self._lock            = threading.Lock()
@@ -778,7 +784,7 @@ class TelegramChatBot:
             # per-day rather than something the advisor predicts on its own.
             from pathlib import Path
             from .alerts import _load_peak_state, _save_peak_state, _state_lock
-            out = Path(getattr(self._cfg, "output_dir", "output"))
+            out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
             with _state_lock(out):
                 state = _load_peak_state(out)
                 state[f"sundown_pred_{now.strftime('%Y-%m-%d')}"] = {
@@ -788,10 +794,21 @@ class TelegramChatBot:
                 }
                 _save_peak_state(out, state)
 
+            # The EOD digest fires once at 9-10pm and won't re-check a
+            # sundown_pred_ recorded after it already ran (it only fires
+            # once per day) — only reachable on long summer days when
+            # sundown falls near 9pm, but worth a heads-up rather than the
+            # accuracy bullet just silently never appearing.
+            followup = (
+                "\n<i>Too late in the day for tonight's summary to grade this — no accuracy follow-up.</i>"
+                if now.hour >= 21 else
+                "\n<i>I'll check how this did in tonight's ~9pm summary.</i>"
+            )
             self._send(chat_id,
                 f"🌇 Projected SoC at sundown (~{sundown_dt.strftime('%-I:%M %p')}, using solar+load forecast)\n"
                 f"Now: <b>{soc:.0f}%</b>  →  Sundown: ~<b>{end_pct:.0f}%</b>\n"
                 f"<i>{forecast.confidence.title()} confidence, {forecast.data_days}d data — actual weather/load will vary.</i>"
+                f"{followup}"
             )
         except Exception as e:
             logger.warning("_send_sundown error: %s", e)

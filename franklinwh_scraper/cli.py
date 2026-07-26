@@ -1027,7 +1027,7 @@ def cmd_advise(
                 _bot_ready = False
         if _bot_ready:
             import threading as _threading
-            _chatbot = TelegramChatBot(cfg, getattr(cfg, "anthropic_api_key", ""))
+            _chatbot = TelegramChatBot(cfg, getattr(cfg, "anthropic_api_key", ""), outdir)
             _bot_thread = _threading.Thread(target=_chatbot.run, daemon=True, name="tg-chatbot")
             _bot_thread.start()
             _info("Telegram AI chatbot started — message the bot to ask energy questions")
