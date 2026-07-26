@@ -78,6 +78,9 @@ def test_integrate_intervals_empty_and_single():
 
 
 def test_capacity_samples(tmp_path):
+    """battery_use_kw > 0 = discharging (account.py's documented convention,
+    same one daily_battery_kwh uses) — positive here, not negative, is the
+    real-data shape this function must match."""
     db = HistoryStore(tmp_path / "h.db")
     base = datetime(2026, 5, 1, 18, 0)
     soc = 100.0
@@ -87,12 +90,31 @@ def test_capacity_samples(tmp_path):
             "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
             "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (ts, 0, 18, 1.36, 0.0, soc, 0.0, "normal", 0.0, -1.36),
+            (ts, 0, 18, 1.36, 0.0, soc, 0.0, "normal", 0.0, 1.36),
         )
         soc -= 5.0
     db._conn.commit()
     samples = db.capacity_samples("2026-05-01", "2026-05-02")
     assert samples and 13.0 < samples[0] < 14.5
+
+
+def test_capacity_samples_ignores_charging_data(tmp_path):
+    """Regression guard for the sign-flip bug: real charging data (negative
+    battery_use_kw, rising SoC) must never be mistaken for a discharge run."""
+    db = HistoryStore(tmp_path / "h.db")
+    base = datetime(2026, 5, 1, 10, 0)
+    soc = 40.0
+    for i in range(9):  # 40→80% over 4h charging at 1.36 kW
+        ts = (base + timedelta(minutes=30 * i)).isoformat()
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts, 0, 10, 0.5, 2.0, soc, 0.0, "normal", 0.0, -1.36),
+        )
+        soc += 5.0
+    db._conn.commit()
+    assert db.capacity_samples("2026-05-01", "2026-05-02") == []
 
 
 def test_predict_blends_recent_load_over_baseline(tmp_path):
@@ -877,6 +899,72 @@ def test_notify_webhook_reports_http_error_as_failure(monkeypatch):
     monkeypatch.setattr(notifier.requests, "post", lambda *a, **k: _BadResponse())
     cfg = Config(webhook_url="https://example.com/hook")
     assert notifier.notify_webhook("test", False, cfg) is False
+
+
+def test_seasonal_forecast_confidence_gates_on_in_season_sample_size(tmp_path):
+    """A slot backed by only 2 in-season readings must not show 'high'
+    confidence just because the same weekday/hour has plenty of samples
+    from OTHER seasons — the seasonal profile in use only reflects those
+    2 real in-season readings, not the unrelated all-time count."""
+    from franklinwh_scraper.predictor import _current_season, predict
+
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now()
+    season = _current_season(now.month)
+    in_season_month = {"spring": 4, "summer": 7, "fall": 10, "winter": 1}[season]
+    out_of_season_month = {"spring": 8, "summer": 11, "fall": 2, "winter": 5}[season]
+
+    target_hour = (now + timedelta(hours=1)).hour
+    target_dow = (now + timedelta(hours=1)).weekday()
+
+    def _insert(ts: datetime, dow: int, hour: int, load_kw: float):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts.isoformat(), dow, hour, load_kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+        )
+
+    # 21 distinct in-season days (>= _SEASON_MIN_DAYS) so predict() picks the
+    # seasonal profile — but only 2 of them land on the target slot.
+    for day in range(21):
+        ts = datetime(2020, in_season_month, min(day + 1, 28), 10, 0)
+        dow = target_dow if day < 2 else (target_dow + 1) % 7
+        hour = target_hour if day < 2 else (target_hour + 3) % 24
+        _insert(ts, dow, hour, 2.0)
+
+    # Plenty of OTHER-season readings for the exact same slot — inflates the
+    # old all-time slot_counts() the confidence gate used to (wrongly) use.
+    for day in range(10):
+        ts = datetime(2020, out_of_season_month, min(day + 1, 28), 10, 0)
+        _insert(ts, target_dow, target_hour, 9.0)
+    db._conn.commit()
+
+    forecast = predict(db, horizon_hours=2)
+    target_pred = next(p for p in forecast.hours if p.dt.hour == target_hour)
+    assert target_pred.confidence != "high"
+
+
+def test_daily_battery_kwh_clamps_long_gaps(tmp_path):
+    """A multi-hour data gap (daemon down) must not be integrated as
+    continuous power for the whole gap — matches integrate_intervals'/
+    capacity_samples' existing 1-hour clamp."""
+    db = HistoryStore(tmp_path / "h.db")
+    db._conn.execute(
+        "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+        "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("2026-05-01T22:00:00", 0, 22, 0.5, 0.0, 50.0, 0.0, "normal", 0.0, 0.3),
+    )
+    db._conn.execute(  # 8h gap (daemon down overnight), then charging kicks in
+        "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+        "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("2026-05-01T23:59:00", 0, 23, 0.5, 3.0, 55.0, 0.0, "normal", 0.0, -2.0),
+    )
+    db._conn.commit()
+    chg, dis = db.daily_battery_kwh("2026-05-01")
+    assert chg < 1.0  # clamped to <=1h of avg power, not the full 8h gap
 
 
 def test_read_consec_errors_persists_across_process_restart(tmp_path):

@@ -137,6 +137,7 @@ const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bil
 // ── Live state ───────────────────────────────────────────────────────
 const S = {
   cap: CAP0, soc: 0, solar: 0, load: 0, chg: 0, dis: 0, grid: 0, exp: 0,
+  hasData: false, fetchFailStreak: 0,
   gridStatus: 'normal', onPeak: false, savedToday: 0,
   lastPoll: null, nextPoll: null,
   alerts: [], unread: 0, alertsVisible: true, filterCat: 'ALL',
@@ -570,8 +571,17 @@ function renderHeader(){
   const t = nowT();
   $('hd-datetime').textContent = t.toLocaleDateString('en-US',{month:'short',day:'numeric'}).toUpperCase() + ' · ' + fmtTime(t);
   const out = S.gridStatus !== 'normal';
-  const col = out ? '#ff8a7a' : '#57e389';
-  $('hd-status').textContent = out ? 'GRID DOWN' : 'POLLING OK';
+  // Distinguish three states instead of collapsing them all into "POLLING
+  // OK": never connected yet, lost the connection to the dashboard server
+  // (3+ consecutive failed 10s polls = 30s+), or a real grid outage. Without
+  // this, a dead webapi process looks identical to "everything's fine."
+  const offline = !DEMO && S.fetchFailStreak >= 3;
+  let label, col;
+  if (!DEMO && !S.hasData && !offline) { label = 'CONNECTING…'; col = '#5f7263'; }
+  else if (offline) { label = 'SERVER UNREACHABLE'; col = '#f5b942'; }
+  else if (out) { label = 'GRID DOWN'; col = '#ff8a7a'; }
+  else { label = 'POLLING OK'; col = '#57e389'; }
+  $('hd-status').textContent = label;
   $('hd-status-wrap').style.color = col; $('hd-dot').style.background = col; $('hd-dot').style.boxShadow = '0 0 8px ' + col;
   const lp = S.lastPoll ? fmtTime(new Date(S.lastPoll)) + ':' + String(new Date(S.lastPoll).getSeconds()).padStart(2,'0') : '—';
   const np = S.nextPoll ? Math.max(0, Math.ceil((new Date(S.nextPoll) - Date.now())/1000)) + 's' : '—';
@@ -581,6 +591,20 @@ function renderHeader(){
   un.textContent = '🔔 ' + S.unread;
 }
 function renderLerp(){
+  if (!DEMO && !S.hasData) {
+    // Nothing real to show yet — a bare "0%"/"0.0 kW" here would be
+    // indistinguishable from a genuinely empty battery, so show an explicit
+    // placeholder instead until the first successful poll lands.
+    $('b-soc').textContent = '—%'; $('b-soc').style.color = '#5f7263';
+    $('b-bar').style.width = '0%';
+    $('b-kwh').textContent = `— / ${S.cap} kWh`;
+    $('b-tte').textContent = 'waiting for first reading…';
+    $('b-status').textContent = '';
+    $('st-bar').style.width = '0%';
+    $('st-soc').textContent = '—%'; $('st-soc').style.color = '#5f7263';
+    $('st-solar').textContent = '☀ —'; $('st-load').textContent = '⌂ —';
+    return;
+  }
   const acc = accentColor();
   $('b-soc').textContent = D.soc.toFixed(0) + '%';
   $('b-soc').style.color = acc; $('b-soc').style.textShadow = '0 0 34px ' + accentGlow();
@@ -1090,12 +1114,19 @@ async function pollFast(){
       S.onPeak = !!c.on_peak;
       S.savedToday = c.saved_today || 0;
       S.lastPoll = c.last_poll; S.nextPoll = c.next_poll;
+      S.hasData = true; S.fetchFailStreak = 0;
       renderBanners(); sweep();
     }
     const a = await J('/api/alerts?limit=30');
     ingestAlerts(a.alerts, pollFast._first === undefined);
     pollFast._first = false;
-  } catch(e) { /* server briefly away — keep last values */ }
+  } catch(e) {
+    // Server briefly away — keep last values, but track the streak so the
+    // header can distinguish "no data yet" / "server unreachable" from a
+    // real grid outage instead of silently showing stale/zero readings as
+    // if everything's fine.
+    S.fetchFailStreak++;
+  }
 }
 async function pollSlow(){
   try {
@@ -1171,6 +1202,7 @@ function demoPoll(dtSecs){
   renderBanners(); sweep();
 }
 function demoData(){
+  S.hasData = true;
   S.soc = 78; S.savedToday = 3.12; S.simTime = new Date(); S.simTime.setHours(14,32,0,0);
   // history
   const gen = (seedv, socStart, dim) => { let seed = seedv, soc = socStart; const arr = [];

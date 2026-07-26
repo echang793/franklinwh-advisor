@@ -70,7 +70,8 @@ def predict(
 
     # Use seasonal profiles when we have enough seasonal data (better accuracy);
     # fall back to all-time profiles to avoid sparse-bucket gaps.
-    if store.days_in_season(season) >= _SEASON_MIN_DAYS:
+    using_seasonal = store.days_in_season(season) >= _SEASON_MIN_DAYS
+    if using_seasonal:
         load_profile  = store.seasonal_load_profile(season)
         solar_profile = store.seasonal_solar_profile(season)
     else:
@@ -99,7 +100,12 @@ def predict(
                 if baseline is not None else recent_solar[slot]
             )
 
-    slot_counts = store.slot_counts()
+    # Confidence must be gated on the sample size actually backing the
+    # profile value in use — when using_seasonal, that's the in-season count,
+    # not the unrelated all-time count for the same weekday/hour (which can
+    # look "high confidence" purely from other seasons' data).
+    slot_counts   = store.seasonal_slot_counts(season) if using_seasonal else store.slot_counts()
+    conf_data_days = store.days_in_season(season) if using_seasonal else data_days
 
     # Temperature-load scaling:
     # +2.5% per °C above 27°C (AC draw, waking hours only)
@@ -146,9 +152,9 @@ def predict(
         elif not direct_slot_hit:
             # Fell back to same-hour cross-day average — treat as low regardless of data_days
             confidence = "low"
-        elif slot_n >= 8 and data_days >= 7:
+        elif slot_n >= 8 and conf_data_days >= 7:
             confidence = "high"
-        elif slot_n >= 3 or data_days >= 3:
+        elif slot_n >= 3 or conf_data_days >= 3:
             confidence = "medium"
         else:
             confidence = "low"

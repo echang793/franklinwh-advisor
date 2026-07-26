@@ -255,9 +255,14 @@ class HistoryStore:
             t1, b1 = rows[i - 1]
             t2, b2 = rows[i]
             try:
-                dt_h = (
-                    datetime.fromisoformat(t2) - datetime.fromisoformat(t1)
-                ).total_seconds() / 3600
+                # Clamped like every sibling integrator (integrate_intervals,
+                # capacity_samples) — an unclamped gap (daemon down for hours)
+                # would otherwise integrate that whole span as continuous
+                # charge/discharge power, wildly inflating the day's total.
+                dt_h = min(
+                    _MAX_INTEGRATION_GAP_H,
+                    (datetime.fromisoformat(t2) - datetime.fromisoformat(t1)).total_seconds() / 3600,
+                )
             except (ValueError, TypeError):
                 # TypeError: a NULL timestamp (fromisoformat(None)) — every
                 # sibling integration function (integrate_intervals,
@@ -309,6 +314,25 @@ class HistoryStore:
             months,
         ).fetchone()
         return row[0] if row else 0
+
+    def seasonal_slot_counts(self, season: str) -> dict[tuple[int, int], int]:
+        """Number of readings per (day_of_week, hour_of_day) slot, within one
+        season only — the season-scoped counterpart to slot_counts(), needed
+        so forecast confidence reflects the sample size actually backing a
+        seasonal-profile value instead of the unrelated all-time count for
+        that weekday/hour (which can be large purely from other seasons)."""
+        months = self._season_months(season)
+        placeholders = ",".join("?" * len(months))
+        rows = self._conn.execute(
+            f"""
+            SELECT day_of_week, hour_of_day, COUNT(*)
+            FROM readings
+            WHERE CAST(substr(timestamp,6,2) AS INTEGER) IN ({placeholders})
+            GROUP BY day_of_week, hour_of_day
+            """,
+            months,
+        ).fetchall()
+        return {(int(r[0]), int(r[1])): int(r[2]) for r in rows}
 
     def seasonal_load_profile(self, season: str) -> LoadProfile:
         """Average home load kW keyed by (day_of_week, hour_of_day) for one season."""
@@ -494,13 +518,17 @@ class HistoryStore:
             except (ValueError, TypeError):
                 continue
             batt_kw, grid_kw, soc = float(batt_kw), float(grid_kw), float(soc)
-            discharging = batt_kw < -0.05 and grid_kw <= 0.05 and soc < (prev[3] if prev else soc) + 0.01
+            # battery_use_kw > 0 = discharging, < 0 = charging (account.py's
+            # documented sign convention, same one daily_battery_kwh uses) —
+            # this was inverted, which meant the gate could never match real
+            # discharge data and capacity_samples() always returned [].
+            discharging = batt_kw > 0.05 and grid_kw <= 0.05 and soc < (prev[3] if prev else soc) + 0.01
             if prev is not None and discharging:
                 hours = min(_MAX_INTEGRATION_GAP_H, (dt - prev[0]).total_seconds() / 3600)
                 if hours > 0:
                     if run_soc_start is None:
                         run_soc_start = prev[3]
-                    run_kwh += (-(prev[1] + batt_kw) / 2) * hours  # avg discharge kW × hours
+                    run_kwh += ((prev[1] + batt_kw) / 2) * hours  # avg discharge kW × hours
             else:
                 _flush(prev[3] if prev else soc)
             prev = (dt, batt_kw, grid_kw, soc)
