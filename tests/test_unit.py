@@ -1388,3 +1388,46 @@ def test_followed_advice_audit_survives_missing_log(tmp_path):
     from franklinwh_scraper import savings
     out = savings.followed_advice_audit(tmp_path / "nope.jsonl", set(), 30)
     assert out["available"] is False
+
+
+def test_urgent_alerts_excludes_the_all_clear():
+    """grid_restored is always-on (you need to know the outage ended) but is
+    an all-clear — it must never be escalated like the outage itself."""
+    assert alerts._URGENT_ALERTS == {"grid_down", "area_power_outage", "fast_drain"}
+    assert "grid_restored" in alerts._ALWAYS_ON_ALERTS
+    assert "grid_restored" not in alerts._URGENT_ALERTS
+    # Every urgent alert must also be undisableable — an alert you can mute
+    # should never be able to page you.
+    assert alerts._URGENT_ALERTS <= alerts._ALWAYS_ON_ALERTS
+
+
+def test_grid_down_dispatches_as_urgent(tmp_path, monkeypatch):
+    """Regression: _check_peak_alerts never passed `urgent` at all, so
+    notify_webhook's urgent flag was dead and every alerts_log.jsonl entry
+    was urgent:false — including grid_down."""
+    import types
+    sent = []
+    monkeypatch.setattr(alerts, "_send_alert",
+                        lambda body, cfg, urgent=False: sent.append((body, urgent)))
+
+    c = types.SimpleNamespace(
+        battery_soc_pct=80.0, home_load_kw=1.0, solar_production_kw=0.0,
+        battery_use_kw=1.0, grid_use_kw=0.0, grid_status="down",
+        generator_production_kw=0.0, generator_enabled=False,
+    )
+    stats = types.SimpleNamespace(
+        current=c,
+        totals=types.SimpleNamespace(
+            solar_kwh=0.0, battery_charge_kwh=0.0, battery_discharge_kwh=0.0,
+            grid_load_kwh=0.0, grid_export_kwh=0.0, home_use_kwh=0.0,
+            grid_import_kwh=0.0, generator_kwh=0.0,
+            battery_load_kwh=0.0, solar_load_kwh=0.0,
+        ),
+    )
+    # Needs a configured channel or _check_peak_alerts returns immediately.
+    cfg = Config(telegram_bot_token="t", telegram_chat_id="c")
+    alerts._check_peak_alerts(stats, cfg, tmp_path)
+
+    urgent_bodies = [b for b, u in sent if u]
+    assert any("GRID DOWN" in b.upper() for b in urgent_bodies), \
+        f"grid_down must dispatch urgent; got {[(b[:40], u) for b, u in sent]}"

@@ -160,6 +160,16 @@ _CMR_OUTAGE_FLAG = Path.home() / ".cmr-power-outage.flag"
 # Safety alerts that cannot be disabled by the user.
 _ALWAYS_ON_ALERTS = frozenset({"grid_down", "grid_restored", "area_power_outage", "fast_drain"})
 
+# Alerts that set the `urgent` flag on the webhook payload and in the alert
+# log. Deliberately NOT the same set as _ALWAYS_ON_ALERTS: grid_restored is
+# always-on because you need to know the outage ended, but it's an all-clear —
+# it must never be escalated the way the outage itself is.
+#
+# Until this existed, _check_peak_alerts never passed the urgent argument at
+# all, so notify_webhook's urgent flag was dead and every entry in
+# alerts_log.jsonl was urgent:false — including grid_down.
+_URGENT_ALERTS = frozenset({"grid_down", "area_power_outage", "fast_drain"})
+
 
 def _alert_enabled(cfg: Config, name: str) -> bool:
     if name in _ALWAYS_ON_ALERTS:
@@ -1948,14 +1958,19 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),
         ]
-        to_send: list[str] = []
+        # (body, urgent) — fast_drain returns two tiers from one candidate
+        # (critical below 35% SoC, plus a lower-urgency "unusual drain"
+        # advisory) and both inherit urgent=True. Splitting it into two
+        # candidates would fragment its last_soc/last_soc_time bookkeeping,
+        # which is worse; it's an always-on safety alert either way.
+        to_send: list[tuple[str, bool]] = []
         for _name, _fn in _candidates:
             if _alert_enabled(cfg, _name):
                 _body = _fn()
                 if _body:
-                    to_send.append(_body)
+                    to_send.append((_body, _name in _URGENT_ALERTS))
         _save_peak_state(out, state)
 
-    for body in to_send:
-        _send_alert(body, cfg)
+    for body, urgent in to_send:
+        _send_alert(body, cfg, urgent=urgent)
 

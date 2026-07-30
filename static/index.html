@@ -914,7 +914,14 @@ function ingestAlerts(list, initial){
   for (const raw of list) {
     if (known.has(raw.ts)) continue;
     const cat = catOf(raw.body);
-    const red = /grid down|🪫|below/.test(raw.body.toLowerCase());
+    // Trust the server's urgent flag when present. The regex remains only as
+    // a fallback for log lines written before that flag was ever set (all of
+    // which are urgent:false). "below" is deliberately NOT in the pattern —
+    // it matches the prediction-drift body ("...running above/below
+    // predicted"), painting a low-urgency forecast-calibration notice as an
+    // emergency. That alert is throttled to once a week, so it hadn't
+    // actually tripped the old pattern yet.
+    const red = raw.urgent === true || /grid down|🪫/.test(raw.body.toLowerCase());
     const amber = /peak/.test(raw.body.toLowerCase()) && cat === 'BILLING';
     S.alerts.unshift({
       ts: raw.ts, cat, body: raw.body, segs: segsOf(raw.body),
