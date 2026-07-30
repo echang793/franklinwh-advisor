@@ -1656,3 +1656,106 @@ def test_weekly_summary_omits_extrapolation_without_install_date(tmp_path):
     if "Battery cycles" in msg:
         assert "tracking start" in msg
         assert "extrapolated" not in msg
+
+
+def _frozen_dt(fixed):
+    """datetime subclass whose now() returns a fixed instant — same pattern
+    the existing advisor/chatbot tests use."""
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+    return _FakeDatetime
+
+
+# ── Critical-SoC deferral to forecast solar ───────────────────────────
+
+def _crit_case(now, soc, solar_kw, confidence="high", hours_ahead=12):
+    """Build (stats, outlook, forecast) for the critical-SoC branch."""
+    import types
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    hours = [
+        HourPrediction(dt=now + timedelta(hours=i), predicted_load_kw=1.0,
+                       predicted_solar_kw=solar_kw, net_kw=solar_kw - 1.0,
+                       confidence=confidence)
+        for i in range(1, hours_ahead + 1)
+    ]
+    fc = UsageForecast(hours=hours, total_load_kwh=float(hours_ahead),
+                       total_solar_kwh=solar_kw * hours_ahead,
+                       net_kwh=(solar_kw - 1.0) * hours_ahead, peak_load_kw=1.0,
+                       confidence=confidence, data_days=90)
+    outlook = types.SimpleNamespace(
+        avg_ghi=lambda h: 800.0, avg_cloud_cover=lambda h: 10.0,
+        peak_ghi_today=lambda: 900.0,
+    )
+    stats = types.SimpleNamespace(current=types.SimpleNamespace(
+        battery_soc_pct=soc, home_load_kw=1.0, solar_production_kw=solar_kw,
+        grid_status="normal",
+    ), totals=types.SimpleNamespace())
+    return stats, outlook, fc
+
+
+def test_critical_soc_defers_when_solar_will_recover(monkeypatch):
+    """Regression: EB charges from the GRID. At 11% on a sunny morning with a
+    confident 90%-by-4pm projection, recommending it means buying power solar
+    is about to supply free. Observed live on 2026-07-30."""
+    from franklinwh_scraper import advisor
+
+    now = datetime(2026, 7, 30, 10, 0, 0)
+    monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
+    stats, outlook, fc = _crit_case(now, soc=11.0, solar_kw=4.0)
+    rec = advisor.recommend(stats, outlook=outlook, forecast=fc, battery_capacity_kwh=13.6)
+
+    assert rec.mode is not advisor.Mode.EMERGENCY_BACKUP
+    assert rec.urgency == "warning"           # still flagged, just not "grid-charge now"
+    assert "solar is forecast to recover" in rec.reason
+    assert rec.details["critical_deferred_to_solar"] is True
+
+
+def test_critical_soc_still_fires_without_forecast(monkeypatch):
+    from franklinwh_scraper import advisor
+
+    now = datetime(2026, 7, 30, 10, 0, 0)
+    monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
+    stats, outlook, _ = _crit_case(now, soc=11.0, solar_kw=4.0)
+    rec = advisor.recommend(stats, outlook=outlook, forecast=None, battery_capacity_kwh=13.6)
+    assert rec.mode is advisor.Mode.EMERGENCY_BACKUP
+    assert rec.urgency == "critical"
+
+
+def test_critical_soc_still_fires_on_low_confidence(monkeypatch):
+    """Any doubt about the forecast and the critical call must stand."""
+    from franklinwh_scraper import advisor
+
+    now = datetime(2026, 7, 30, 10, 0, 0)
+    monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
+    stats, outlook, fc = _crit_case(now, soc=11.0, solar_kw=4.0, confidence="low")
+    rec = advisor.recommend(stats, outlook=outlook, forecast=fc, battery_capacity_kwh=13.6)
+    assert rec.mode is advisor.Mode.EMERGENCY_BACKUP
+    assert rec.urgency == "critical"
+
+
+def test_critical_soc_still_fires_when_solar_wont_recover(monkeypatch):
+    """Cloudy day: low SoC and no meaningful solar coming — EB is correct."""
+    from franklinwh_scraper import advisor
+
+    now = datetime(2026, 7, 30, 10, 0, 0)
+    monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
+    stats, outlook, fc = _crit_case(now, soc=11.0, solar_kw=0.2)
+    rec = advisor.recommend(stats, outlook=outlook, forecast=fc, battery_capacity_kwh=13.6)
+    assert rec.mode is advisor.Mode.EMERGENCY_BACKUP
+    assert rec.urgency == "critical"
+
+
+def test_critical_soc_still_fires_in_the_evening(monkeypatch):
+    """After the peak window opens there's no solar left to wait for, so the
+    projection collapses to current SoC and the deferral must not engage."""
+    from franklinwh_scraper import advisor
+
+    now = datetime(2026, 7, 30, 19, 0, 0)
+    monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
+    stats, outlook, fc = _crit_case(now, soc=11.0, solar_kw=0.0)
+    rec = advisor.recommend(stats, outlook=outlook, forecast=fc, battery_capacity_kwh=13.6)
+    assert rec.mode is advisor.Mode.EMERGENCY_BACKUP
+    assert rec.urgency == "critical"

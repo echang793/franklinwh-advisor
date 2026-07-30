@@ -271,14 +271,45 @@ def recommend(
 
     # ── CRITICAL: battery critically low ────────────────────────────
     if soc < _SOC_CRITICAL:
+        # ...unless the forecast confidently says solar refills it before the
+        # peak. Emergency Backup charges FROM THE GRID, so recommending it on
+        # a sunny morning at 11% SoC — with 20 kWh of solar due and a 90%
+        # projection at 4pm — is telling the user to buy power that's about
+        # to arrive free. This branch used to return before the forecast was
+        # ever consulted.
+        #
+        # Deliberately strict: high window confidence (not merely "not none"),
+        # no projected shortfall, AND a comfortably healthy projection. Any
+        # doubt and the critical call stands. Note that after 4pm
+        # plan["soc_at_4pm"] collapses to the current SoC, so this can't
+        # defer in the evening when there's no solar left to wait for.
+        solar_will_recover = (
+            forecast is not None
+            and plan["window_confidence"] == "high"
+            and not plan["eb_needed"]
+            and plan["soc_at_4pm"] >= _SOC_HEALTHY
+        )
+        details["critical_deferred_to_solar"] = solar_will_recover
+        if not solar_will_recover:
+            return Recommendation(
+                mode=Mode.EMERGENCY_BACKUP,
+                reason=(
+                    f"Battery critically low ({soc:.0f}% SoC). "
+                    "Switch to Emergency Backup to protect reserves.\n"
+                    + plan["hint_str"]
+                ),
+                urgency="critical",
+                details=details,
+            )
         return Recommendation(
-            mode=Mode.EMERGENCY_BACKUP,
+            mode=Mode.SELF_CONSUMPTION,
             reason=(
-                f"Battery critically low ({soc:.0f}% SoC). "
-                "Switch to Emergency Backup to protect reserves.\n"
-                + plan["hint_str"]
+                f"Battery low ({soc:.0f}% SoC) but solar is forecast to recover it — "
+                f"~{plan['soc_at_4pm']:.0f}% projected by 4 pm with no peak shortfall. "
+                "Emergency Backup would buy grid power that solar is about to "
+                "supply for free."
             ),
-            urgency="critical",
+            urgency="warning",
             details=details,
         )
 
