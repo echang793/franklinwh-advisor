@@ -15,6 +15,23 @@ from .weather import SolarOutlook
 class Mode(str, Enum):
     SELF_CONSUMPTION = "self_consumption"
     EMERGENCY_BACKUP = "emergency_backup"
+    # Advisory only — recommend() deliberately never returns this, and
+    # test_recommend_never_returns_time_of_use enforces that.
+    #
+    # The genuine case for TOU is export arbitrage, which only holds in
+    # Aug/Sep where tou._NEM3_EXPORT_RATES has real published per-hour rates
+    # ($0.90-1.02 vs the $0.80 on-peak import rate). The other ten months use
+    # the flat avoided-cost floor, so TOU is never the better call there.
+    #
+    # It also can't be a decision-ladder rung: recommend()'s output drives
+    # mode-change notifications that dedup on alerted_{mode}_date, so a TOU
+    # call at 11am reverting to self-consumption at 2pm would produce
+    # switch/revert churn on consecutive days. EMERGENCY_BACKUP already
+    # covers pre-peak grid charging and SELF_CONSUMPTION already discharges
+    # on-peak, so the branch would add flapping, not capability.
+    #
+    # TOU is instead suggested in prose by alerts._alert_solar_surplus_overflow
+    # and _alert_export_arbitrage, which is the right delivery mechanism.
     TIME_OF_USE = "time_of_use"
     NO_CHANGE = "no_change"
 

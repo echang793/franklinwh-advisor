@@ -1586,3 +1586,73 @@ def test_build_context_backward_compatible_without_extras():
     ctx = build_context(stats, None, None, Config())
     assert "System snapshot" in ctx
     assert "Advisor says" not in ctx
+
+
+def test_recommend_never_returns_time_of_use():
+    """Mode.TIME_OF_USE is advisory-only (see the enum's docstring). Turning
+    a dead enum member into an enforced invariant beats either wiring it up
+    or deleting it — the alerts still reference it in prose."""
+    import types
+    from franklinwh_scraper import advisor
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 15, 10, 0, 0)
+    seen = set()
+    for soc in (5.0, 25.0, 52.0, 85.0, 100.0):
+        for solar_kw, ghi in ((0.0, 20.0), (2.0, 300.0), (6.0, 900.0)):
+            for have_fc in (True, False):
+                fc = None
+                if have_fc:
+                    hours = [
+                        HourPrediction(dt=now + timedelta(hours=i), predicted_load_kw=1.5,
+                                       predicted_solar_kw=solar_kw, net_kw=solar_kw - 1.5,
+                                       confidence="high")
+                        for i in range(1, 12)
+                    ]
+                    fc = UsageForecast(hours=hours, total_load_kwh=16.5,
+                                       total_solar_kwh=solar_kw * 11,
+                                       net_kwh=solar_kw * 11 - 16.5, peak_load_kw=1.5,
+                                       confidence="high", data_days=30)
+                outlook = types.SimpleNamespace(
+                    avg_ghi=lambda h, _g=ghi: _g,
+                    avg_cloud_cover=lambda h: 20.0,
+                    peak_ghi_today=lambda _g=ghi: _g,
+                )
+                stats = types.SimpleNamespace(current=types.SimpleNamespace(
+                    battery_soc_pct=soc, home_load_kw=1.5,
+                    solar_production_kw=solar_kw, grid_status="normal",
+                ), totals=types.SimpleNamespace())
+                rec = advisor.recommend(stats, outlook=outlook, forecast=fc,
+                                        battery_capacity_kwh=13.6)
+                seen.add(rec.mode)
+
+    assert advisor.Mode.TIME_OF_USE not in seen, \
+        "recommend() returned TIME_OF_USE — see the enum docstring for why it must not"
+    assert seen, "matrix produced no recommendations at all"
+
+
+def test_weekly_summary_omits_extrapolation_without_install_date(tmp_path):
+    """install_date was read but written by nothing, so the lifetime cycle
+    count was always extrapolated from a hardcoded Nov 2024 guess. With no
+    install date it must say what the number actually is instead."""
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime(2026, 7, 26, 21, 30)   # a Sunday evening
+    base = now - timedelta(days=6)
+    soc = 100.0
+    for d in range(6):
+        for i in range(9):
+            ts = (base + timedelta(days=d, minutes=30 * i)).isoformat()
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (ts, 0, 18, 1.36, 0.0, max(20.0, soc - i * 5), 0.0, "normal", 0.0, 1.36),
+            )
+    db._conn.commit()
+
+    msg = alerts._alert_weekly_summary({}, now.strftime("%Y-%m-%d"), now, db,
+                                       Config(install_date=""))
+    assert msg is not None
+    if "Battery cycles" in msg:
+        assert "tracking start" in msg
+        assert "extrapolated" not in msg

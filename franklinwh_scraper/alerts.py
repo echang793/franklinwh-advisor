@@ -940,35 +940,41 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
             if bat_cap > 0 and discharge_kwh > 0:
                 db_cycles    = discharge_kwh / bat_cap
                 first_date   = store.first_reading_date()
-                # Estimate cycles for any period before the DB started
+                # Extrapolate back to the install date only if we actually
+                # know it. This used to fall back to a hardcoded Nov 2024,
+                # inventing however many cycles that implied — and since
+                # install_date was read but never written by any code, the
+                # invented default was what everyone got.
                 extra_cycles = 0.0
                 extra_note   = ""
+                since_note   = ""
                 if first_date:
                     db_start    = datetime.strptime(first_date, "%Y-%m-%d")
-                    install_est = db_start  # fallback — no pre-DB data
-                    # Check if state has a known install date; otherwise assume Nov 2024
-                    install_str = state.get("install_date")
+                    install_str = getattr(cfg, "install_date", "") or state.get("install_date") or ""
+                    install_est = None
                     if install_str:
                         try:
                             install_est = datetime.strptime(install_str, "%Y-%m-%d")
                         except ValueError:
-                            pass
+                            install_est = None
+                    if install_est is not None:
+                        missing_days = (db_start - install_est).days
+                        if missing_days > 7:
+                            db_days       = max(1, (now.date() - db_start.date()).days)
+                            rate_per_day  = db_cycles / db_days
+                            extra_cycles  = rate_per_day * missing_days
+                            extra_note    = f" (~{extra_cycles:.0f} extrapolated pre-{db_start.strftime('%b %Y')})"
                     else:
-                        # Default to Nov 1 2024 unless DB starts earlier
-                        default_install = datetime(2024, 11, 1)
-                        install_est     = min(db_start, default_install)
-                    missing_days = (db_start - install_est).days
-                    if missing_days > 7:
-                        db_days       = max(1, (now.date() - db_start.date()).days)
-                        rate_per_day  = db_cycles / db_days
-                        extra_cycles  = rate_per_day * missing_days
-                        extra_note    = f" (~{extra_cycles:.0f} extrapolated pre-{db_start.strftime('%b %Y')})"
+                        # No install date — say what the number actually is
+                        # rather than implying it's lifetime.
+                        since_note = f" since {db_start.strftime('%b %Y')} (tracking start)"
                 total_cycles = db_cycles + extra_cycles
                 pct_used     = total_cycles / 6000 * 100
                 cycles_week  = state.get("batt_cycles_this_week", 0)
                 cycle_str    = (
                     f"\nBattery cycles: {cycles_week:.1f} this week  ·  "
-                    f"{total_cycles:.0f} total{extra_note} ({pct_used:.1f}% of 6000 rated)"
+                    f"{total_cycles:.0f}{since_note or ' total'}{extra_note} "
+                    f"({pct_used:.1f}% of 6000 rated)"
                 )
         except Exception as e:
             logger.debug("Battery cycle throughput calc failed: %s", e)

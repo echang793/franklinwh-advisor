@@ -539,6 +539,23 @@ def setup() -> None:
         _ok(f"Battery set to {cfg.battery_capacity_kwh} kWh")
 
     click.echo()
+    while True:
+        _inst = click.prompt(
+            "  System install date (YYYY-MM-DD, blank if unsure)",
+            default=cfg.install_date or "", show_default=False,
+        ).strip()
+        if not _inst:
+            cfg.install_date = ""
+            _info("Skipped — lifetime cycle counts will be reported since tracking start.")
+            break
+        try:
+            datetime.strptime(_inst, "%Y-%m-%d")
+            cfg.install_date = _inst
+            break
+        except ValueError:
+            _warn("Use YYYY-MM-DD, or leave blank.")
+
+    click.echo()
     click.echo("  Your utility bills on a per-meter read date, not a fixed")
     click.echo("  company-wide day — check the 'service period' on your bill.")
     while True:
@@ -622,6 +639,8 @@ def doctor() -> None:
     _bcs, _bce = cycle_bounds(datetime.now().date(), cfg.billing_cycle_start_day)
     _check("Billing cycle", True,
            f"day {cfg.billing_cycle_start_day} — current: {_bcs:%b %-d} – {_bce:%b %-d}")
+    _check("Install date", bool(cfg.install_date),
+           cfg.install_date or "not set — cycle counts shown since tracking start")
 
     # At least one notification channel
     has_channel = bool(
