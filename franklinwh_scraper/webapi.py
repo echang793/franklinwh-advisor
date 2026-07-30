@@ -472,6 +472,39 @@ def api_auth_status():
     return {"required": bool(_cfg.dashboard_token)}
 
 
+@app.get("/api/attribution", dependencies=_authed)
+def api_attribution(days: int = Query(14, ge=1, le=90)):
+    """Where each day's home load actually came from.
+
+    Paths, not sources: solar_kwh here is *direct* solar→home. Solar that
+    charged the battery and served load after sunset is counted under
+    battery_kwh — the gateway meters the path, not the ultimate origin.
+    """
+    out = []
+    try:
+        with HistoryStore(_OUT / "history.db") as history:
+            today = date.today()
+            for i in range(days - 1, -1, -1):
+                d = today - timedelta(days=i)
+                attr = history.daily_attribution(d.isoformat())
+                if not attr or sum(attr) <= 0:
+                    continue
+                batt, sol, grid = attr
+                total = batt + sol + grid
+                out.append({
+                    "date": d.isoformat(),
+                    "label": d.strftime("%b %-d"),
+                    "battery_kwh": batt,
+                    "solar_kwh": sol,
+                    "grid_kwh": grid,
+                    "total_kwh": round(total, 2),
+                    "self_sufficiency_pct": round((batt + sol) / total * 100, 1),
+                })
+        return {"days": out, "error": False}
+    except Exception:
+        return {"days": [], "error": True}
+
+
 @app.get("/api/savings", dependencies=_authed)
 def api_savings(days: int = Query(30, ge=1, le=365)):
     """What the battery + solar have actually saved over a trailing window.

@@ -768,6 +768,7 @@ def _alert_eod_digest(
             tmrw_solar_str = f"\n☀️ Tomorrow's solar: ~{tmrw_kwh:.1f} kWh ({'cloudy' if cloudy else 'sunny'})"
 
     self_suff_str = ""
+    attribution_str = ""
 
     # Multi-outage-per-day summary — outages_{date} is logged in full by
     # _alert_grid_restored on every restore, not just the most recent one.
@@ -818,8 +819,26 @@ def _alert_eod_digest(
                     peak_total += 1
                     if grid_kw < 0.05:  # <50 W treated as noise, not real grid draw
                         peak_no_grid += 1
-            # Self-sufficiency uses DB-integrated home + grid values
-            if home_kwh > 0:
+            # Self-sufficiency: prefer the gateway's own measured path split
+            # over the derived (home - grid_in)/home. The derived version
+            # counts grid→battery charging as household consumption, so it
+            # under-reports on any day the battery was charged from the grid.
+            attr = store.daily_attribution(today) if store is not None else None
+            if attr and sum(attr) > 0:
+                batt_load, solar_load, grid_load = attr
+                served = batt_load + solar_load + grid_load
+                self_suff     = max(0.0, min(100.0, (batt_load + solar_load) / served * 100))
+                self_suff_str = f"\nSelf-sufficiency:  {self_suff:.0f}%"
+                # Worded as PATHS, not sources: solar_load is *direct*
+                # solar→home only. Solar that charged the battery and served
+                # load at 6pm lands under battery→home, so labelling this
+                # "Solar: 30%" would badly understate solar's real share.
+                attribution_str = (
+                    f"\nServed by:  Battery {batt_load:.1f} ({batt_load / served * 100:.0f}%)"
+                    f"  ·  Solar direct {solar_load:.1f} ({solar_load / served * 100:.0f}%)"
+                    f"  ·  Grid {grid_load:.1f} ({grid_load / served * 100:.0f}%)"
+                )
+            elif home_kwh > 0:
                 self_suff     = max(0.0, min(100.0, (home_kwh - grid_in_kwh) / home_kwh * 100))
                 self_suff_str = f"\nSelf-sufficiency:  {self_suff:.0f}%"
             base_fee = base_service_cost(1)
@@ -868,7 +887,7 @@ def _alert_eod_digest(
         f"Grid out: {grid_out_kwh:.1f} kWh\n"
         f"Batt chg: {batt_chg_kwh:.1f} kWh\n"
         f"Batt dis: {batt_dis_kwh:.1f} kWh\n"
-        f"Home:     {home_kwh:.1f} kWh</code>{self_suff_str}{peak_cov_str}{tou_str}{outage_str}\n"
+        f"Home:     {home_kwh:.1f} kWh</code>{attribution_str}{self_suff_str}{peak_cov_str}{tou_str}{outage_str}\n"
         f"<code>─────────────────────</code>\n"
         f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{precharge_str}"
     )

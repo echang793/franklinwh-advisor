@@ -1759,3 +1759,62 @@ def test_critical_soc_still_fires_in_the_evening(monkeypatch):
     rec = advisor.recommend(stats, outlook=outlook, forecast=fc, battery_capacity_kwh=13.6)
     assert rec.mode is advisor.Mode.EMERGENCY_BACKUP
     assert rec.urgency == "critical"
+
+
+def _digest_stats(soc=55.0):
+    import types
+    return types.SimpleNamespace(
+        current=types.SimpleNamespace(battery_soc_pct=soc),
+        totals=types.SimpleNamespace(
+            solar_kwh=0.0, battery_charge_kwh=0.0, battery_discharge_kwh=0.0,
+            grid_load_kwh=2.0, grid_export_kwh=0.0, home_use_kwh=10.0,
+        ),
+    )
+
+
+class _AttrStore:
+    """Minimal store exposing just what the EOD digest touches."""
+    def __init__(self, attr, readings=None):
+        self._attr = attr
+        self._readings = readings or []
+    def daily_solar_kwh_api(self, d): return 0.0
+    def daily_solar_kwh(self, d): return 0.0
+    def daily_battery_kwh(self, d): return (0.0, 0.0)
+    def weekly_readings(self, s, e): return self._readings
+    def daily_attribution(self, d): return self._attr
+    def soc_near(self, ts): return None
+
+
+def test_eod_digest_uses_measured_attribution_for_self_sufficiency():
+    """Derived (home - grid_in)/home counts grid->battery charging as
+    household consumption, so it under-reports on any grid-charge day. The
+    measured path split doesn't."""
+    now = datetime.now().replace(hour=21, minute=30, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    readings = [(f"{today}T{h:02d}:00:00", 0.5, 1.0, 0.0) for h in range(0, 20, 2)]
+    store = _AttrStore(attr=(8.2, 5.1, 0.9), readings=readings)
+
+    msg = alerts._alert_eod_digest({}, today, now, _digest_stats(), Config(),
+                                   None, None, store)
+    assert msg is not None
+    assert "Served by:" in msg
+    assert "Battery 8.2" in msg
+    assert "Solar direct" in msg          # paths, not sources
+    # (8.2 + 5.1) / 14.2 = 93.7% -> 94%
+    assert "Self-sufficiency:  94%" in msg
+
+
+def test_eod_digest_falls_back_when_attribution_absent():
+    """Pre-migration days have all-zero columns — must fall back to the
+    derived formula rather than reporting a bogus 0%."""
+    now = datetime.now().replace(hour=21, minute=30, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    readings = [(f"{today}T{h:02d}:00:00", 0.5, 1.0, 0.0) for h in range(0, 20, 2)]
+
+    for attr in (None, (0.0, 0.0, 0.0)):
+        msg = alerts._alert_eod_digest({}, today, now, _digest_stats(),
+                                       Config(), None, None,
+                                       _AttrStore(attr=attr, readings=readings))
+        assert msg is not None
+        assert "Served by:" not in msg
+        assert "Self-sufficiency:" in msg   # still reported, via the fallback
