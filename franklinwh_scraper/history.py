@@ -26,7 +26,12 @@ CREATE TABLE IF NOT EXISTS readings (
     grid_use_kw      REAL    NOT NULL,
     grid_status      TEXT    NOT NULL,
     solar_total_kwh  REAL    NOT NULL DEFAULT 0,
-    battery_use_kw   REAL    NOT NULL DEFAULT 0
+    battery_use_kw   REAL    NOT NULL DEFAULT 0,
+    -- Cumulative daily counters (like solar_total_kwh, they reset at midnight)
+    -- for the three paths that serve home load. See Totals in account.py.
+    battery_load_kwh REAL    NOT NULL DEFAULT 0,
+    solar_load_kwh   REAL    NOT NULL DEFAULT 0,
+    grid_load_kwh    REAL    NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_slot ON readings(day_of_week, hour_of_day);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON readings(timestamp);
@@ -37,6 +42,9 @@ CREATE INDEX IF NOT EXISTS idx_timestamp ON readings(timestamp);
 _MIGRATIONS = [
     "ALTER TABLE readings ADD COLUMN solar_total_kwh REAL NOT NULL DEFAULT 0;",
     "ALTER TABLE readings ADD COLUMN battery_use_kw REAL NOT NULL DEFAULT 0;",
+    "ALTER TABLE readings ADD COLUMN battery_load_kwh REAL NOT NULL DEFAULT 0;",
+    "ALTER TABLE readings ADD COLUMN solar_load_kwh REAL NOT NULL DEFAULT 0;",
+    "ALTER TABLE readings ADD COLUMN grid_load_kwh REAL NOT NULL DEFAULT 0;",
 ]
 
 
@@ -132,8 +140,9 @@ class HistoryStore:
             INSERT INTO readings
               (timestamp, day_of_week, hour_of_day,
                home_load_kw, solar_kw, battery_soc, grid_use_kw, grid_status,
-               solar_total_kwh, battery_use_kw)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+               solar_total_kwh, battery_use_kw,
+               battery_load_kwh, solar_load_kwh, grid_load_kwh)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 now.isoformat(),
@@ -146,6 +155,9 @@ class HistoryStore:
                 stats.current.grid_status,
                 stats.totals.solar_kwh,
                 stats.current.battery_use_kw,
+                stats.totals.battery_load_kwh,
+                stats.totals.solar_load_kwh,
+                stats.totals.grid_load_kwh,
             ),
         )
         self._conn.commit()
@@ -238,6 +250,48 @@ class HistoryStore:
                 logger.info("Mid-day solar counter reset detected for %s — using trapezoidal fallback", date_str)
                 return self.daily_solar_kwh(date_str)
         return round(max(values), 2)
+
+    def daily_attribution(self, date_str: str) -> tuple[float, float, float] | None:
+        """Return (battery→home, solar→home, grid→home) kWh for a calendar date.
+
+        These are cumulative daily counters that reset at midnight, same as
+        solar_total_kwh, so the day's total is normally just the final value.
+        A gateway reboot can also reset them mid-day, which a naive MAX()
+        would silently under-report.
+
+        Unlike daily_solar_kwh_api there is no instantaneous-kW series to fall
+        back on for these paths, so on a detected reset we sum the peak of
+        each monotonic run instead. Monotonicity is checked on the *sum* of
+        the three, since they reset together.
+
+        Returns None when there are no readings for that date.
+        """
+        rows = self._conn.execute(
+            "SELECT battery_load_kwh, solar_load_kwh, grid_load_kwh FROM readings "
+            "WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+            (date_str, _next_day(date_str)),
+        ).fetchall()
+        triples = [
+            (float(r[0] or 0.0), float(r[1] or 0.0), float(r[2] or 0.0))
+            for r in rows
+        ]
+        if not triples:
+            return None
+
+        segments: list[list[tuple[float, float, float]]] = [[]]
+        prev_total = None
+        for t in triples:
+            total = sum(t)
+            if prev_total is not None and total < prev_total - self._RESET_TOLERANCE_KWH:
+                logger.info("Mid-day attribution counter reset detected for %s", date_str)
+                segments.append([])
+            segments[-1].append(t)
+            prev_total = total
+
+        batt = sum(max((s[0] for s in seg), default=0.0) for seg in segments if seg)
+        sol  = sum(max((s[1] for s in seg), default=0.0) for seg in segments if seg)
+        grid = sum(max((s[2] for s in seg), default=0.0) for seg in segments if seg)
+        return round(batt, 2), round(sol, 2), round(grid, 2)
 
     def daily_battery_kwh(self, date_str: str) -> tuple[float, float]:
         """Return (charge_kwh, discharge_kwh) for a calendar date via trapezoidal integration.
@@ -594,6 +648,7 @@ class HistoryStore:
                    day_of_week, hour_of_day,
                    AVG(home_load_kw), AVG(solar_kw), AVG(battery_soc),
                    AVG(grid_use_kw), MAX(solar_total_kwh), AVG(battery_use_kw),
+                   MAX(battery_load_kwh), MAX(solar_load_kwh), MAX(grid_load_kwh),
                    COUNT(*), MIN(timestamp)
             FROM readings
             WHERE timestamp < ?
@@ -603,19 +658,26 @@ class HistoryStore:
             (cutoff,),
         ).fetchall()
         removed = 0
-        for (bucket, dow, hod, load, solar, soc, grid, total, batt, cnt, first_ts) in buckets:
+        # Every column must be listed in the INSERT below — anything omitted
+        # is silently reset to its DEFAULT 0 when a bucket is rolled up.
+        # MAX (not AVG) for the cumulative daily counters, matching
+        # solar_total_kwh.
+        for (bucket, dow, hod, load, solar, soc, grid, total, batt,
+             batt_load, solar_load, grid_load, cnt, first_ts) in buckets:
             self._conn.execute("DELETE FROM readings WHERE substr(timestamp,1,13) = ?", (bucket,))
             self._conn.execute(
                 "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
-                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (first_ts, dow, hod, load, solar, soc, grid, "normal", total, batt),
+                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw,"
+                "battery_load_kwh,solar_load_kwh,grid_load_kwh) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (first_ts, dow, hod, load, solar, soc, grid, "normal", total, batt,
+                 batt_load, solar_load, grid_load),
             )
             removed += cnt - 1
         if buckets:
             self._conn.commit()
             logger.info("Rolled up %d old readings into %d hourly buckets (%d rows removed)",
-                       sum(b[9] for b in buckets), len(buckets), removed)
+                       sum(b[12] for b in buckets), len(buckets), removed)
         return removed
 
     def close(self) -> None:

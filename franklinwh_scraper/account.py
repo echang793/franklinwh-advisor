@@ -62,6 +62,14 @@ class Totals:
     solar_kwh: float              # kwh_sun
     generator_kwh: float          # kwh_gen
     home_use_kwh: float           # (kwhFhpLoad+kwhSolarLoad+kwhGridLoad)/1000 — matches app
+    # The three paths that make up home_use_kwh. The API has always returned
+    # these separately; they used to be summed and the split discarded.
+    # Defaults keep existing keyword construction (tests, fallbacks) valid.
+    # NB these are *paths*, not sources: solar_load_kwh is direct solar→home
+    # only — solar that charged the battery and served load later counts
+    # under battery_load_kwh.
+    battery_load_kwh: float = 0.0  # kwhFhpLoad/1000 — battery→home
+    solar_load_kwh: float = 0.0    # kwhSolarLoad/1000 — solar→home, direct
 
 
 @dataclass
@@ -301,6 +309,8 @@ class AccountClient:
             solar_kwh=data.get("kwh_sun", 0.0),
             generator_kwh=data.get("kwh_gen", 0.0),
             home_use_kwh=(data.get("kwhFhpLoad", 0) + data.get("kwhSolarLoad", 0) + data.get("kwhGridLoad", 0)) / 1000.0,
+            battery_load_kwh=data.get("kwhFhpLoad", 0) / 1000.0,
+            solar_load_kwh=data.get("kwhSolarLoad", 0) / 1000.0,
         )
         return Stats(
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),

@@ -1133,3 +1133,57 @@ def test_get_switch_usage_survives_non_json_data_area(monkeypatch):
         lambda *a, **k: {"code": 200, "result": {"dataArea": "<not json>"}},
     )
     assert client.get_switch_usage("gw1") == {"_raw": "<not json>"}
+
+
+# ── Energy attribution (battery/solar/grid → home) ────────────────────
+
+def _insert_attr_row(db, ts, batt, sol, grid, dow=0, hod=12):
+    db._conn.execute(
+        "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+        "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw,"
+        "battery_load_kwh,solar_load_kwh,grid_load_kwh) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (ts, dow, hod, 1.0, 0.0, 50.0, 0.0, "normal", 0.0, 0.0, batt, sol, grid),
+    )
+
+
+def test_daily_attribution_sums_components(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    _insert_attr_row(db, "2026-05-01T08:00:00", 1.0, 2.0, 0.5)
+    _insert_attr_row(db, "2026-05-01T12:00:00", 3.0, 5.0, 0.9)
+    _insert_attr_row(db, "2026-05-01T20:00:00", 8.2, 5.1, 0.9)
+    db._conn.commit()
+    assert db.daily_attribution("2026-05-01") == (8.2, 5.1, 0.9)
+    assert db.daily_attribution("2026-05-02") is None  # no rows for that date
+
+
+def test_daily_attribution_handles_midday_counter_reset(tmp_path):
+    """A gateway reboot resets the counters mid-day; a naive MAX() would drop
+    everything before the reset. Sum the peak of each monotonic run instead."""
+    db = HistoryStore(tmp_path / "h.db")
+    _insert_attr_row(db, "2026-05-01T08:00:00", 2.0, 1.0, 0.0)
+    _insert_attr_row(db, "2026-05-01T12:00:00", 4.0, 3.0, 1.0)   # pre-reset peak
+    _insert_attr_row(db, "2026-05-01T13:00:00", 0.5, 0.2, 0.0)   # reset
+    _insert_attr_row(db, "2026-05-01T20:00:00", 1.5, 1.0, 0.5)   # post-reset peak
+    db._conn.commit()
+    # Naive MAX would give (4.0, 3.0, 1.0); piecewise gives the real day total.
+    assert db.daily_attribution("2026-05-01") == (5.5, 4.0, 1.5)
+
+
+def test_rollup_preserves_attribution_columns(tmp_path):
+    """rollup_old_readings' INSERT lists columns explicitly — any column left
+    out is silently reset to DEFAULT 0 when a bucket is rolled up."""
+    db = HistoryStore(tmp_path / "h.db")
+    old_day = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+    for minute, batt in ((0, 3.0), (15, 4.0), (30, 5.0)):
+        _insert_attr_row(db, f"{old_day}T09:{minute:02d}:00", batt, batt / 2, 1.0, dow=2, hod=9)
+    db._conn.commit()
+
+    removed = db.rollup_old_readings(older_than_days=180)
+    assert removed == 2  # 3 rows collapse to 1
+
+    row = db._conn.execute(
+        "SELECT battery_load_kwh, solar_load_kwh, grid_load_kwh FROM readings "
+        "WHERE timestamp LIKE ?", (f"{old_day}%",)
+    ).fetchone()
+    assert row == (5.0, 2.5, 1.0)  # MAX of the bucket, not zeroed
