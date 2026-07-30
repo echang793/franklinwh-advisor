@@ -1233,8 +1233,11 @@ def cmd_advise(
                 )
 
                 if _chatbot is not None:
+                    # rec too: without it the bot answers "should I switch
+                    # modes?" from raw telemetry and can contradict the
+                    # recommendation the user was just alerted about.
                     _chatbot.update_state(stats, history, outlook, system_peak_kw, perf_ratio,
-                                          usage_forecast=usage_forecast)
+                                          usage_forecast=usage_forecast, rec=rec)
 
                 # Home Assistant webhook state push
                 if getattr(cfg, "ha_webhook_url", ""):

@@ -53,8 +53,15 @@ answer first. Use the system data block at the start of each message.
 """
 
 
-def build_context(stats, history, outlook, cfg) -> str:
-    """Snapshot of current system state, injected as user-message context."""
+def build_context(stats, history, outlook, cfg, *, rec=None, forecast=None,
+                  outdir=None) -> str:
+    """Snapshot of current system state, injected as user-message context.
+
+    The extras are keyword-only with defaults so existing callers keep
+    working. They exist because the model previously couldn't see the
+    advisor's own recommendation, the forecast, or any recent alert — so it
+    could confidently contradict the alert the user had just received.
+    """
 
     now   = datetime.now()
     lines = [f"[System snapshot — {now.strftime('%-I:%M %p')}]"]
@@ -128,6 +135,68 @@ def build_context(stats, history, outlook, cfg) -> str:
         except Exception:
             pass
 
+    # The advisor's own current call. Highest-value addition: without it the
+    # bot answers "should I switch modes?" from raw telemetry and can
+    # contradict the recommendation the user was just alerted about.
+    if rec is not None:
+        try:
+            mode = getattr(getattr(rec, "mode", None), "value", "")
+            if mode:
+                lines.append(f"  Advisor says:  {mode} ({rec.urgency})")
+                reason = (rec.reason or "").split("\n")[0].strip()
+                if reason:
+                    lines.append(f"  Because:       {reason[:110]}")
+            d = getattr(rec, "details", None) or {}
+            soc4 = d.get("projected_soc_4pm_pct")
+            draw = d.get("projected_peak_draw_kwh")
+            if soc4 is not None and draw is not None:
+                lines.append(f"  Projected 4pm: {soc4:.0f}% SoC · peak draw ~{draw:.1f} kWh")
+        except Exception:
+            pass
+
+    # Aggregated, never enumerated — 24 hourly rows would dominate the
+    # context window for very little added signal.
+    if forecast is not None and getattr(forecast, "hours", None):
+        try:
+            nxt = [h for h in forecast.hours if h.dt > now][:6]
+            if nxt:
+                s6 = sum(h.predicted_solar_kw for h in nxt)
+                l6 = sum(h.predicted_load_kw for h in nxt)
+                lines.append(
+                    f"  Next 6h:       solar ~{s6:.1f} kWh, load ~{l6:.1f} kWh "
+                    f"(net {s6 - l6:+.1f}) [{forecast.confidence}, {forecast.data_days}d]"
+                )
+            rest = [h for h in forecast.hours if h.dt > now and h.dt.date() == now.date()]
+            if rest:
+                lines.append(f"  Rest of today: solar ~{sum(h.predicted_solar_kw for h in rest):.1f} kWh")
+        except Exception:
+            pass
+
+    # Recent alerts, so the bot knows what the user was just told. Tail the
+    # log rather than reading it whole — same seek-from-end trick webapi uses.
+    if outdir is not None:
+        try:
+            from pathlib import Path
+            p = Path(outdir) / "alerts_log.jsonl"
+            with open(p, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 4096))
+                tail = f.read().decode(errors="replace").strip().splitlines()
+            recent = []
+            for ln in tail[-3:]:
+                try:
+                    a = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                body = re.sub(r"<[^>]+>", "", a.get("body", "")).split("\n")[0].strip()
+                if body:
+                    recent.append(body[:60])
+            if recent:
+                lines.append("  Recent alerts:")
+                lines += [f"    · {b}" for b in recent]
+        except (OSError, ValueError):
+            pass
+
     capacity = getattr(cfg, "battery_capacity_kwh", 13.6)
     location = getattr(cfg, "location_name", "")
     loc_str  = f", {location}" if location else ""
@@ -162,6 +231,7 @@ class TelegramChatBot:
         self._system_peak_kw: float | None = None
         self._perf_ratio: float = 1.0
         self._usage_forecast = None
+        self._rec            = None
         self._call_count_date: str = ""
         self._call_count: int = 0
 
@@ -190,7 +260,7 @@ class TelegramChatBot:
     def update_state(self, stats, history_store, outlook,
                      system_peak_kw: float | None = None,
                      perf_ratio: float = 1.0,
-                     usage_forecast=None) -> None:
+                     usage_forecast=None, rec=None) -> None:
         with self._lock:
             self._stats          = stats
             self._hist_store     = history_store
@@ -198,6 +268,7 @@ class TelegramChatBot:
             self._system_peak_kw = system_peak_kw
             self._perf_ratio     = perf_ratio
             self._usage_forecast = usage_forecast
+            self._rec            = rec
 
     def run(self) -> None:
         logger.info("Telegram chatbot started")
@@ -366,13 +437,17 @@ class TelegramChatBot:
     def _send_status(self, chat_id: str) -> None:
         try:
             with self._lock:
-                stats   = self._stats
-                store   = self._hist_store
-                outlook = self._outlook
+                stats    = self._stats
+                store    = self._hist_store
+                outlook  = self._outlook
+                rec      = self._rec
+                forecast = self._usage_forecast
             if stats is None:
                 self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
                 return
-            self._send(chat_id, build_context(stats, store, outlook, self._cfg))
+            self._send(chat_id, build_context(stats, store, outlook, self._cfg,
+                                              rec=rec, forecast=forecast,
+                                              outdir=self._outdir))
         except Exception as e:
             logger.warning("_send_status error: %s", e)
             self._send(chat_id, f"Error fetching status: {e}")
@@ -604,13 +679,16 @@ class TelegramChatBot:
     def _handle(self, chat_id: str, text: str) -> None:
         try:
             with self._lock:
-                stats   = self._stats
-                store   = self._hist_store
-                outlook = self._outlook
+                stats    = self._stats
+                store    = self._hist_store
+                outlook  = self._outlook
+                rec      = self._rec
+                forecast = self._usage_forecast
             if not self._under_daily_cap():
                 self._send(chat_id, f"Daily question limit ({_DAILY_CALL_CAP}) reached — try again tomorrow.")
                 return
-            ctx    = build_context(stats, store, outlook, self._cfg)
+            ctx    = build_context(stats, store, outlook, self._cfg,
+                                   rec=rec, forecast=forecast, outdir=self._outdir)
             backend = getattr(self._cfg, "chat_backend", "anthropic")
             if backend == "ollama":
                 reply = self._call_ollama(chat_id, text, ctx)

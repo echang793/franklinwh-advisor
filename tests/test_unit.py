@@ -1518,3 +1518,71 @@ def test_baseline_uses_percentile_not_min(tmp_path):
     db._conn.commit()
     # min() would collapse to 0.01 and suppress the alert; the percentile holds.
     assert alerts._alert_baseline_load_drift({}, now.strftime("%Y-%m-%d"), now, db, Config()) is not None
+
+
+# ── Chatbot context enrichment ────────────────────────────────────────
+
+def test_build_context_includes_recommendation_and_forecast(tmp_path):
+    """The bot must see the advisor's own call — otherwise it answers
+    'should I switch modes?' from raw telemetry and can contradict the alert
+    the user just received."""
+    import types
+    from franklinwh_scraper.chatbot import build_context
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime.now()
+    c = types.SimpleNamespace(
+        battery_soc_pct=42.0, solar_production_kw=1.0, home_load_kw=2.0,
+        grid_use_kw=0.5, grid_status="normal", battery_use_kw=1.0,
+    )
+    stats = types.SimpleNamespace(current=c, totals=types.SimpleNamespace(solar_kwh=5.0))
+    rec = types.SimpleNamespace(
+        mode=types.SimpleNamespace(value="emergency_backup"),
+        urgency="warning",
+        reason="Projected shortfall before the 4pm peak.",
+        details={"projected_soc_4pm_pct": 38.0, "projected_peak_draw_kwh": 4.2},
+    )
+    hours = [HourPrediction(dt=now + timedelta(hours=i), predicted_load_kw=1.0,
+                            predicted_solar_kw=2.0, net_kw=1.0, confidence="high")
+             for i in range(1, 9)]
+    fc = UsageForecast(hours=hours, total_load_kwh=8.0, total_solar_kwh=16.0,
+                       net_kwh=8.0, peak_load_kw=1.0, confidence="high", data_days=30)
+
+    ctx = build_context(stats, None, None, Config(), rec=rec, forecast=fc, outdir=tmp_path)
+    assert "emergency_backup" in ctx
+    assert "Projected shortfall" in ctx
+    assert "Projected 4pm" in ctx
+    assert "Next 6h" in ctx
+    # Guard against context bloat creeping back — this is prepended to every
+    # Claude call, and the forecast must stay aggregated, not enumerated.
+    assert len(ctx.split("\n")) <= 26
+
+
+def test_build_context_survives_missing_alert_log(tmp_path):
+    """A missing/unreadable alert log must not break /status."""
+    import types
+    from franklinwh_scraper.chatbot import build_context
+
+    c = types.SimpleNamespace(
+        battery_soc_pct=50.0, solar_production_kw=0.0, home_load_kw=1.0,
+        grid_use_kw=0.0, grid_status="normal", battery_use_kw=0.0,
+    )
+    stats = types.SimpleNamespace(current=c, totals=types.SimpleNamespace(solar_kwh=0.0))
+    ctx = build_context(stats, None, None, Config(), outdir=tmp_path / "nonexistent")
+    assert "System snapshot" in ctx
+    assert "Recent alerts" not in ctx
+
+
+def test_build_context_backward_compatible_without_extras():
+    """Existing positional call sites must keep working."""
+    import types
+    from franklinwh_scraper.chatbot import build_context
+
+    c = types.SimpleNamespace(
+        battery_soc_pct=50.0, solar_production_kw=0.0, home_load_kw=1.0,
+        grid_use_kw=0.0, grid_status="normal", battery_use_kw=0.0,
+    )
+    stats = types.SimpleNamespace(current=c, totals=types.SimpleNamespace(solar_kwh=0.0))
+    ctx = build_context(stats, None, None, Config())
+    assert "System snapshot" in ctx
+    assert "Advisor says" not in ctx
