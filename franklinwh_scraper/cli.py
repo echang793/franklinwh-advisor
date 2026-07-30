@@ -893,6 +893,88 @@ def cmd_stats(ctx: click.Context, email: str | None, password: str | None,
     _write([stats.to_flat_dict()], Path(out) / "stats", fmt)
 
 
+@grp_account.command("probe-switches", hidden=True)
+@click.option("--email",    envvar="FRANKLINWH_EMAIL",    default=None)
+@click.option("--password", envvar="FRANKLINWH_PASSWORD", default=None, hide_input=True)
+@click.option("--gateway",  envvar="FRANKLINWH_GATEWAY",  default=None)
+@click.option("--out", "-o", default="output", show_default=True)
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print the MQTT envelope that would be sent and exit, without sending.")
+@click.pass_context
+def cmd_probe_switches(ctx: click.Context, email: str | None, password: str | None,
+                       gateway: str | None, out: str, dry_run: bool) -> None:
+    """Diagnostic: dump the smart-circuit (MQTT cmd 353) response shape.
+
+    Read-only. cmd 353 with opt:0 is a query — it ran on every get_stats()
+    poll in production until it was removed purely as a cost optimization
+    (the result was never read). No write command exists in this client.
+
+    Used to determine whether this account has smart circuits installed and,
+    if so, what the undocumented response looks like — the full response is
+    written to output/ (gitignored) because circuit names are personal data.
+    """
+    cfg = ctx.obj["config"]
+    email    = email    or cfg.email
+    password = password or cfg.password
+    gateway  = gateway  or cfg.gateway or None
+    if not email or not password:
+        raise click.ClickException("Run 'setup' first, or set FRANKLINWH_EMAIL / FRANKLINWH_PASSWORD.")
+
+    _header("Smart-circuit probe (MQTT cmd 353)")
+    with AccountClient(email, password) as client:
+        gateway = _resolve_gateway(client, gateway)
+
+        if dry_run:
+            envelope = client._build_mqtt_payload(353, {"opt": 0, "order": gateway}, gateway)
+            click.echo("  Would POST this envelope (nothing sent):")
+            click.echo()
+            click.echo(f"  {envelope}")
+            return
+
+        try:
+            result = client.get_switch_usage(gateway)
+        except TimeoutError as e:
+            _warn(f"Device timeout: {e}")
+            _info("Gateway was busy or asleep — INCONCLUSIVE, not evidence that")
+            _info("smart circuits are absent. Retry while the app shows it online.")
+            return
+        except ConnectionError as e:
+            _err(f"Gateway offline: {e}")
+            return
+        except RuntimeError as e:
+            _err(str(e))
+            _info("An 'unsupported command' code here is the real signal that")
+            _info("this gateway has no smart circuits.")
+            return
+
+    click.echo(f"  Python type : {type(result).__name__}")
+    if isinstance(result, dict):
+        click.echo(f"  Top-level keys: {sorted(result.keys()) or '(none)'}")
+        for k, v in result.items():
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                click.echo(f"  First element of {k!r}: {sorted(v[0].keys())}  ({len(v)} entries)")
+    elif isinstance(result, list):
+        click.echo(f"  List length : {len(result)}")
+        if result and isinstance(result[0], dict):
+            click.echo(f"  First element keys: {sorted(result[0].keys())}")
+    _hr()
+
+    if not result:
+        _warn("Empty response — the gateway answered but reported nothing.")
+        _info("Confirm on a second, separate day before concluding that no")
+        _info("smart circuits are installed.")
+        return
+
+    click.echo(json.dumps(result, indent=2)[:4000])
+    outdir = Path(out)
+    outdir.mkdir(parents=True, exist_ok=True)
+    dest = outdir / f"switch_probe_{datetime.now().strftime('%Y%m%dT%H%M%S')}.json"
+    dest.write_text(json.dumps(result, indent=2))
+    _hr()
+    _ok(f"Full response written to {dest}")
+    _warn("Contains circuit names (personal data) — do not commit it.")
+
+
 @grp_account.command("poll")
 @click.option("--email",    envvar="FRANKLINWH_EMAIL",    default=None)
 @click.option("--password", envvar="FRANKLINWH_PASSWORD", default=None, hide_input=True)

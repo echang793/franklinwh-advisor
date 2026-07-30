@@ -231,10 +231,27 @@ class AccountClient:
         return js.get("result", {})
 
     def get_switch_usage(self, gateway: str) -> dict[str, Any]:
-        """Get real-time smart-circuit load data via MQTT cmd 353."""
+        """Get real-time smart-circuit load data via MQTT cmd 353.
+
+        A read (opt: 0 is a query, and 353 is the only cmdType this client
+        speaks). Returns {} when the gateway answers 200 with no result /
+        no dataArea — an account with no smart circuits installed is the
+        expected case, and it should read as "nothing to report" rather
+        than raising a bare KeyError.
+        """
         payload = self._build_mqtt_payload(353, {"opt": 0, "order": gateway}, gateway)
-        data_area = self._mqtt_send(payload, gateway)["result"]["dataArea"]
-        return json.loads(data_area)
+        result = self._mqtt_send(payload, gateway).get("result") or {}
+        data_area = result.get("dataArea")
+        if not data_area:
+            return {}
+        try:
+            return json.loads(data_area)
+        except (json.JSONDecodeError, TypeError):
+            # Surface whatever came back rather than discarding it — the
+            # response shape here is undocumented, so an unexpected encoding
+            # is a finding, not a failure.
+            logger.warning("Smart-switch dataArea was not JSON: %r", str(data_area)[:200])
+            return {"_raw": data_area}
 
     def get_stats(self, gateway: str, _empty_retries: int = 2) -> Stats:
         """Get instantaneous + daily total stats for a gateway."""

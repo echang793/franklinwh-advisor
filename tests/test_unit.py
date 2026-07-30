@@ -1107,3 +1107,29 @@ def test_chatbot_history_uses_outdir_override(tmp_path):
     bot._send_history("123")
     # Must have looked in real_dir (no db there), not cfg_dir (db present).
     assert sent and "No history database yet" in sent[0]
+
+
+def test_get_switch_usage_survives_missing_result(monkeypatch):
+    """An account with no smart circuits can get a 200 with no result/dataArea
+    — that must read as 'nothing to report', not a bare KeyError."""
+    from franklinwh_scraper.account import AccountClient
+
+    client = AccountClient("a@b.c", "pw")
+    monkeypatch.setattr(client, "_mqtt_send", lambda *a, **k: {"code": 200})
+    assert client.get_switch_usage("gw1") == {}
+
+    monkeypatch.setattr(client, "_mqtt_send", lambda *a, **k: {"code": 200, "result": {}})
+    assert client.get_switch_usage("gw1") == {}
+
+
+def test_get_switch_usage_survives_non_json_data_area(monkeypatch):
+    """The response shape is undocumented — a non-JSON dataArea should be
+    surfaced for inspection, not swallowed or raised."""
+    from franklinwh_scraper.account import AccountClient
+
+    client = AccountClient("a@b.c", "pw")
+    monkeypatch.setattr(
+        client, "_mqtt_send",
+        lambda *a, **k: {"code": 200, "result": {"dataArea": "<not json>"}},
+    )
+    assert client.get_switch_usage("gw1") == {"_raw": "<not json>"}
