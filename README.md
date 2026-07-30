@@ -2,7 +2,8 @@
 
 Get smart alerts about your FranklinWH home battery system — right on your phone.
 
-No dashboard to check. No logging in. Just a message when something needs your attention.
+No logging in, no app to babysit — just a message when something needs your
+attention. A local dashboard is there when you do want the detail.
 
 ---
 
@@ -195,6 +196,30 @@ launchctl stop com.franklinwh.advisor && launchctl start com.franklinwh.advisor
 ```
 
 Settings in `~/.franklinwh.json` are kept — nothing to re-configure.
+
+---
+
+## Live dashboard
+
+Alerts cover the moments that need you. When you want the whole picture —
+live energy flow, forecast, bill projection, savings, battery health — run:
+
+```bash
+python3 scrape.py dashboard
+```
+
+Then open **http://127.0.0.1:8093**.
+
+To have it start automatically on login alongside the advisor:
+
+```bash
+python3 scrape.py install-service --dashboard
+```
+
+It binds to `127.0.0.1` (this machine only) by default. The `/api/*` routes
+expose live household load and billing data, so if you bind it to a LAN
+address the command will refuse unless you first set `"dashboard_token"` in
+`~/.franklinwh.json`.
 
 ---
 

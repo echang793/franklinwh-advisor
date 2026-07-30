@@ -44,6 +44,13 @@ app = FastAPI(title="FranklinWH Advisor API", docs_url=None, redoc_url=None)
 
 _cfg     = load_config()
 _ROOT    = Path(__file__).parent.parent
+# static/ now lives inside the package so an installed wheel can actually
+# serve it (setuptools package-data can't reach a top-level directory).
+# The _ROOT fallback keeps a pre-move dev checkout working. _ROOT itself
+# stays as-is — _OUT's relative-path resolution below depends on it.
+_STATIC  = Path(__file__).parent / "static"
+if not (_STATIC / "index.html").exists():
+    _STATIC = _ROOT / "static"
 _OUT     = Path(_cfg.output_dir)
 if not _OUT.is_absolute():
     _OUT = _ROOT / _OUT   # server may be launched from any CWD
@@ -543,4 +550,4 @@ def api_health():
     return data
 
 
-app.mount("/", StaticFiles(directory=_ROOT / "static", html=True), name="static")
+app.mount("/", StaticFiles(directory=_STATIC, html=True), name="static")

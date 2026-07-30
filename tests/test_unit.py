@@ -1818,3 +1818,29 @@ def test_eod_digest_falls_back_when_attribution_absent():
         assert msg is not None
         assert "Served by:" not in msg
         assert "Self-sufficiency:" in msg   # still reported, via the fallback
+
+
+def test_dashboard_static_dir_resolves():
+    """The static move into the package is the one change that can silently
+    404 the whole page — pin that it resolves and contains index.html."""
+    from franklinwh_scraper import webapi
+    assert (webapi._STATIC / "index.html").exists(), \
+        f"index.html not found under {webapi._STATIC}"
+
+
+def test_dashboard_refuses_public_bind_without_token(monkeypatch):
+    """The /api/* routes expose live load and billing data and have no auth
+    unless dashboard_token is set."""
+    from click.testing import CliRunner
+    from franklinwh_scraper import cli as cli_mod
+
+    called = []
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: called.append(a))
+
+    cfg = Config(email="a@b.c", password="p", lat=32.9, lon=-117.0, dashboard_token="")
+    runner = CliRunner()
+    res = runner.invoke(cli_mod.cli, ["dashboard", "--host", "0.0.0.0"], obj={"config": cfg})
+    assert res.exit_code != 0
+    assert "Refusing to bind" in res.output
+    assert not called, "uvicorn.run must not be reached on a refused bind"

@@ -33,6 +33,10 @@ dependencies = [
     "click>=8.0",
     "beautifulsoup4>=4.11",
     "anthropic>=0.40",
+    # webapi.py imports fastapi at module scope, so an optional extra would
+    # only move the failure rather than avoid it.
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
 ]
 
 [project.optional-dependencies]
@@ -54,3 +58,6 @@ franklinwh = "franklinwh_scraper.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["franklinwh_scraper*"]
+
+[tool.setuptools.package-data]
+franklinwh_scraper = ["static/*"]

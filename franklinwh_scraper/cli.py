@@ -683,6 +683,50 @@ def doctor() -> None:
     click.echo()
 
 
+# ── Dashboard ────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8093, show_default=True, type=int)
+@click.option("--reload", is_flag=True, default=False, hidden=True)
+@click.pass_context
+def dashboard(ctx: click.Context, host: str, port: int, reload: bool) -> None:
+    """Serve the live web dashboard."""
+    cfg = ctx.obj["config"]
+    _require_config(cfg)
+
+    try:
+        import uvicorn
+    except ImportError:
+        raise click.ClickException(
+            "uvicorn is not installed. Run:  pip install 'fastapi' 'uvicorn[standard]'"
+        )
+
+    # The /api/* routes have no auth unless dashboard_token is set (see
+    # webapi.py's module docstring), and they expose live home-occupancy and
+    # billing data. Refuse to put that on a LAN address unguarded.
+    _loopback = host in ("127.0.0.1", "localhost", "::1")
+    if not _loopback and not getattr(cfg, "dashboard_token", ""):
+        raise click.ClickException(
+            f"Refusing to bind {host} without a dashboard_token.\n"
+            "  The /api/* routes expose live load, battery and billing data.\n"
+            '  Set "dashboard_token" in ~/.franklinwh.json first, or bind 127.0.0.1.'
+        )
+
+    _header("FranklinWH Dashboard")
+    _info(f"Serving  http://{host}:{port}")
+    _info(f"Static   {_dashboard_static_dir()}")
+    if not _loopback:
+        _warn("Bound to a non-loopback address — token auth is active.")
+    click.echo()
+    uvicorn.run("franklinwh_scraper.webapi:app", host=host, port=port, reload=reload)
+
+
+def _dashboard_static_dir() -> Path:
+    from .webapi import _STATIC
+    return _STATIC
+
+
 # ── Start (one-command entry point) ──────────────────────────────────
 
 @cli.command()
@@ -721,8 +765,15 @@ def start(ctx: click.Context) -> None:
 # ── Install macOS LaunchAgent ─────────────────────────────────────────
 
 @cli.command("install-service")
+@click.option("--dashboard", "with_dashboard", is_flag=True, default=False,
+              help="Also install a LaunchAgent for the web dashboard.")
+@click.option("--port", default=8093, show_default=True, type=int,
+              help="Port for the dashboard agent (with --dashboard).")
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite an existing plist (a .bak copy is kept).")
 @click.pass_context
-def cmd_install_service(ctx: click.Context) -> None:
+def cmd_install_service(ctx: click.Context, with_dashboard: bool, port: int,
+                        force: bool) -> None:
     """Install a macOS LaunchAgent so the advisor starts automatically on login."""
     import sys
 
@@ -764,14 +815,70 @@ def cmd_install_service(ctx: click.Context) -> None:
 </plist>"""
 
     plist_dir.mkdir(parents=True, exist_ok=True)
-    plist_path.write_text(plist)
+
+    def _write_plist(path: Path, content: str, name: str) -> bool:
+        """Write, refusing to clobber an existing agent without --force.
+
+        A hand-written plist may differ in interpreter, working directory or
+        log paths; silently replacing it would move the logs out from under
+        the user with no warning.
+        """
+        if path.exists() and not force:
+            _warn(f"{path.name} already exists — not overwriting.")
+            _info("Re-run with --force to replace it (a .bak copy is kept).")
+            return False
+        if path.exists():
+            backup = path.with_suffix(".plist.bak")
+            backup.write_text(path.read_text())
+            _info(f"Backed up existing {name} agent to {backup.name}")
+        path.write_text(content)
+        _ok(f"Written: {path}")
+        return True
 
     _header("LaunchAgent Installed")
-    _ok(f"Written: {plist_path}")
+    wrote_advisor = _write_plist(plist_path, plist, "advisor")
+
+    if with_dashboard:
+        dash_label = "com.franklinwh.dashboard"
+        dash_path  = plist_dir / f"{dash_label}.plist"
+        dash_plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{dash_label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python}</string>
+        <string>{script}</string>
+        <string>dashboard</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>{port}</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{script.parent}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>{log_dir}/dashboard.log</string>
+    <key>StandardErrorPath</key>
+    <string>{log_dir}/dashboard.log</string>
+</dict>
+</plist>"""
+        if _write_plist(dash_path, dash_plist, "dashboard"):
+            _info(f"Dashboard will serve http://127.0.0.1:{port}")
+
     click.echo()
-    _info(f"Load now:    launchctl load {plist_path}")
-    _info(f"Start now:   launchctl start {label}")
-    _info(f"Uninstall:   launchctl unload {plist_path} && rm {plist_path}")
+    if wrote_advisor:
+        _info(f"Load now:    launchctl load {plist_path}")
+        _info(f"Start now:   launchctl start {label}")
+        _info(f"Uninstall:   launchctl unload {plist_path} && rm {plist_path}")
     click.echo()
 
 
