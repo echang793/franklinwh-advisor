@@ -251,6 +251,29 @@ class HistoryStore:
                 return self.daily_solar_kwh(date_str)
         return round(max(values), 2)
 
+    def quiet_hour_loads(self, start_date: str, end_date: str) -> dict[str, list[float]]:
+        """Home load readings during the overnight quiet window, by date.
+
+        Midnight-5am approximates the always-on draw: no solar, and the
+        household is asleep, so what's left is the fridge, networking gear,
+        standby loads and anything accidentally left running. Grouped in
+        Python rather than aggregated in SQL so the caller picks the
+        statistic (see _alert_baseline_load_drift, which uses a percentile
+        rather than a min).
+        """
+        rows = self._conn.execute(
+            "SELECT substr(timestamp,1,10) AS d, home_load_kw FROM readings "
+            "WHERE timestamp >= ? AND timestamp < ? AND hour_of_day IN (0,1,2,3,4) "
+            "ORDER BY timestamp",
+            (start_date, _next_day(end_date)),
+        ).fetchall()
+        out: dict[str, list[float]] = {}
+        for d, kw in rows:
+            if kw is None:
+                continue
+            out.setdefault(d, []).append(float(kw))
+        return out
+
     def grid_charge_days(self, start_date: str, end_date: str) -> set[str]:
         """Dates where the battery was charged from the grid.
 

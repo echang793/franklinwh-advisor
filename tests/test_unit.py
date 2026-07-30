@@ -1431,3 +1431,90 @@ def test_grid_down_dispatches_as_urgent(tmp_path, monkeypatch):
     urgent_bodies = [b for b, u in sent if u]
     assert any("GRID DOWN" in b.upper() for b in urgent_bodies), \
         f"grid_down must dispatch urgent; got {[(b[:40], u) for b, u in sent]}"
+
+
+# ── Baseline / phantom-load drift ─────────────────────────────────────
+
+def _seed_quiet_nights(db, start_day: datetime, n_days: int, kw: float, samples: int = 12):
+    for d in range(n_days):
+        day = start_day + timedelta(days=d)
+        for i in range(samples):
+            ts = day.replace(hour=i % 5, minute=(i * 7) % 60).isoformat()
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (ts, day.weekday(), i % 5, kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+            )
+    db._conn.commit()
+
+
+def test_baseline_load_drift_fires_on_sustained_increase(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now().replace(hour=8, minute=30, second=0, microsecond=0)
+    _seed_quiet_nights(db, now - timedelta(days=75), 55, 0.20)   # baseline window
+    _seed_quiet_nights(db, now - timedelta(days=14), 14, 0.45)   # recent: big jump
+    msg = alerts._alert_baseline_load_drift({}, now.strftime("%Y-%m-%d"), now, db, Config())
+    assert msg is not None
+    assert "crept up" in msg
+    assert "$" in msg          # must quantify
+    assert "at least" in msg   # ...as a floor, not a precise claim
+
+
+def test_baseline_load_drift_silent_on_small_absolute_change(tmp_path):
+    """The gate that stops it crying wolf: a large RELATIVE rise on a tiny
+    baseline is still only a few watts. Real data showed 0.238 -> 0.317 kW
+    (+33%) which is just 79 W — correctly silent."""
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now().replace(hour=8, minute=30, second=0, microsecond=0)
+    _seed_quiet_nights(db, now - timedelta(days=75), 55, 0.12)
+    _seed_quiet_nights(db, now - timedelta(days=14), 14, 0.16)   # +33% but only +0.04 kW
+    assert alerts._alert_baseline_load_drift({}, now.strftime("%Y-%m-%d"), now, db, Config()) is None
+
+
+def test_baseline_load_drift_silent_when_flat(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now().replace(hour=8, minute=30, second=0, microsecond=0)
+    _seed_quiet_nights(db, now - timedelta(days=75), 55, 0.30)
+    _seed_quiet_nights(db, now - timedelta(days=14), 14, 0.30)
+    assert alerts._alert_baseline_load_drift({}, now.strftime("%Y-%m-%d"), now, db, Config()) is None
+
+
+def test_baseline_load_drift_requires_min_samples(tmp_path):
+    """Too few qualifying nights must return None rather than a noisy verdict."""
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now().replace(hour=8, minute=30, second=0, microsecond=0)
+    _seed_quiet_nights(db, now - timedelta(days=75), 55, 0.20)
+    _seed_quiet_nights(db, now - timedelta(days=5), 4, 0.60)   # only 4 recent nights
+    assert alerts._alert_baseline_load_drift({}, now.strftime("%Y-%m-%d"), now, db, Config()) is None
+
+
+def test_baseline_load_drift_dedups_per_iso_week(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now().replace(hour=8, minute=30, second=0, microsecond=0)
+    _seed_quiet_nights(db, now - timedelta(days=75), 55, 0.20)
+    _seed_quiet_nights(db, now - timedelta(days=14), 14, 0.45)
+    state = {}
+    first = alerts._alert_baseline_load_drift(state, now.strftime("%Y-%m-%d"), now, db, Config())
+    second = alerts._alert_baseline_load_drift(state, now.strftime("%Y-%m-%d"), now, db, Config())
+    assert first is not None and second is None
+
+
+def test_baseline_uses_percentile_not_min(tmp_path):
+    """A single spurious near-zero reading must not define the night."""
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now().replace(hour=8, minute=30, second=0, microsecond=0)
+    _seed_quiet_nights(db, now - timedelta(days=75), 55, 0.20)
+    _seed_quiet_nights(db, now - timedelta(days=14), 14, 0.45)
+    # Inject one 0.01 kW glitch into each recent night.
+    for d in range(14):
+        day = (now - timedelta(days=14) + timedelta(days=d)).replace(hour=3, minute=59)
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (day.isoformat(), day.weekday(), 3, 0.01, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+        )
+    db._conn.commit()
+    # min() would collapse to 0.01 and suppress the alert; the percentile holds.
+    assert alerts._alert_baseline_load_drift({}, now.strftime("%Y-%m-%d"), now, db, Config()) is not None

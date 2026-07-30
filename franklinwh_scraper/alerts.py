@@ -1422,6 +1422,94 @@ def _alert_solar_degradation(state: dict, today: str, now: datetime) -> str | No
     )
 
 
+_BASELINE_DRIFT_REL = 1.25   # recent must be >= 25% above baseline
+_BASELINE_DRIFT_ABS = 0.10   # ...AND at least this many kW above it
+_BASELINE_MIN_SAMPLES_PER_NIGHT = 8
+_BASELINE_PCTL = 0.20        # 20th percentile of a night's readings
+
+
+def _pctl(values: list[float], q: float) -> float:
+    """Nearest-rank percentile. Small samples here, so no interpolation."""
+    if not values:
+        return 0.0
+    s = sorted(values)
+    idx = max(0, min(len(s) - 1, int(round(q * (len(s) - 1)))))
+    return s[idx]
+
+
+def _alert_baseline_load_drift(state: dict, today: str, now: datetime, store, cfg: Config) -> str | None:
+    """Morning check: the household's always-on draw creeping upward.
+
+    There are watchdogs for generation (solar degradation) and for storage
+    (capacity fade) but none for consumption, so a fridge that started
+    short-cycling or a space heater left running in a spare room shows up
+    only as a vaguely higher bill.
+
+    Uses the 20th percentile of each night's midnight-5am readings rather
+    than the minimum: one spurious low sample shouldn't define the night.
+    Windows deliberately match _alert_capacity_fade (recent 14d vs 21-75d
+    back) — both sit inside the un-rolled-up region, since
+    rollup_old_readings averages to hourly past 180 days, which would flatten
+    the overnight trough this depends on.
+    """
+    if now.hour not in (8, 9) or store is None:
+        return None
+    week_key = now.strftime("%G-W%V")
+    if state.get("baseline_load_drift_alerted_week") == week_key:
+        return None
+
+    today_str    = now.date().strftime("%Y-%m-%d")
+    recent_start = (now.date() - timedelta(days=14)).strftime("%Y-%m-%d")
+    base_start   = (now.date() - timedelta(days=75)).strftime("%Y-%m-%d")
+    base_end     = (now.date() - timedelta(days=21)).strftime("%Y-%m-%d")
+
+    def _nightly(by_date: dict[str, list[float]]) -> list[float]:
+        return [
+            _pctl(vals, _BASELINE_PCTL)
+            for vals in by_date.values()
+            if len(vals) >= _BASELINE_MIN_SAMPLES_PER_NIGHT
+        ]
+
+    recent = _nightly(store.quiet_hour_loads(recent_start, today_str))
+    base   = _nightly(store.quiet_hour_loads(base_start, base_end))
+    if len(recent) < 7 or len(base) < 14:
+        return None
+
+    recent_med = _pctl(recent, 0.5)
+    base_med   = _pctl(base, 0.5)
+    if base_med <= 0:
+        return None
+
+    delta = recent_med - base_med
+    # Both gates: at a ~0.2 kW baseline a 25% relative move is only 0.05 kW,
+    # which is noise. The absolute floor is what stops this crying wolf.
+    if recent_med < base_med * _BASELINE_DRIFT_REL or delta < _BASELINE_DRIFT_ABS:
+        return None
+
+    # Deliberately a floor, not a blend. Pricing 24h of drift across the real
+    # TOU curve would require assuming when the extra draw happens; the
+    # super-off-peak rate is the cheapest hour it could possibly run at, so
+    # "at least $X" is defensible without inventing a usage profile.
+    # 2am is super-off-peak on both the weekday and the weekend/holiday
+    # schedule, so this reads the current season's cheapest rate through the
+    # public API instead of reaching into tou's rate table.
+    sop_rate = rate_at(now.replace(hour=2, minute=0, second=0, microsecond=0))
+    monthly_floor = delta * 24 * 30 * sop_rate
+
+    state["baseline_load_drift_alerted_week"] = week_key
+    logger.info("Baseline load drift alert: %.3f -> %.3f kW (+%.0f%%)",
+                base_med, recent_med, (recent_med / base_med - 1) * 100)
+    return (
+        f"⚠️ <b>FranklinWH: Always-on load has crept up</b>\n"
+        f"Overnight baseline ~<b>{recent_med:.2f} kW</b> vs ~{base_med:.2f} kW earlier "
+        f"({(recent_med / base_med - 1) * 100:.0f}% higher)\n"
+        f"That's at least ~<b>${monthly_floor:.0f}/month</b> more, likely higher if it "
+        f"runs around the clock.\n"
+        f"From {len(recent)} recent / {len(base)} baseline nights. Check for a new "
+        f"always-on device, a fridge or pump cycling constantly, or something left on."
+    )
+
+
 def _alert_capacity_fade(state: dict, today: str, now: datetime, store) -> str | None:
     """Morning check: effective usable battery capacity (kWh per 100% SoC) trending
     down vs a baseline window suggests cell degradation. Weekly throttle.
@@ -1946,6 +2034,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("prediction_drift",     lambda: _alert_prediction_drift(state, today, now)),
             ("solar_back_to_baseline", lambda: _alert_solar_back_to_baseline(state, today, now)),
             ("capacity_fade",        lambda: _alert_capacity_fade(state, today, now, store)),
+            ("baseline_load_drift",  lambda: _alert_baseline_load_drift(state, today, now, store, cfg)),
             ("peak_streak",          lambda: _alert_peak_streak(state, today, now)),
             ("peak_streak_good",     lambda: _alert_peak_streak_good(state, today, now)),
             ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store, cfg)),
