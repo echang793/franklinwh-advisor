@@ -1268,3 +1268,123 @@ def test_chatbot_bill_matches_api_bill_cycle_window():
     api_day_n = (today - api_start).days + 1
     chatbot_day_n = (today - api_start).days + 1
     assert api_day_n == chatbot_day_n == 11
+
+
+# ── Savings scorecard ─────────────────────────────────────────────────
+
+def _mk_intervals(spec):
+    """spec: list of (iso_ts, hours, grid_kw, home_kw, solar_kw)."""
+    return [(datetime.fromisoformat(t), h, g, hm, s) for t, h, g, hm, s in spec]
+
+
+def test_savings_grid_only_baseline_matches_saved_today_formula():
+    """saved_vs_grid_only must equal the dashboard ticker's long-standing
+    formula (self-use at import rate + export at NEM credit). That identity
+    is what makes swapping _saved_today over to this module a pure refactor."""
+    from franklinwh_scraper import savings
+    from franklinwh_scraper.tou import export_rate_at, rate_at
+
+    spec = [
+        ("2026-07-15T13:00:00", 1.0, -2.0, 1.0, 3.0),   # exporting
+        ("2026-07-15T18:00:00", 1.0, 0.5, 2.5, 0.0),    # partial import, on-peak
+        ("2026-07-15T02:00:00", 1.0, 0.0, 0.8, 0.0),    # fully self-supplied
+    ]
+    ivs = _mk_intervals(spec)
+    legacy = 0.0
+    for dt0, hours, grid, home, _solar in ivs:
+        self_use = max(0.0, min(home, home - max(0.0, grid)))
+        legacy += self_use * rate_at(dt0) * hours
+        legacy += max(0.0, -grid) * export_rate_at(dt0) * hours
+
+    assert savings.compute(ivs).saved_vs_grid_only == pytest.approx(legacy, abs=0.01)
+
+
+def test_savings_period_split_sums_to_total():
+    """on-peak + off-peak + super-off-peak + export credit == total saved.
+    The old weekly digest omitted off-peak AND export credit entirely."""
+    from franklinwh_scraper import savings
+
+    ivs = _mk_intervals([
+        ("2026-07-15T13:00:00", 1.0, -2.0, 1.0, 3.0),
+        ("2026-07-15T18:00:00", 1.0, 0.5, 2.5, 0.0),
+        ("2026-07-15T08:00:00", 1.0, 0.0, 1.2, 0.4),   # off-peak — was dropped
+        ("2026-07-15T02:00:00", 1.0, 0.0, 0.8, 0.0),
+    ])
+    b = savings.compute(ivs)
+    parts = b.saved_on_peak + b.saved_off_peak + b.saved_super_off_peak + b.actual_export_credit
+    assert parts == pytest.approx(b.saved_vs_grid_only, abs=0.05)
+    assert b.saved_off_peak > 0  # the component the old math silently discarded
+
+
+def test_savings_battery_contribution_zero_without_battery():
+    """With no battery activity (grid exactly covers the solar shortfall),
+    the battery's own contribution must be ~0."""
+    from franklinwh_scraper import savings
+
+    # home 2.0, solar 0.5 -> grid must supply 1.5; no battery in play.
+    ivs = _mk_intervals([
+        ("2026-07-15T18:00:00", 1.0, 1.5, 2.0, 0.5),
+        ("2026-07-15T08:00:00", 1.0, 1.0, 1.5, 0.5),
+    ])
+    assert savings.compute(ivs).saved_vs_solar_only == pytest.approx(0.0, abs=0.01)
+
+
+def test_savings_excludes_base_service_charge():
+    """Base service is incurred with or without the system — including it
+    would inflate the savings figure."""
+    from franklinwh_scraper import savings
+    from franklinwh_scraper.tou import BASE_SERVICE_DAILY
+
+    b = savings.compute(_mk_intervals([("2026-07-15T02:00:00", 1.0, 0.0, 1.0, 0.0)]))
+    # A single self-supplied hour at super-off-peak: saving must be that hour's
+    # avoided import only, nowhere near a day's base fee.
+    assert b.saved_vs_grid_only < BASE_SERVICE_DAILY
+    assert b.actual_net_energy_cost == pytest.approx(0.0, abs=0.001)
+
+
+def test_savings_cumulative_accumulator_is_idempotent():
+    """Re-running the EOD accumulation for the same date must not double-count."""
+    state = {}
+
+    def accumulate(today, day_value):
+        cum = state.get("savings_cumulative")
+        if not isinstance(cum, dict):
+            cum = {"through": "", "vs_grid": 0.0, "vs_solar": 0.0, "days": 0}
+        if today > cum.get("through", ""):
+            state["savings_cumulative"] = {
+                "through": today,
+                "vs_grid": round(cum["vs_grid"] + day_value, 2),
+                "vs_solar": 0.0,
+                "days": cum["days"] + 1,
+            }
+
+    accumulate("2026-07-01", 5.0)
+    accumulate("2026-07-01", 5.0)   # replay same day
+    assert state["savings_cumulative"] == {"through": "2026-07-01", "vs_grid": 5.0,
+                                           "vs_solar": 0.0, "days": 1}
+    accumulate("2026-07-02", 3.0)
+    assert state["savings_cumulative"]["vs_grid"] == 8.0
+    assert state["savings_cumulative"]["days"] == 2
+
+
+def test_followed_advice_audit_reports_counts_not_dollars(tmp_path):
+    """Whether following the advice SAVED anything isn't answerable from this
+    data — the audit must report counts only, never a dollar figure."""
+    from franklinwh_scraper import savings
+
+    log = tmp_path / "advisor_log.jsonl"
+    today = datetime(2026, 7, 30)
+    log.write_text(
+        '{"timestamp": "2026-07-29T08:00:00", "recommended_mode": "emergency_backup", "needs_action": true}\n'
+        '{"timestamp": "2026-07-28T08:00:00", "recommended_mode": "self_consumption", "needs_action": false}\n'
+    )
+    out = savings.followed_advice_audit(log, {"2026-07-29"}, 30, today=today)
+    assert out["eb_recommended_days"] == 1
+    assert out["grid_charge_days"] == 1
+    assert not any("$" in str(k) or "saved" in str(k) for k in out)
+
+
+def test_followed_advice_audit_survives_missing_log(tmp_path):
+    from franklinwh_scraper import savings
+    out = savings.followed_advice_audit(tmp_path / "nope.jsonl", set(), 30)
+    assert out["available"] is False

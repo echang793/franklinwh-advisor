@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -1373,6 +1373,78 @@ def cmd_history(ctx: click.Context, out: str | None) -> None:
             bar  = click.style("█" * bar_len, fg="cyan") + click.style("░" * (30 - bar_len), dim=True)
             label = f"{hr:02d}:00"
             click.echo(f"  {label}  {bar}  {avg:.2f} kW")
+
+
+@grp_account.command("savings")
+@click.option("--days", "-d", default=30, show_default=True, type=int)
+@click.option("--out", "-o", default=None)
+@click.pass_context
+def cmd_savings(ctx: click.Context, days: int, out: str | None) -> None:
+    """What the battery + solar have actually saved you."""
+    from . import savings as _savings
+    from .history import integrate_intervals as _ii
+
+    cfg    = ctx.obj["config"]
+    outdir = Path(out or cfg.output_dir)
+    db     = outdir / "history.db"
+    if not db.exists():
+        raise click.ClickException(f"No history database at {db}. Has the advisor run?")
+
+    end   = datetime.now().date()
+    start = end - timedelta(days=days - 1)
+    with HistoryStore(db) as store:
+        rows = store.weekly_readings(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        charge_days = store.grid_charge_days(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+    if not rows:
+        raise click.ClickException("No readings in that window.")
+
+    sv = _savings.compute(_ii(rows), start.isoformat(), end.isoformat())
+
+    _header(f"Savings — last {sv.days} days ({sv.start} → {sv.end})")
+    click.echo(f"  {'Home used':22} {sv.home_kwh:>8.1f} kWh")
+    click.echo(f"  {'Served by battery/solar':22} {sv.self_use_kwh:>8.1f} kWh")
+    click.echo(f"  {'Grid imported':22} {sv.import_kwh:>8.1f} kWh")
+    click.echo(f"  {'Grid exported':22} {sv.export_kwh:>8.1f} kWh")
+    _hr()
+    click.echo(click.style("  Actual energy cost (excl. base service)", bold=True))
+    click.echo(f"  {'Import':22} ${sv.actual_import_cost:>8.2f}")
+    click.echo(f"  {'Export credit':22} ${sv.actual_export_credit:>8.2f}")
+    click.echo(f"  {'Net':22} ${sv.actual_net_energy_cost:>8.2f}")
+    _hr()
+    click.echo(click.style("  Saved vs. no battery / no solar", bold=True))
+    click.echo(f"  {'Would have paid':22} ${sv.grid_only_cost:>8.2f}")
+    click.echo(f"  {'Actually paid':22} ${sv.actual_net_energy_cost:>8.2f}")
+    click.echo(click.style(f"  {'SAVED':22} ${sv.saved_vs_grid_only:>8.2f}", fg="green", bold=True))
+    click.echo()
+    click.echo(f"  {'  on-peak (4–9pm)':22} ${sv.saved_on_peak:>8.2f}")
+    click.echo(f"  {'  off-peak':22} ${sv.saved_off_peak:>8.2f}")
+    click.echo(f"  {'  super off-peak':22} ${sv.saved_super_off_peak:>8.2f}")
+    click.echo(f"  {'  export credit':22} ${sv.actual_export_credit:>8.2f}")
+    _hr()
+    click.echo(click.style("  Battery's own contribution (estimate)", bold=True))
+    click.echo(f"  {'Solar-only would cost':22} ${sv.solar_only_net_cost:>8.2f}")
+    click.echo(f"  {'Battery saved':22} ${sv.saved_vs_solar_only:>8.2f}")
+
+    state = _load_peak_state(outdir)
+    cum = state.get("savings_cumulative")
+    if isinstance(cum, dict) and cum.get("days"):
+        _hr()
+        click.echo(click.style("  Running total (since tracking began)", bold=True))
+        click.echo(f"  ${cum.get('vs_grid', 0.0):.2f} over {cum['days']} days "
+                   f"(~${cum.get('vs_grid', 0.0) / max(1, cum['days']):.2f}/day)")
+
+    audit = _savings.followed_advice_audit(outdir / "advisor_log.jsonl", charge_days, days)
+    if audit.get("available"):
+        _hr()
+        click.echo(f"  EB recommended on {audit['eb_recommended_days']} of the last {days} days "
+                   f"· grid charging observed on {audit['grid_charge_days']}")
+
+    _hr()
+    _info(f"Priced at rates effective {sv.priced_at}; base service charge excluded")
+    _info("(it is incurred either way, so counting it would inflate savings).")
+    if sv.export_days_at_assumed_rate:
+        _info(f"{sv.export_days_at_assumed_rate} export day(s) priced at the assumed "
+              f"NBT floor rate — SDG&E publishes hourly export rates only for Aug/Sep.")
 
 
 @grp_account.command("accuracy")

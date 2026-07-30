@@ -19,9 +19,10 @@ from .config import Config
 from .format_utils import fmt_hours, soc_bar, time_to_pct
 from .history import integrate_intervals
 from .notifier import notify_email, notify_imessage_text, notify_telegram, notify_webhook
-from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
+from .tou import (base_service_cost, cheap_charge_deadline,
                   cycle_bounds, export_rate_at, on_peak_window,
-                  peak_export_hour, period_at, rate_at, rates_are_stale)
+                  peak_export_hour, rate_at, rates_are_stale)
+from .savings import compute as savings_compute
 from .weather import fetch_nws_storm_alerts, fetch_solar_outlook
 
 logger = logging.getLogger(__name__)
@@ -222,7 +223,7 @@ _DATE_KEYED_PREFIXES = (
     # and previously matched none of the prune rules — the state file grew
     # by one key per day per prefix, forever, for the life of the install.
     "predicted_kwh_", "predicted_avg_ghi_", "daily_import_cost_",
-    "outages_", "sundown_pred_",
+    "outages_", "sundown_pred_", "savings_daily_",
 )
 
 
@@ -826,6 +827,28 @@ def _alert_eod_digest(
                 state[f"peak_cov_{today}"] = 0.0
             state[f"daily_import_cost_{today}"] = round(import_cost, 2)
 
+            # Accumulate savings one day at a time. Deliberately incremental
+            # rather than a full-history rescan: rollup_old_readings
+            # downsamples data past 180 days, so a lifetime total recomputed
+            # from scratch would silently drift downward as history ages out.
+            _day_sv = savings_compute(integrate_intervals(readings))
+            state[f"savings_daily_{today}"] = {
+                "vs_grid": _day_sv.saved_vs_grid_only,
+                "vs_solar": _day_sv.saved_vs_solar_only,
+            }
+            _cum = state.get("savings_cumulative")
+            if not isinstance(_cum, dict):
+                _cum = {"through": "", "vs_grid": 0.0, "vs_solar": 0.0, "days": 0}
+            # Guard against double-counting if the digest ever re-runs.
+            if today > _cum.get("through", ""):
+                _cum = {
+                    "through": today,
+                    "vs_grid": round(_cum.get("vs_grid", 0.0) + _day_sv.saved_vs_grid_only, 2),
+                    "vs_solar": round(_cum.get("vs_solar", 0.0) + _day_sv.saved_vs_solar_only, 2),
+                    "days": int(_cum.get("days", 0)) + 1,
+                }
+                state["savings_cumulative"] = _cum
+
     state["eod_digest_date"] = today
     logger.info("End-of-day digest sent for %s", today)
     return (
@@ -857,27 +880,21 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
     if not readings:
         return None
 
-    import_cost   = 0.0
-    export_credit = 0.0
-    peak_saved    = 0.0    # on-peak hours (4–9 pm)
-    sop_saved     = 0.0    # super off-peak hours
-
-    for dt, hours, grid_kw, home_kw, _solar_kw in integrate_intervals(readings):
-        period = period_at(dt)
-        if grid_kw > 0:
-            import_cost   += grid_kw * hours * rate_at(dt)
-        elif grid_kw < 0:
-            export_credit += -grid_kw * hours * export_rate_at(dt)
-        # Energy served by battery+solar (not drawn from grid) × avoided rate
-        batt_solar_kwh = max(0.0, home_kw - max(0.0, grid_kw)) * hours
-        if period == TouPeriod.ON_PEAK:
-            peak_saved += batt_solar_kwh * rate_at(dt)
-        elif period == TouPeriod.SUPER_OFF_PEAK:
-            sop_saved  += batt_solar_kwh * rate_at(dt)
+    # One shared definition of "saved" (savings.compute) instead of this
+    # function's own. The old inline version bucketed only ON_PEAK and
+    # SUPER_OFF_PEAK and never added export credit, so it dropped every
+    # off-peak hour — measured against real data that under-reported the
+    # week's savings by about half.
+    _sv = savings_compute(integrate_intervals(readings))
+    import_cost   = _sv.actual_import_cost
+    export_credit = _sv.actual_export_credit
+    peak_saved    = _sv.saved_on_peak
+    sop_saved     = _sv.saved_super_off_peak
+    offpeak_saved = _sv.saved_off_peak
 
     base_fee    = base_service_cost(7)
     net_cost    = import_cost - export_credit + base_fee
-    total_saved = peak_saved + sop_saved
+    total_saved = _sv.saved_vs_grid_only
     week_label  = f"{week_start.strftime('%b %-d')}–{week_end.strftime('%b %-d')}"
 
     # Avg daily cost from stored EOD data
@@ -968,7 +985,9 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
         f"{avg_cost_str}"
         f"\nEst. savings from battery + solar:\n"
         f"<code>  Peak (4–9 pm):    ${peak_saved:.2f}\n"
+        f"  Off-peak:         ${offpeak_saved:.2f}\n"
         f"  Super off-peak:   ${sop_saved:.2f}\n"
+        f"  Export credit:    ${export_credit:.2f}\n"
         f"  Total saved:      ${total_saved:.2f}</code>{stale_note}"
         f"{accuracy_str}{cycle_str}"
     )
@@ -1042,6 +1061,19 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
         f"  ~${annual:+.0f}/yr at this rate — {direction}</code>"
     )
 
+    # Running total, accumulated a day at a time by the EOD digest. Shown
+    # here because this is the message the user compares against the real
+    # bill. Priced at current rates — see savings.py.
+    lifetime_str = ""
+    _cum = state.get("savings_cumulative")
+    if isinstance(_cum, dict) and _cum.get("days"):
+        lifetime_str = (
+            f"\n\n💰 Saved vs. no battery/solar:\n"
+            f"<code>  ${_cum.get('vs_grid', 0.0):.2f} over {_cum['days']} days"
+            f"  (~${_cum.get('vs_grid', 0.0) / max(1, _cum['days']):.2f}/day)</code>\n"
+            f"<i>At current rates, excluding the base service charge.</i>"
+        )
+
     state["monthly_summary_date"] = today
     logger.info("Billing-cycle summary sent for %s → %s", cycle_start, cycle_end)
     return (
@@ -1059,7 +1091,7 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
         f"Home used:\n"
         f"<code>  This:  {cur.home_load_kwh:.1f} kWh{_mdelta(cur.home_load_kwh, prev.home_load_kwh)}\n"
         f"  Prior: {prev.home_load_kwh:.1f} kWh</code>{sparse_note}"
-        f"{trueup_str}{flip_str}"
+        f"{trueup_str}{flip_str}{lifetime_str}"
     )
 
 

@@ -251,6 +251,24 @@ class HistoryStore:
                 return self.daily_solar_kwh(date_str)
         return round(max(values), 2)
 
+    def grid_charge_days(self, start_date: str, end_date: str) -> set[str]:
+        """Dates where the battery was charged from the grid.
+
+        Grid import while the battery charges and solar is essentially absent
+        is the observable signature that Emergency Backup (or a TOU charge
+        window) was actually engaged — there's no API field reporting the
+        configured mode. Requires 2+ such readings in a day so a single
+        ambiguous sample doesn't count.
+        """
+        rows = self._conn.execute(
+            "SELECT substr(timestamp,1,10) AS d, COUNT(*) FROM readings "
+            "WHERE timestamp >= ? AND timestamp < ? "
+            "  AND grid_use_kw > 0.3 AND battery_use_kw < -0.3 AND solar_kw < 0.5 "
+            "GROUP BY d HAVING COUNT(*) >= 2",
+            (start_date, _next_day(end_date)),
+        ).fetchall()
+        return {r[0] for r in rows}
+
     def daily_attribution(self, date_str: str) -> tuple[float, float, float] | None:
         """Return (battery→home, solar→home, grid→home) kWh for a calendar date.
 

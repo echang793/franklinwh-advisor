@@ -36,6 +36,7 @@ from .config import load as load_config
 from .format_utils import time_to_pct
 from .history import HistoryStore, integrate_intervals
 from .predictor import predict
+from . import savings
 from .tou import (BASE_SERVICE_DAILY, TouPeriod, cycle_bounds, export_rate_at,
                   on_peak_window, period_at, rate_at)
 
@@ -117,18 +118,18 @@ def _readings_since(since: datetime, until: datetime | None = None) -> list[sqli
 
 
 def _saved_today(now: datetime) -> float:
-    """Battery+solar savings today: discharge & peak solar valued at import rate,
-    export at NEM3 credit — same integration the ticker in the design expects."""
+    """Battery+solar savings today. Delegates to savings.compute so the
+    dashboard ticker, the billing-cycle card, and the weekly digest can't
+    drift apart again — this was the only one of the three that was right."""
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = _readings_since(start)
-    saved = 0.0
-    for dt0, hours, grid_avg, home_avg, solar_avg in integrate_intervals(
-            [(r["timestamp"], r["grid_use_kw"], r["home_load_kw"], r["solar_kw"]) for r in rows]):
-        rate = rate_at(dt0)
-        export_kw = max(0.0, -grid_avg)
-        self_use_kw = max(0.0, min(home_avg, home_avg - max(0.0, grid_avg)))
-        saved += self_use_kw * rate * hours + export_kw * export_rate_at(dt0) * hours
-    return round(saved, 2)
+    return savings.compute(_intervals(rows)).saved_vs_grid_only
+
+
+def _intervals(rows):
+    return integrate_intervals(
+        [(r["timestamp"], r["grid_use_kw"], r["home_load_kw"], r["solar_kw"]) for r in rows]
+    )
 
 
 @app.get("/api/current", dependencies=_authed)
@@ -431,21 +432,19 @@ def _cycle_cost(start: date, end: date) -> dict:
     # as history.db grows.
     rows = _readings_since(datetime.combine(start, datetime.min.time()),
                            until=end_dt + timedelta(hours=1))
-    imp = exp_credit = saved = 0.0
-    for dt0, hours, grid_avg, home_avg, solar_avg in integrate_intervals(
-            [(r["timestamp"], r["grid_use_kw"], r["home_load_kw"], r["solar_kw"]) for r in rows]):
-        if dt0 >= end_dt:
-            break
-        rate = rate_at(dt0)
-        imp += max(0.0, grid_avg) * rate * hours
-        exp_credit += max(0.0, -grid_avg) * export_rate_at(dt0) * hours
-        self_use = max(0.0, home_avg - max(0.0, grid_avg))
-        saved += self_use * rate * hours
+    # Trim to the cycle before costing — integrate_intervals needs the one
+    # reading past end_dt to close the final interval, but that interval
+    # itself belongs to the next cycle.
+    bounded = [iv for iv in _intervals(rows) if iv[0] < end_dt]
+    sv = savings.compute(bounded)
     days = (min(end, date.today()) - start).days + 1
-    return {"import": round(imp, 2), "export": round(exp_credit, 2),
-            "base": round(BASE_SERVICE_DAILY * days, 2),
-            "net": round(imp - exp_credit + BASE_SERVICE_DAILY * days, 2),
-            "saved": round(saved, 2)}
+    base = BASE_SERVICE_DAILY * days
+    return {"import": sv.actual_import_cost, "export": sv.actual_export_credit,
+            "base": round(base, 2),
+            "net": round(sv.actual_net_energy_cost + base, 2),
+            # Was self-use only; export credit is part of what the system
+            # saved you, and the dashboard ticker has always counted it.
+            "saved": sv.saved_vs_grid_only}
 
 
 @app.get("/api/bill", dependencies=_authed)
@@ -471,6 +470,31 @@ def api_auth_status():
     """Unauthenticated on purpose — tells the frontend whether it needs to
     prompt for a token, without exposing the token itself."""
     return {"required": bool(_cfg.dashboard_token)}
+
+
+@app.get("/api/savings", dependencies=_authed)
+def api_savings(days: int = Query(30, ge=1, le=365)):
+    """What the battery + solar have actually saved over a trailing window.
+
+    Only the requested window is computed from the DB; the running lifetime
+    total is served from the alert state file, where the EOD digest
+    accumulates it one day at a time. A full-history rescan would be both
+    slow and *not reproducible* — rollup_old_readings downsamples data past
+    180 days, so a lifetime figure recomputed from scratch would drift
+    downward as history ages out.
+    """
+    try:
+        since = datetime.now() - timedelta(days=days)
+        rows = _readings_since(since)
+        sv = savings.compute(_intervals(rows))
+        out = sv.to_dict()
+        state = _load_peak_state(_OUT)
+        cum = state.get("savings_cumulative")
+        out["cumulative"] = cum if isinstance(cum, dict) else None
+        out["error"] = False
+        return out
+    except Exception:
+        return {"error": True}
 
 
 @app.get("/api/health", dependencies=_authed)
