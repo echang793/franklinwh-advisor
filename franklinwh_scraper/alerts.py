@@ -202,6 +202,10 @@ def _load_peak_state(out: Path) -> dict:
         old = state.pop("monthly_summary_month")
         if isinstance(old, str):
             state["monthly_summary_date"] = old + "-19"
+    # Orphan from the battery-full-cycle alert removed in 49c6632 (noisy
+    # duplicate). It isn't date-suffixed and matches no _prune_old_state rule,
+    # so it would otherwise sit in the state file forever.
+    state.pop("full_charge_state", None)
     return state
 
 
@@ -479,7 +483,7 @@ def _alert_grid_import(state: dict, today: str, now: datetime, c) -> str | None:
     )
 
 
-def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c) -> str | None:
+def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
     in_window = now.hour == 13
     if not in_window or c.battery_soc_pct >= 40.0:
         return None
@@ -487,7 +491,11 @@ def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c) -> str | None:
         return None
     state["low_soc_1pm_alerted_date"] = today
     logger.info("Low 1 pm SoC alert sent for %s (%.0f%%)", today, c.battery_soc_pct)
-    tte = _time_to_pct(c.battery_soc_pct, 0.0, _BATTERY_CAPACITY_KWH, c.battery_use_kw)
+    # cfg, not the module constant — the constant is only a fallback default,
+    # so a user with a 30 kWh system used to get a time-to-empty computed
+    # against 13.6 kWh.
+    cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
+    tte = _time_to_pct(c.battery_soc_pct, 0.0, cap, c.battery_use_kw)
     tte_str = f"⏱ ~{_fmt_hours(tte)} to empty · " if tte is not None else ""
     return (
         f"🟡 <b>FranklinWH: Battery low at {now.strftime('%-I:%M %p')}</b>\n"
@@ -1131,30 +1139,6 @@ def _alert_grid_restored(state: dict, now: datetime, c, cfg: Config) -> str | No
     )
 
 
-def _alert_battery_full_cycle(state: dict, today: str, now: datetime, c) -> str | None:
-    full_state = state.get("full_charge_state", "watching_for_full")
-    if full_state == "watching_for_full" and c.battery_soc_pct >= 99.0:
-        state["full_charge_state"] = "watching_for_discharge"
-        logger.info("Full charge alert sent (%.0f%%)", c.battery_soc_pct)
-        return (
-            f"🔋 FranklinWH: Battery fully charged — {c.battery_soc_pct:.0f}% SoC\n"
-            f"Time: {now.strftime('%-I:%M %p')}\n"
-            f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW"
-        )
-    if full_state == "watching_for_discharge" and c.battery_soc_pct < 90.0:
-        state["full_charge_state"] = "watching_for_full"
-        if 15 <= now.hour < 19 and state.get("no_longer_full_date") != today:
-            state["no_longer_full_date"] = today
-            logger.info("Battery discharged below 90%% alert sent (%.0f%%)", c.battery_soc_pct)
-            return (
-                f"🔋 FranklinWH: Battery no longer full — {c.battery_soc_pct:.0f}% SoC\n"
-                f"Time: {now.strftime('%-I:%M %p')}\n"
-                f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW"
-            )
-        logger.info("Battery discharged below 90%% — outside 3–7 pm window, suppressed")
-    return None
-
-
 def _track_battery_cycles(state: dict, c) -> None:
     """Count equivalent full cycles for battery health estimation.
 
@@ -1178,7 +1162,7 @@ def _track_battery_cycles(state: dict, c) -> None:
             logger.debug("Battery cycle completed (%.2f depth), total=%.2f", depth, state["batt_cycle_count"])
 
 
-def _alert_fast_drain(state: dict, today: str, now: datetime, c) -> str | None:
+def _alert_fast_drain(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
     """Always updates last_soc/last_soc_time for rate tracking.
 
     Two tiers: a critical alert below 35% SoC (unchanged), and a lower-urgency
@@ -1202,7 +1186,8 @@ def _alert_fast_drain(state: dict, today: str, now: datetime, c) -> str | None:
                     state["fast_drain_alerted_date"] = today
                     state.pop("unusual_drain_streak", None)
                     logger.info("Fast drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
-                    _tte_fd = _time_to_pct(c.battery_soc_pct, 0.0, _BATTERY_CAPACITY_KWH, c.battery_use_kw)
+                    _cap_fd = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
+                    _tte_fd = _time_to_pct(c.battery_soc_pct, 0.0, _cap_fd, c.battery_use_kw)
                     _tte_fd_s = f"\n⏱ ~{_fmt_hours(_tte_fd)} to empty" if _tte_fd is not None else ""
                     body = (
                         f"⚡ <b>FranklinWH: Battery draining fast — {drain_rate:.0f}%/hr</b>\n"
@@ -1900,7 +1885,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("morning_preview",   lambda: _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store, cfg)),
             ("grid_import",       lambda: _alert_grid_import(state, today, now, c)),
             ("eb_ready",          lambda: _alert_eb_ready(state, today, now, c)),
-            ("low_soc_1pm",       lambda: _alert_low_soc_1pm(state, today, now, c)),
+            ("low_soc_1pm",       lambda: _alert_low_soc_1pm(state, today, now, c, cfg)),
             ("low_morning_solar", lambda: _alert_low_morning_solar(state, today, now, c)),
             ("solar_stopped",     lambda: _alert_solar_stopped(state, today, now, c)),
             ("low_noon_soc",      lambda: _alert_low_noon_soc(state, today, now, c)),
@@ -1910,7 +1895,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("monthly_summary",   lambda: _alert_monthly_summary(state, today, now, store)),
             ("grid_down",         lambda: _alert_grid_down(state, today, now, c, cfg)),
             ("grid_restored",     lambda: _alert_grid_restored(state, now, c, cfg)),
-            ("fast_drain",        lambda: _alert_fast_drain(state, today, now, c)),
+            ("fast_drain",        lambda: _alert_fast_drain(state, today, now, c, cfg)),
             ("not_charging",      lambda: _alert_not_charging(state, today, now, c)),
             ("solar_degradation",    lambda: _alert_solar_degradation(state, today, now)),
             ("prediction_drift",     lambda: _alert_prediction_drift(state, today, now)),

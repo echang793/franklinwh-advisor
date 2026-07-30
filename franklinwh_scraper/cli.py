@@ -469,7 +469,7 @@ def setup() -> None:
         ),
         (
             "Battery health",
-            "Full-charge events, capacity fade, solar degradation, heat wave & storm prep, surplus export, 2-day cloudy warning",
+            "Capacity fade, solar degradation, heat wave & storm prep, surplus export, 2-day cloudy warning",
             ["solar_degradation", "solar_back_to_baseline",
              "capacity_fade", "peak_streak", "heat_wave_prep", "storm_prep",
              "multiday_cloudy_precharge", "solar_surplus_overflow"],

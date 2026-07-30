@@ -645,7 +645,7 @@ def test_fast_drain_ignores_near_zero_interval():
                               solar_production_kw=0.0, battery_use_kw=1.0)
     now = datetime(2026, 7, 15, 12, 0, 0)
     state = {"last_soc": 31.0, "last_soc_time": (now - timedelta(seconds=5)).isoformat()}
-    msg = alerts._alert_fast_drain(state, "2026-07-15", now, c)
+    msg = alerts._alert_fast_drain(state, "2026-07-15", now, c, Config())
     assert msg is None  # 1%/5s would be ~720%/hr if not floored
 
 
@@ -1085,3 +1085,25 @@ def test_export_csv_preserves_column_alignment_on_schema_drift(tmp_path):
     assert lines[0] == "a,b"           # header unchanged — old column order preserved
     assert lines[1] == "1,2"
     assert lines[2] == "3,4"           # new field "c" dropped, not misaligned into column "a"/"b"
+
+
+def test_chatbot_history_uses_outdir_override(tmp_path):
+    """/history must read the main loop's resolved --out dir, not re-derive
+    from cfg.output_dir — otherwise it reads a different history.db than the
+    advisor writes (same split-state bug /sundown already had fixed)."""
+    from franklinwh_scraper.chatbot import TelegramChatBot
+
+    # cfg points at a dir that HAS a db; outdir points at one that doesn't.
+    cfg_dir = tmp_path / "cfg_out"
+    cfg_dir.mkdir()
+    HistoryStore(cfg_dir / "history.db")  # creates the file
+    real_dir = tmp_path / "real_out"
+    real_dir.mkdir()
+
+    bot = TelegramChatBot(Config(output_dir=str(cfg_dir)), api_key="x", outdir=real_dir)
+    sent = []
+    bot._send = lambda chat_id, text: sent.append(text)
+
+    bot._send_history("123")
+    # Must have looked in real_dir (no db there), not cfg_dir (db present).
+    assert sent and "No history database yet" in sent[0]

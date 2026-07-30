@@ -65,8 +65,21 @@ def test_low_soc_1pm_idle_battery_no_crash():
     """Zeroed API stats (idle battery, SoC < 40) must not raise int(None)."""
     c = _fake_stats(battery_soc_pct=0.0, battery_use_kw=0.0,
                     solar_production_kw=0.0, home_load_kw=0.0).current
-    msg = alerts._alert_low_soc_1pm({}, "2026-07-02", datetime(2026, 7, 2, 13, 40), c)
+    msg = alerts._alert_low_soc_1pm({}, "2026-07-02", datetime(2026, 7, 2, 13, 40), c, Config())
     assert msg is not None and "to empty" not in msg
+
+
+def test_low_soc_1pm_uses_configured_capacity():
+    """Time-to-empty must scale with cfg.battery_capacity_kwh, not the 13.6
+    module fallback — a 30 kWh system lasts longer at the same drain rate."""
+    c = _fake_stats(battery_soc_pct=30.0, battery_use_kw=2.0,
+                    solar_production_kw=0.0, home_load_kw=2.0).current
+    now = datetime(2026, 7, 2, 13, 40)
+    small = alerts._alert_low_soc_1pm({}, "2026-07-02", now, c, Config(battery_capacity_kwh=13.6))
+    big = alerts._alert_low_soc_1pm({}, "2026-07-02", now, c, Config(battery_capacity_kwh=30.0))
+    assert small and big
+    assert "to empty" in small and "to empty" in big
+    assert small != big  # the bigger battery must report a longer runtime
 
 
 def test_eod_digest_includes_tomorrow_solar(tmp_path):

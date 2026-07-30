@@ -440,7 +440,10 @@ class TelegramChatBot:
             from pathlib import Path
             from .history import HistoryStore, integrate_intervals
             from .tou import rate_at, base_service_cost
-            db_path = Path(getattr(self._cfg, "output_dir", "output")) / "history.db"
+            # self._outdir (the main loop's resolved --out) before cfg — see
+            # the note in __init__; re-deriving from cfg alone reads a
+            # different history.db than the advisor writes under --out.
+            db_path = (self._outdir or Path(getattr(self._cfg, "output_dir", "output"))) / "history.db"
             if not db_path.exists():
                 self._send(chat_id, "No history database yet — has the advisor run at least once?")
                 return
@@ -485,7 +488,7 @@ class TelegramChatBot:
             from pathlib import Path
             from .history import HistoryStore, integrate_intervals
             from .tou import rate_at, base_service_cost
-            db_path = Path(getattr(self._cfg, "output_dir", "output")) / "history.db"
+            db_path = (self._outdir or Path(getattr(self._cfg, "output_dir", "output"))) / "history.db"
             if not db_path.exists():
                 self._send(chat_id, "No history database yet — has the advisor run at least once?")
                 return
