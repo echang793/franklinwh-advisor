@@ -42,6 +42,7 @@ from .notifier import (notify_email, notify_imessage, notify_log,
                        fetch_telegram_chat_id, rec_to_text)
 from .predictor import predict
 from .scrapers import FAQScraper, ProductsScraper, SupportScraper
+from .tou import cycle_bounds
 from .weather import geocode
 
 
@@ -537,6 +538,21 @@ def setup() -> None:
         cfg.battery_capacity_kwh = chosen_kwh
         _ok(f"Battery set to {cfg.battery_capacity_kwh} kWh")
 
+    click.echo()
+    click.echo("  Your utility bills on a per-meter read date, not a fixed")
+    click.echo("  company-wide day — check the 'service period' on your bill.")
+    while True:
+        _day = click.prompt(
+            "  Day of month your billing cycle starts", type=int,
+            default=cfg.billing_cycle_start_day or 20,
+        )
+        if 1 <= _day <= 31:
+            cfg.billing_cycle_start_day = _day
+            _cs, _ce = cycle_bounds(datetime.now().date(), _day)
+            _ok(f"Current cycle: {_cs:%b %-d} – {_ce:%b %-d} ({(_ce - _cs).days + 1} days)")
+            break
+        _warn("Enter a day between 1 and 31.")
+
     cfg.output_dir = click.prompt("  Output directory", default=cfg.output_dir)
 
     # ── EV charging ───────────────────────────────────────────────────
@@ -603,6 +619,9 @@ def doctor() -> None:
     _check("Email configured",     bool(cfg.email))
     _check("Password set",         bool(cfg.password))
     _check("Location set",         bool(cfg.lat and cfg.lon),  f"{cfg.lat:.4f}, {cfg.lon:.4f}" if cfg.lat else "")
+    _bcs, _bce = cycle_bounds(datetime.now().date(), cfg.billing_cycle_start_day)
+    _check("Billing cycle", True,
+           f"day {cfg.billing_cycle_start_day} — current: {_bcs:%b %-d} – {_bce:%b %-d}")
 
     # At least one notification channel
     has_channel = bool(

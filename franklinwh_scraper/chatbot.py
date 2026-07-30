@@ -487,15 +487,24 @@ class TelegramChatBot:
         try:
             from pathlib import Path
             from .history import HistoryStore, integrate_intervals
-            from .tou import rate_at, base_service_cost
+            from .tou import rate_at, base_service_cost, cycle_bounds, export_rate_at
             db_path = (self._outdir or Path(getattr(self._cfg, "output_dir", "output"))) / "history.db"
             if not db_path.exists():
                 self._send(chat_id, "No history database yet — has the advisor run at least once?")
                 return
             now         = datetime.now()
             today       = now.strftime("%Y-%m-%d")
-            cycle_start = (now.date().replace(day=1) - timedelta(days=1)).replace(day=20)
-            days_so_far = (now.date() - cycle_start).days
+            # Shared cycle math — this used to compute "the 20th of the prior
+            # month" unconditionally, which past the 20th put the window a
+            # full month in the past (on Jul 30 it reported a Jun 20 start).
+            cycle_start, cycle_end = cycle_bounds(
+                now.date(), getattr(self._cfg, "billing_cycle_start_day", 20)
+            )
+            # Inclusive of today, matching /api/bill's day_n — base service is
+            # billed per calendar day in the period, and an off-by-one here
+            # made the two surfaces disagree by exactly one day's base fee.
+            days_so_far = (now.date() - cycle_start).days + 1
+            cycle_days  = (cycle_end - cycle_start).days + 1
             if days_so_far < 1:
                 self._send(chat_id, "Billing cycle just started — not enough data yet.")
                 return
@@ -507,18 +516,20 @@ class TelegramChatBot:
             import_cost   = 0.0
             export_credit = 0.0
             for dt, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(readings):
-                r = rate_at(dt)
                 if grid_kw > 0:
-                    import_cost   += grid_kw * hours * r
+                    import_cost   += grid_kw * hours * rate_at(dt)
                 elif grid_kw < 0:
-                    export_credit += -grid_kw * hours * r
+                    # export_rate_at, not rate_at — exports earn the NEM 3.0
+                    # credit, not the retail import rate. /api/bill has always
+                    # priced it this way; this side was inflating the credit.
+                    export_credit += -grid_kw * hours * export_rate_at(dt)
             base_actual   = base_service_cost(days_so_far)
             net_actual    = import_cost - export_credit + base_actual
             daily_net     = net_actual / days_so_far
-            projected_net = daily_net * 30
-            projected_imp = import_cost / days_so_far * 30
-            projected_exp = export_credit / days_so_far * 30
-            projected_base = base_service_cost(30)
+            projected_net = daily_net * cycle_days
+            projected_imp = import_cost / days_so_far * cycle_days
+            projected_exp = export_credit / days_so_far * cycle_days
+            projected_base = base_service_cost(cycle_days)
             cycle_label   = f"{cycle_start.strftime('%b %-d')} – {now.date().strftime('%b %-d')}"
             self._send(chat_id,
                 f"💡 <b>Billing Cycle</b> — {cycle_label} ({days_so_far} days)\n"
@@ -526,7 +537,7 @@ class TelegramChatBot:
                 f"Grid export:  ${export_credit:.2f}\n"
                 f"Base service: ${base_actual:.2f}\n"
                 f"Net so far:   <b>${net_actual:.2f}</b>\n\n"
-                f"Projected full cycle (~30 days):\n"
+                f"Projected full cycle ({cycle_days} days):\n"
                 f"  Import:  ${projected_imp:.2f}\n"
                 f"  Export:  ${projected_exp:.2f}\n"
                 f"  Base:    ${projected_base:.2f}\n"

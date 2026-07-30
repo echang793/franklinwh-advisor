@@ -20,8 +20,8 @@ from .format_utils import fmt_hours, soc_bar, time_to_pct
 from .history import integrate_intervals
 from .notifier import notify_email, notify_imessage_text, notify_telegram, notify_webhook
 from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
-                  export_rate_at, on_peak_window, peak_export_hour, period_at,
-                  rate_at, rates_are_stale)
+                  cycle_bounds, export_rate_at, on_peak_window,
+                  peak_export_hour, period_at, rate_at, rates_are_stale)
 from .weather import fetch_nws_storm_alerts, fetch_solar_outlook
 
 logger = logging.getLogger(__name__)
@@ -974,18 +974,18 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
     )
 
 
-def _alert_monthly_summary(state: dict, today: str, now: datetime, store) -> str | None:
-    """19th of each month: billing-cycle summary (20th last month → 19th this month)."""
+def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: Config) -> str | None:
+    """Last day of the billing cycle: cycle summary vs the prior cycle."""
     if now.hour not in (21, 22) or store is None:
         return None
-    if now.day != 19 or state.get("monthly_summary_date") == today:
+    # Fires on the cycle's final day, derived from the configured start day
+    # rather than a hardcoded 19th — see tou.cycle_bounds.
+    start_day = getattr(cfg, "billing_cycle_start_day", 20)
+    cycle_start, cycle_end = cycle_bounds(now.date(), start_day)
+    if now.date() != cycle_end or state.get("monthly_summary_date") == today:
         return None
 
-    # Billing cycle: 20th of prior month → 19th of this month
-    cycle_end   = now.date()
-    cycle_start = (cycle_end.replace(day=1) - timedelta(days=1)).replace(day=20)
-    prev_end    = cycle_start - timedelta(days=1)
-    prev_start  = (prev_end.replace(day=1) - timedelta(days=1)).replace(day=20)
+    prev_start, prev_end = cycle_bounds(cycle_start - timedelta(days=1), start_day)
 
     cur  = store.period_totals(cycle_start.strftime("%Y-%m-%d"), cycle_end.strftime("%Y-%m-%d"))
     prev = store.period_totals(prev_start.strftime("%Y-%m-%d"), prev_end.strftime("%Y-%m-%d"))
@@ -1492,7 +1492,7 @@ def _alert_peak_streak_good(state: dict, today: str, now: datetime) -> str | Non
 
 
 def _alert_bill_projection(
-    state: dict, today: str, now: datetime, store,
+    state: dict, today: str, now: datetime, store, cfg: Config,
 ) -> str | None:
     """5th of each month: project full-cycle bill from partial billing cycle data."""
     if store is None or now.day != 5 or now.hour not in (8, 9):
@@ -1500,9 +1500,11 @@ def _alert_bill_projection(
     if state.get("bill_projection_date") == today:
         return None
 
-    # Billing cycle started on 20th of prior month
-    cycle_start = (now.date().replace(day=1) - timedelta(days=1)).replace(day=20)
+    cycle_start, cycle_end = cycle_bounds(
+        now.date(), getattr(cfg, "billing_cycle_start_day", 20)
+    )
     days_so_far = (now.date() - cycle_start).days
+    cycle_days  = (cycle_end - cycle_start).days + 1
     if days_so_far < 5:
         return None
 
@@ -1521,10 +1523,11 @@ def _alert_bill_projection(
     base_actual    = base_service_cost(days_so_far)
     net_actual     = import_cost - export_credit + base_actual
     daily_net      = net_actual / days_so_far
-    projected_net  = daily_net * 30
-    projected_imp  = import_cost / days_so_far * 30
-    projected_exp  = export_credit / days_so_far * 30
-    projected_base = base_service_cost(30)
+    # Real cycle length, not a flat 30 — cycles run 28-31 days.
+    projected_net  = daily_net * cycle_days
+    projected_imp  = import_cost / days_so_far * cycle_days
+    projected_exp  = export_credit / days_so_far * cycle_days
+    projected_base = base_service_cost(cycle_days)
     cycle_label    = f"{cycle_start.strftime('%b %-d')} – {now.date().strftime('%b %-d')}"
 
     state["bill_projection_date"] = today
@@ -1537,7 +1540,7 @@ def _alert_bill_projection(
         f"  Grid export:  ${export_credit:.2f}\n"
         f"  Base service: ${base_actual:.2f}\n"
         f"  Net cost:     ${net_actual:.2f}</code>\n\n"
-        f"Projected full cycle (~30 days):\n"
+        f"Projected full cycle ({cycle_days} days):\n"
         f"<code>  Import:  ${projected_imp:.2f}\n"
         f"  Export:  ${projected_exp:.2f}\n"
         f"  Base:    ${projected_base:.2f}\n"
@@ -1892,7 +1895,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("export_arbitrage",  lambda: _alert_export_arbitrage(state, today, now, c, cfg, usage_forecast)),
             ("eod_digest",        lambda: _alert_eod_digest(state, today, now, stats, cfg, outlook, usage_forecast, store)),
             ("weekly_summary",    lambda: _alert_weekly_summary(state, today, now, store, cfg)),
-            ("monthly_summary",   lambda: _alert_monthly_summary(state, today, now, store)),
+            ("monthly_summary",   lambda: _alert_monthly_summary(state, today, now, store, cfg)),
             ("grid_down",         lambda: _alert_grid_down(state, today, now, c, cfg)),
             ("grid_restored",     lambda: _alert_grid_restored(state, now, c, cfg)),
             ("fast_drain",        lambda: _alert_fast_drain(state, today, now, c, cfg)),
@@ -1903,7 +1906,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("capacity_fade",        lambda: _alert_capacity_fade(state, today, now, store)),
             ("peak_streak",          lambda: _alert_peak_streak(state, today, now)),
             ("peak_streak_good",     lambda: _alert_peak_streak_good(state, today, now)),
-            ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store)),
+            ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store, cfg)),
             ("heat_wave_prep",       lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),
             ("multiday_cloudy_precharge", lambda: _alert_multiday_cloudy_precharge(state, today, now, c, outlook, cfg)),
             ("solar_surplus_overflow",    lambda: _alert_solar_surplus_overflow(state, today, now, c)),

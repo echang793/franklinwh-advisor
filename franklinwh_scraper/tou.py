@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import Enum
 
 # SDG&E revises rates roughly twice per year. If today is more than 180 days
@@ -146,3 +146,42 @@ def on_peak_window(dt: datetime) -> tuple[datetime, datetime]:
     """Return (start, end) of the on-peak window for the day containing dt."""
     base = dt.replace(hour=0, minute=0, second=0, microsecond=0)
     return base.replace(hour=_ON_PEAK_START), base.replace(hour=_ON_PEAK_END)
+
+
+# Default day-of-month the utility billing cycle starts. SDG&E bills on a
+# per-meter read date rather than a utility-wide constant, so this is only a
+# default — Config.billing_cycle_start_day overrides it. Lives here, with the
+# rest of the tariff logic, so every consumer (dashboard, digests, chatbot)
+# derives its cycle from one implementation instead of three that disagree.
+DEFAULT_CYCLE_START_DAY = 20
+
+
+def _clamp_day(year: int, month: int, day: int) -> date:
+    """date(year, month, day) with day clamped to the month's length.
+
+    A start_day of 29-31 would otherwise raise in a shorter month
+    (date(2026, 4, 31) is not a date), so the cycle silently rolls back to
+    that month's last day instead.
+    """
+    if month == 12:
+        nxt = date(year + 1, 1, 1)
+    else:
+        nxt = date(year, month + 1, 1)
+    last = (nxt - timedelta(days=1)).day
+    return date(year, month, min(day, last))
+
+
+def cycle_bounds(d: date, start_day: int = DEFAULT_CYCLE_START_DAY) -> tuple[date, date]:
+    """Return (first_day, last_day) of the billing cycle containing `d`."""
+    start_day = max(1, min(31, int(start_day)))
+    anchor = _clamp_day(d.year, d.month, start_day)
+    if d >= anchor:
+        start = anchor
+    else:
+        prev = d.replace(day=1) - timedelta(days=1)
+        start = _clamp_day(prev.year, prev.month, start_day)
+    if start.month == 12:
+        nxt = _clamp_day(start.year + 1, 1, start_day)
+    else:
+        nxt = _clamp_day(start.year, start.month + 1, start_day)
+    return start, nxt - timedelta(days=1)

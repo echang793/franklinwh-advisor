@@ -36,8 +36,8 @@ from .config import load as load_config
 from .format_utils import time_to_pct
 from .history import HistoryStore, integrate_intervals
 from .predictor import predict
-from .tou import (BASE_SERVICE_DAILY, TouPeriod, export_rate_at, on_peak_window,
-                  period_at, rate_at)
+from .tou import (BASE_SERVICE_DAILY, TouPeriod, cycle_bounds, export_rate_at,
+                  on_peak_window, period_at, rate_at)
 
 app = FastAPI(title="FranklinWH Advisor API", docs_url=None, redoc_url=None)
 
@@ -49,7 +49,8 @@ if not _OUT.is_absolute():
 _BAT_CAP = _cfg.battery_capacity_kwh or 13.6
 _POLL_S  = (_cfg.watch_interval or 5) * 60
 
-_CYCLE_START_DAY = 19  # SDG&E billing cycle boundary
+# Billing-cycle boundary now comes from cfg.billing_cycle_start_day via
+# tou.cycle_bounds — see _cycle_bounds below.
 
 
 def _require_token(request: Request) -> None:
@@ -413,13 +414,11 @@ def api_tou():
 
 
 def _cycle_bounds(d: date) -> tuple[date, date]:
-    if d.day >= _CYCLE_START_DAY:
-        start = d.replace(day=_CYCLE_START_DAY)
-    else:
-        prev = (d.replace(day=1) - timedelta(days=1))
-        start = prev.replace(day=_CYCLE_START_DAY)
-    nxt = (start.replace(day=1) + timedelta(days=32)).replace(day=_CYCLE_START_DAY)
-    return start, nxt - timedelta(days=1)
+    """Thin shim over tou.cycle_bounds so the dashboard, the digests, and the
+    chatbot all derive the billing cycle from one implementation. They used to
+    disagree — this endpoint said day 19, the digests said 20, and the chatbot
+    computed a window a full month stale."""
+    return cycle_bounds(d, _cfg.billing_cycle_start_day)
 
 
 def _cycle_cost(start: date, end: date) -> dict:

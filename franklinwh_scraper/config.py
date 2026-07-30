@@ -29,6 +29,9 @@ class Config:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     battery_capacity_kwh: float = 13.6
+    # Day of month the utility billing cycle starts. SDG&E bills on a
+    # per-meter read date, not a utility-wide constant — check your bill.
+    billing_cycle_start_day: int = 20
     anthropic_api_key: str = ""
     chat_backend: str = "none"      # "anthropic" | "ollama" | "none"
     ollama_model: str = "llama3.1:8b"

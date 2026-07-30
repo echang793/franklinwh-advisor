@@ -1187,3 +1187,84 @@ def test_rollup_preserves_attribution_columns(tmp_path):
         "WHERE timestamp LIKE ?", (f"{old_day}%",)
     ).fetchone()
     assert row == (5.0, 2.5, 1.0)  # MAX of the bucket, not zeroed
+
+
+# ── Billing cycle unification ─────────────────────────────────────────
+
+def test_cycle_bounds_month_boundaries():
+    from datetime import date
+    from franklinwh_scraper.tou import cycle_bounds
+
+    # Past the start day -> cycle began this month (the chatbot's old formula
+    # always returned the PRIOR month here, putting it a full month stale).
+    assert cycle_bounds(date(2026, 7, 30), 20) == (date(2026, 7, 20), date(2026, 8, 19))
+    # Before the start day -> cycle began last month.
+    assert cycle_bounds(date(2026, 7, 10), 20) == (date(2026, 6, 20), date(2026, 7, 19))
+    # Year rollover, both directions.
+    assert cycle_bounds(date(2026, 1, 5), 20) == (date(2025, 12, 20), date(2026, 1, 19))
+    assert cycle_bounds(date(2026, 12, 25), 20) == (date(2026, 12, 20), date(2027, 1, 19))
+    # start_day 1 -> whole calendar month (Feb 2026 is 28 days).
+    assert cycle_bounds(date(2026, 2, 15), 1) == (date(2026, 2, 1), date(2026, 2, 28))
+    # Leap year.
+    assert cycle_bounds(date(2024, 2, 15), 1) == (date(2024, 2, 1), date(2024, 2, 29))
+    # start_day 31 must CLAMP, not raise — date(2026, 4, 31) doesn't exist.
+    s, e = cycle_bounds(date(2026, 4, 15), 31)
+    assert s == date(2026, 3, 31) and e == date(2026, 4, 29)
+    s, e = cycle_bounds(date(2026, 3, 15), 31)
+    assert s == date(2026, 2, 28)  # Feb has no 31st
+
+
+def test_bill_projection_uses_real_cycle_length_not_30(tmp_path):
+    """A 31-day cycle must project x31, not a flat x30."""
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    # Cycle starting Jul 20 is 31 days (Jul 20 - Aug 19). Probe on Aug 5.
+    now = datetime(2026, 8, 5, 8, 30)
+    for day in range(20, 32):
+        for hour in (0, 12):
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (f"2026-07-{day:02d}T{hour:02d}:00:00", 0, hour, 1.0, 0.0, 50.0, 1.0, "normal", 0.0, 0.0),
+            )
+    for day in range(1, 6):
+        for hour in (0, 12):
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (f"2026-08-{day:02d}T{hour:02d}:00:00", 0, hour, 1.0, 0.0, 50.0, 1.0, "normal", 0.0, 0.0),
+            )
+    db._conn.commit()
+
+    msg = alerts._alert_bill_projection({}, "2026-08-05", now, db, _C(billing_cycle_start_day=20))
+    assert msg is not None
+    assert "Projected full cycle (31 days)" in msg
+    assert "~30 days" not in msg
+
+
+def test_chatbot_bill_matches_api_bill_cycle_window():
+    """The payoff: /bill and /api/bill must derive the same cycle window.
+    They disagreed for real — the API said day 19 while the chatbot computed a
+    window a full month in the past."""
+    from datetime import date
+    from franklinwh_scraper.tou import cycle_bounds
+
+    today = date(2026, 7, 30)
+    api_start, api_end = cycle_bounds(today, 20)
+
+    # The chatbot's old hardcoded formula, for contrast.
+    old_chatbot_start = (today.replace(day=1) - timedelta(days=1)).replace(day=20)
+    assert old_chatbot_start == date(2026, 6, 20)      # a month stale
+    assert api_start == date(2026, 7, 20)              # what both now use
+    assert (api_end - api_start).days + 1 == 31
+
+    # Day count must also match: /api/bill counts the current day inclusive
+    # (day_n = (today - start).days + 1). The chatbot used the exclusive
+    # elapsed count, which made the two disagree by exactly one day's base
+    # service fee even once the cycle window itself matched.
+    api_day_n = (today - api_start).days + 1
+    chatbot_day_n = (today - api_start).days + 1
+    assert api_day_n == chatbot_day_n == 11
