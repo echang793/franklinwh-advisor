@@ -583,6 +583,31 @@ def setup() -> None:
             "  Typical kWh per charge (0 if unsure)", type=float,
             default=cfg.ev_kwh_per_session or 0.0,
         )
+        click.echo()
+        cfg.ev_control_enabled = click.confirm(
+            "  Tesla owners: automatically adjust charging speed to track "
+            "solar surplus?\n  (one-time Tesla developer setup required — "
+            "see docs/TESLA_SETUP.md)",
+            default=cfg.ev_control_enabled,
+        )
+        if cfg.ev_control_enabled:
+            cfg.tesla_vin = click.prompt(
+                "  Tesla VIN", default=cfg.tesla_vin or "").strip()
+            cfg.tesla_client_id = click.prompt(
+                "  Tesla developer app client ID",
+                default=cfg.tesla_client_id or "").strip()
+            cfg.ev_max_amps = click.prompt(
+                "  Max charging amps (check your charger's breaker)",
+                type=int, default=cfg.ev_max_amps)
+            cfg.ev_battery_first_soc = click.prompt(
+                "  Home battery SoC before EV gets surplus (%)",
+                type=float, default=cfg.ev_battery_first_soc)
+            from .tesla import TESLA_TOKEN_PATH
+            if not TESLA_TOKEN_PATH.exists():
+                _warn("Not yet authorized with Tesla — after finishing "
+                      "docs/TESLA_SETUP.md, run: franklinwh tesla auth")
+            _warn("Starting in DRY-RUN mode: decisions are logged but no "
+                  "commands are sent. Disable with: franklinwh tesla go-live")
 
     # ── Uptime monitoring ─────────────────────────────────────────────
     click.echo()
@@ -651,6 +676,28 @@ def doctor() -> None:
     _check("Uptime monitoring",    bool(cfg.healthcheck_url),
            "configured" if cfg.healthcheck_url else "optional — set up at healthchecks.io")
 
+    # EV charge control (optional feature — only checked when enabled)
+    if getattr(cfg, "ev_control_enabled", False):
+        from .tesla import TESLA_KEY_PATH, TESLA_TOKEN_PATH
+        _check("EV control: VIN + client ID",
+               bool(cfg.tesla_vin and cfg.tesla_client_id))
+        _check("EV control: Tesla tokens", TESLA_TOKEN_PATH.exists(),
+               str(TESLA_TOKEN_PATH) if TESLA_TOKEN_PATH.exists()
+               else "run: franklinwh tesla auth")
+        _check("EV control: command signing key", TESLA_KEY_PATH.exists(),
+               str(TESLA_KEY_PATH) if TESLA_KEY_PATH.exists()
+               else "see docs/TESLA_SETUP.md")
+        _check("EV control: mode", True,
+               "DRY RUN (logging only)" if cfg.ev_dry_run else "LIVE")
+        _ev_state_path = pathlib.Path(cfg.output_dir) / ".ev_controller_state.json"
+        try:
+            _ev_state = json.loads(_ev_state_path.read_text())
+            _last_err = _ev_state.get("last_error", "")
+            _check("EV control: last error", not _last_err,
+                   _last_err or "none")
+        except (OSError, json.JSONDecodeError):
+            _check("EV control: state", True, "no state yet (starts on first run)")
+
     # Output dir writable
     out = pathlib.Path(cfg.output_dir)
     try:
@@ -681,6 +728,72 @@ def doctor() -> None:
         _check("API login", False, "credentials not set — run: franklinwh setup")
 
     click.echo()
+
+
+# ── Tesla (EV charge control) ────────────────────────────────────────
+
+@cli.group("tesla")
+def grp_tesla() -> None:
+    """Tesla Fleet API setup for EV charge control."""
+
+
+@grp_tesla.command("auth")
+@click.pass_context
+def tesla_auth(ctx: click.Context) -> None:
+    """One-time OAuth: authorize this app with your Tesla account."""
+    cfg = ctx.obj["config"]
+    if not cfg.tesla_client_id:
+        raise click.ClickException(
+            "tesla_client_id not set — run `franklinwh setup` first "
+            "(and see docs/TESLA_SETUP.md for the developer registration).")
+
+    from .tesla import TESLA_TOKEN_PATH, build_login_url, exchange_code
+
+    client_secret = click.prompt("  Tesla app client secret", hide_input=True)
+    redirect_uri = click.prompt(
+        "  Redirect URI (exactly as registered in the developer portal)")
+
+    url = build_login_url(cfg.tesla_client_id, redirect_uri)
+    click.echo()
+    click.echo("  Open this URL in a browser, sign in, and approve:")
+    click.echo(f"\n  {url}\n")
+    click.echo("  After approving you land on the redirect URI — copy the "
+               "full URL from the address bar (it contains ?code=...).")
+    pasted = click.prompt("  Paste the full redirect URL (or just the code)")
+
+    code = pasted.strip()
+    if "code=" in code:
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(code).query)
+        code = (qs.get("code") or [""])[0]
+    if not code:
+        raise click.ClickException("No authorization code found in the input.")
+
+    exchange_code(cfg.tesla_client_id, client_secret, redirect_uri, code)
+    _ok(f"Authorized — tokens saved to {TESLA_TOKEN_PATH}")
+    _ok("Next: dry-run soak. Leave ev_dry_run on for a sunny day or two, "
+        "then run: franklinwh tesla go-live")
+
+
+@grp_tesla.command("go-live")
+@click.pass_context
+def tesla_go_live(ctx: click.Context) -> None:
+    """Turn off dry-run mode — the controller starts sending real commands."""
+    cfg = ctx.obj["config"]
+    if not cfg.ev_control_enabled:
+        raise click.ClickException("EV control is not enabled — run `franklinwh setup`.")
+    if not cfg.ev_dry_run:
+        _ok("Already live.")
+        return
+    if not click.confirm(
+            "  The advisor will now adjust your Tesla's charging speed "
+            "automatically. Continue?"):
+        return
+    cfg.ev_dry_run = False
+    save_config(cfg)
+    _ok("EV control is LIVE. Restart the advisor to pick it up:\n"
+        "     launchctl stop com.franklinwh.advisor && "
+        "launchctl start com.franklinwh.advisor")
 
 
 # ── Dashboard ────────────────────────────────────────────────────────
@@ -1276,6 +1389,20 @@ def cmd_advise(
         _last_stats      = None  # cached for time-gated alerts during API outages
         _lic_warn_date   = ""    # one grace-period Telegram warning per day
 
+        # Closed-loop EV charging control (opt-in). Constructor failures
+        # (missing token file, bad VIN) must degrade to advisory-only, never
+        # kill the advisor.
+        _ev = None
+        if getattr(cfg, "ev_control_enabled", False):
+            try:
+                from .ev_controller import EvController
+                _ev = EvController(cfg, outdir)
+                _ok(f"EV charge control active"
+                    f"{' (dry run)' if cfg.ev_dry_run else ''}")
+            except Exception as e:
+                logger.exception("EV controller init failed")
+                _err(f"EV control disabled this run: {e}")
+
         while True:
             # Re-check each cycle so expiry mid-run is caught; file read + Ed25519
             # verify is microseconds, negligible at a 5-min poll cadence.
@@ -1398,6 +1525,17 @@ def cmd_advise(
                 notify_log(rec, log_path)
                 _dispatch_notifications(rec, cfg, notify, last_mode, outdir)
                 _check_peak_alerts(stats, cfg, outdir, outlook=outlook, usage_forecast=usage_forecast, store=history)
+
+                # EV controller runs on its own try/except: a Tesla failure
+                # must never inflate _consec_errors (that path alerts about
+                # FranklinWH poll outages, which this is not). On a FWH
+                # outage tick this is skipped entirely — no fresh stats, no
+                # blind amp changes.
+                if _ev is not None:
+                    try:
+                        _ev.tick(stats, datetime.now())
+                    except Exception:
+                        logger.exception("EV controller error — advisor unaffected")
 
                 last_mode = rec.mode.value
                 _save_last_mode(outdir, last_mode)
@@ -1574,6 +1712,79 @@ def cmd_savings(ctx: click.Context, days: int, out: str | None) -> None:
     if sv.export_days_at_assumed_rate:
         _info(f"{sv.export_days_at_assumed_rate} export day(s) priced at the assumed "
               f"NBT floor rate — SDG&E publishes hourly export rates only for Aug/Sep.")
+
+
+@grp_account.command("ev-status")
+@click.option("--out", "-o", default=None)
+@click.option("--live", is_flag=True, default=False,
+              help="Do one billable Tesla poll ($0.002) for fresh vehicle state.")
+@click.pass_context
+def cmd_ev_status(ctx: click.Context, out: str | None, live: bool) -> None:
+    """EV charge controller status: session, last decision, spend."""
+    cfg    = ctx.obj["config"]
+    outdir = Path(out or cfg.output_dir)
+
+    if not getattr(cfg, "ev_control_enabled", False):
+        raise click.ClickException(
+            "EV control is not enabled — run `franklinwh setup`.")
+
+    state_path = outdir / ".ev_controller_state.json"
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        state = {}
+
+    _header("EV Charge Control")
+    mode = "DRY RUN (logging only)" if cfg.ev_dry_run else "LIVE"
+    click.echo(f"  {'Mode':24} {mode}")
+    click.echo(f"  {'Session':24} {state.get('session', 'none')}")
+    click.echo(f"  {'Commanded amps':24} {state.get('last_commanded_amps') or '—'}")
+    click.echo(f"  {'Override standdown':24} "
+               f"{state.get('override_until_iso') or 'no'}")
+    click.echo(f"  {'Consecutive API errors':24} "
+               f"{state.get('consec_tesla_errors', 0)}")
+    if state.get("last_error"):
+        click.echo(f"  {'Last error':24} {state['last_error']}")
+
+    month = datetime.now().strftime("%Y-%m")
+    counts = state.get("spend", {}).get(month, {})
+    spend = (counts.get("data", 0) * 0.002 + counts.get("cmd", 0) * 0.001
+             + counts.get("wake", 0) * 0.02)
+    click.echo(f"  {'API spend ({})'.format(month):24} "
+               f"${spend:.2f} of $10 credit "
+               f"(data {counts.get('data', 0)} · cmd {counts.get('cmd', 0)}"
+               f" · wake {counts.get('wake', 0)})")
+
+    log_path = outdir / "ev_controller.jsonl"
+    if log_path.exists():
+        _hr()
+        click.echo(click.style("  Recent decisions", bold=True))
+        lines = log_path.read_text().splitlines()[-5:]
+        for line in lines:
+            try:
+                e = json.loads(line)
+                click.echo(f"  {e['timestamp']}  {e['action']:<10} "
+                           f"{e.get('amps') or '':>3}  {e['reason']}")
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+    if live:
+        _hr()
+        click.echo("  Polling vehicle…", nl=False)
+        try:
+            from .tesla import TeslaClient
+            v = TeslaClient(cfg.tesla_vin, cfg.tesla_client_id).get_charge_state()
+            click.echo()
+            click.echo(f"  {'Plugged in':24} {'yes' if v.plugged_in else 'no'}")
+            click.echo(f"  {'Charging':24} {'yes' if v.charging else 'no'}")
+            click.echo(f"  {'Vehicle SoC':24} {v.vehicle_soc_pct:.0f}% "
+                       f"(limit {v.charge_limit_pct:.0f}%)")
+            click.echo(f"  {'Amps':24} {v.requested_amps} requested · "
+                       f"{v.actual_current_a:.0f} actual · "
+                       f"{v.charger_max_amps} max")
+        except Exception as e:
+            click.echo(click.style(f" FAILED: {e}", fg="red"))
+    click.echo()
 
 
 @grp_account.command("accuracy")

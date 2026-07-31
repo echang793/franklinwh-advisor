@@ -61,6 +61,17 @@ class Config:
     ev_charging: bool = False
     ev_kwh_per_session: float = 0.0   # 0 = unknown; if set, shows $ savings estimate
 
+    # Closed-loop EV charging control (Tesla Fleet API). See docs/TESLA_SETUP.md.
+    # Tokens live in ~/.franklinwh_tesla.json (they rotate; keeping them out of
+    # this file means a wizard save can never clobber a rotated refresh token).
+    ev_control_enabled: bool = False  # master gate; ev_charging stays advisory-only
+    ev_dry_run: bool = True           # log decisions, send no commands (safe rollout)
+    tesla_vin: str = ""
+    tesla_client_id: str = ""
+    ev_max_amps: int = 32             # confirm against the charger's circuit breaker
+    ev_battery_first_soc: float = 80.0  # FWH battery tops up before EV gets surplus
+    ev_reserve_kw: float = 0.25       # headroom so rounding never imports from grid
+
     # Per-alert opt-outs.  Empty = all alerts enabled.
     # Values are alert-name strings (function suffix after _alert_).
     disabled_alerts: list[str] = field(default_factory=list)

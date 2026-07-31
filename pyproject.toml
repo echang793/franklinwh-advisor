@@ -41,6 +41,10 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
+# Closed-loop EV charging control (tesla.py imports this lazily, so the
+# advisor runs fine without it — unlike fastapi above).
+# tesla-fleet-api requires Python >=3.13.
+ev = ["tesla-fleet-api>=1.7"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
