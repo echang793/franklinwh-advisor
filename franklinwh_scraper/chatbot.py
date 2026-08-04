@@ -12,7 +12,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from .format_utils import fmt_hours, soc_bar, time_to_pct
-from .tou import on_peak_window, period_at, rate_at
+from .tou import _RATES, TouPeriod, on_peak_window, period_at, rate_at
 
 logger = logging.getLogger(__name__)
 
@@ -26,19 +26,31 @@ _time_to_pct = time_to_pct
 _fmt_hours   = fmt_hours
 
 
-_SYSTEM_PROMPT = """\
+def _rate_row(hours: str, period: TouPeriod, label: str, note: str = "") -> str:
+    """Format one EV-TOU-5 rate row from tou._RATES, so the prompt can't drift from the live rate table."""
+    winter = _RATES["winter"][period]
+    summer = _RATES["summer"][period]
+    return f"  {hours:<10} {label:<15} ${winter:.3f}/kWh (winter) / ${summer:.3f} (summer){note}"
+
+
+_RATE_TABLE = "\n".join([
+    _rate_row("12am–6am", TouPeriod.SUPER_OFF_PEAK, "Super Off-Peak"),
+    _rate_row("6am–10am", TouPeriod.OFF_PEAK, "Off-Peak"),
+    _rate_row("10am–2pm", TouPeriod.SUPER_OFF_PEAK, "Super Off-Peak", "  ← cheapest window"),
+    _rate_row("2pm–4pm", TouPeriod.OFF_PEAK, "Off-Peak"),
+    _rate_row("4pm–9pm", TouPeriod.ON_PEAK, "On-Peak", "  ← most expensive"),
+    _rate_row("9pm–12am", TouPeriod.OFF_PEAK, "Off-Peak"),
+])
+
+
+_SYSTEM_PROMPT = f"""\
 You are an energy assistant for a home with a FranklinWH battery, solar panels, \
 and an SDG&E EV-TOU-5 electricity plan. Help the owner understand their solar \
 production, battery state, and electricity costs, and give practical advice on \
 charging schedules, mode switches, and load timing.
 
 EV-TOU-5 weekday rates:
-  12am–6am   Super Off-Peak  $0.117/kWh (winter) / $0.124 (summer)
-  6am–10am   Off-Peak        $0.473 / $0.502
-  10am–2pm   Super Off-Peak  $0.117 / $0.124  ← cheapest window
-  2pm–4pm    Off-Peak        $0.473 / $0.502
-  4pm–9pm    On-Peak         $0.529 / $0.800  ← most expensive
-  9pm–12am   Off-Peak        $0.473 / $0.502
+{_RATE_TABLE}
 Weekends: Super Off-Peak until 2pm, then same as weekday.
 Summer = June–October.
 

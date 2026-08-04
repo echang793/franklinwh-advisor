@@ -21,7 +21,6 @@ from .alerts import (
     _BATTERY_CAPACITY_KWH,
     _GHI_CLOUDY_THRESHOLD,
     _check_peak_alerts,
-    _fetch_outlook_cached,
     _get_hourly_bias,
     _get_performance_ratio,
     _get_system_peak_kw,
@@ -43,7 +42,7 @@ from .notifier import (notify_email, notify_imessage, notify_log,
 from .predictor import predict
 from .scrapers import FAQScraper, ProductsScraper, SupportScraper
 from .tou import cycle_bounds
-from .weather import geocode
+from .weather import fetch_solar_outlook_cached as _fetch_outlook_cached, geocode
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

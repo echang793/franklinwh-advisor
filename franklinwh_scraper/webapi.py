@@ -27,7 +27,6 @@ from .alerts import (
     _get_hourly_bias,
     _get_performance_ratio,
     _get_system_peak_kw,
-    _fetch_outlook_cached,
     _GHI_CLOUDY_THRESHOLD,
     _load_peak_state,
 )
@@ -39,6 +38,7 @@ from .predictor import predict
 from . import savings
 from .tou import (BASE_SERVICE_DAILY, TouPeriod, cycle_bounds, export_rate_at,
                   on_peak_window, period_at, rate_at)
+from .weather import fetch_solar_outlook_cached as _fetch_outlook_cached
 
 app = FastAPI(title="FranklinWH Advisor API", docs_url=None, redoc_url=None)
 

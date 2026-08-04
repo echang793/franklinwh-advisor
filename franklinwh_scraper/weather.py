@@ -2,6 +2,7 @@
 
 import logging
 import random
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import requests
@@ -281,3 +282,27 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
 
     logger.debug("Fetched %d hourly forecasts for %.4f, %.4f", len(hours), lat, lon)
     return SolarOutlook(hours=hours, utc_offset_seconds=js.get("utc_offset_seconds", 0))
+
+
+# ── Cached fetch (shared by every caller — alerts, cli, webapi, chatbot) ────
+#
+# Lives here rather than in each caller so a chatbot query and the alert
+# loop hit the same 30-min-TTL cache instead of each keeping (and paying
+# for) its own copy of the same Open-Meteo forecast.
+
+_outlook_cache: dict = {}
+
+
+def fetch_solar_outlook_cached(lat: float, lon: float):
+    """Return a SolarOutlook, fetching fresh data at most once per 30 minutes."""
+    now_ts = time.time()
+    if _outlook_cache.get("outlook") is not None and now_ts - _outlook_cache.get("fetched_at", 0) < 1800:
+        return _outlook_cache["outlook"]
+    try:
+        outlook = fetch_solar_outlook(lat, lon)
+        _outlook_cache["outlook"] = outlook
+        _outlook_cache["fetched_at"] = now_ts
+        return outlook
+    except Exception as e:
+        logger.warning("Weather forecast fetch failed: %s", e)
+        return _outlook_cache.get("outlook")  # serve stale cache rather than None

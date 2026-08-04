@@ -23,7 +23,7 @@ from .tou import (base_service_cost, cheap_charge_deadline,
                   cycle_bounds, export_rate_at, on_peak_window,
                   peak_export_hour, rate_at, rates_are_stale)
 from .savings import compute as savings_compute
-from .weather import fetch_nws_storm_alerts, fetch_solar_outlook
+from .weather import (_outlook_cache, fetch_nws_storm_alerts)
 
 logger = logging.getLogger(__name__)
 
@@ -86,26 +86,6 @@ def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
         if len(samples) < 3:
             return 1.0
         return max(_ewma(samples), 0.60)
-
-
-# ── Weather forecast cache (30-min TTL) ──────────────────────────────
-
-_outlook_cache: dict = {}
-
-
-def _fetch_outlook_cached(lat: float, lon: float):
-    """Return a SolarOutlook, fetching fresh data at most once per 30 minutes."""
-    now_ts = time.time()
-    if _outlook_cache.get("outlook") is not None and now_ts - _outlook_cache.get("fetched_at", 0) < 1800:
-        return _outlook_cache["outlook"]
-    try:
-        outlook = fetch_solar_outlook(lat, lon)
-        _outlook_cache["outlook"] = outlook
-        _outlook_cache["fetched_at"] = now_ts
-        return outlook
-    except Exception as e:
-        logger.warning("Weather forecast fetch failed: %s", e)
-        return _outlook_cache.get("outlook")  # serve stale cache rather than None
 
 
 # ── Multi-channel alert dispatcher ───────────────────────────────────

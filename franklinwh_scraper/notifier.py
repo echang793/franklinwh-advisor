@@ -84,7 +84,12 @@ def notify_log(rec: Recommendation, log_path: Path) -> None:
 
 
 def notify_imessage_text(body: str, phone: str) -> None:
-    """Send a plain text iMessage (not tied to a Recommendation object)."""
+    """Send a plain text iMessage (not tied to a Recommendation object).
+
+    Retried like the other channels — a transient Messages.app hiccup
+    (app not yet launched, iMessage service still connecting) used to
+    drop the alert silently on the first failed attempt.
+    """
     script = (
         f'tell application "Messages"\n'
         f'  set targetService to 1st service whose service type = iMessage\n'
@@ -92,13 +97,12 @@ def notify_imessage_text(body: str, phone: str) -> None:
         f'  send "{_esc(body)}" to targetBuddy\n'
         f'end tell'
     )
-    try:
+
+    def _send():
         subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
         logger.debug("iMessage sent to %s", phone)
-    except subprocess.CalledProcessError as e:
-        logger.warning("iMessage failed: %s", e.stderr.decode().strip())
-    except FileNotFoundError:
-        logger.warning("osascript not available (not macOS?)")
+
+    _with_retry(_send, "iMessage")
 
 
 def _with_retry(fn, label: str, attempts: int = 3, base_delay: float = 2.0) -> bool:
