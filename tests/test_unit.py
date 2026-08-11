@@ -1844,3 +1844,49 @@ def test_dashboard_refuses_public_bind_without_token(monkeypatch):
     assert res.exit_code != 0
     assert "Refusing to bind" in res.output
     assert not called, "uvicorn.run must not be reached on a refused bind"
+
+def test_hourly_bias_uses_ewma_not_flat_median():
+    """Root-cause fix for the 2026-08 month-long low-prediction bias: hour 7
+    trended 0.97 (30-day median) up to 1.75 in its last 5 samples. A flat
+    median can't track that; EWMA should weight the recent climb heavily."""
+    import statistics as _stats
+
+    from franklinwh_scraper.alerts import _get_hourly_bias
+
+    state = {"solar_bias_h7": [
+        0.97, 0.95, 0.98, 0.96, 0.99, 1.0, 0.94, 0.97, 0.95, 0.96,
+        0.98, 0.97, 0.96, 0.99, 0.95, 0.97, 0.96, 0.98, 0.97, 0.95,
+        0.96, 0.98, 0.97, 0.96, 1.34, 1.44, 1.55, 1.63, 1.75,
+    ]}
+    bias = _get_hourly_bias(state)
+    median = _stats.median(state["solar_bias_h7"])
+    assert bias[7] > median + 0.15, (
+        f"EWMA {bias[7]:.3f} should sit well above the stale median "
+        f"{median:.3f} once recent samples have climbed")
+
+
+def test_hourly_bias_stays_within_sample_bounds():
+    """EWMA is a convex combination — can't exceed the [0.3, 2.0] range
+    samples are already restricted to on append (no extra clamp needed)."""
+    from franklinwh_scraper.alerts import _get_hourly_bias
+
+    state = {"solar_bias_h12": [0.5, 0.5, 0.5, 0.5, 2.0, 2.0]}
+    bias = _get_hourly_bias(state)
+    assert 0.5 <= bias[12] <= 2.0
+
+
+def test_hourly_bias_requires_five_samples():
+    from franklinwh_scraper.alerts import _get_hourly_bias
+
+    state = {"solar_bias_h9": [1.1, 1.2, 1.3, 1.4]}  # only 4
+    assert 9 not in _get_hourly_bias(state)
+
+
+def test_hourly_bias_matches_perf_ratio_weighting():
+    """Same EWMA as perf_ratio — both correction layers should converge at
+    the same speed rather than one lagging the other."""
+    from franklinwh_scraper.alerts import _ewma, _get_hourly_bias
+
+    samples = [1.0, 1.0, 1.0, 1.0, 1.0, 1.5]
+    state = {"solar_bias_h11": samples}
+    assert _get_hourly_bias(state)[11] == _ewma(samples)

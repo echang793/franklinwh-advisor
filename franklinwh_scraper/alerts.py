@@ -340,12 +340,25 @@ def _calibrate_solar_hourly(state: dict, solar_kw: float, outlook, now: datetime
 
 
 def _get_hourly_bias(state: dict) -> dict[int, float]:
-    """Return per-hour learned solar correction factors (median of samples, min 5)."""
+    """Return per-hour learned solar correction factors (EWMA of samples, min 5).
+
+    Was a flat 30-day median. The array's per-hour shading profile keeps
+    shifting as day length changes through the seasons — e.g. the 2026-08
+    investigation into a month of ~4-6% low-biased predictions found hour 7
+    trending 0.97->1.75 and hour 17 trending 0.60->0.38 within the same
+    window, a real physical drift a flat median of the whole month can't
+    track. `perf_ratio` already uses this same EWMA for exactly that
+    reason (see _ewma) — using the same weighting here means both
+    correction layers chase a moving target at the same speed instead of
+    the daily one converging while this one lags weeks behind it. No
+    extra clamping needed: EWMA is a convex combination, so it can't leave
+    the [0.3, 2.0] range samples are already restricted to on append.
+    """
     bias: dict[int, float] = {}
     for h in range(24):
         samples = state.get(f"solar_bias_h{h}", [])
         if len(samples) >= 5:
-            bias[h] = statistics.median(samples)
+            bias[h] = _ewma(samples)
     return bias
 
 
