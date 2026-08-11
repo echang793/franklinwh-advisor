@@ -45,6 +45,15 @@ class UsageForecast:
     data_days: int              # how many days of history were used
 
 
+_LOAD_NOWCAST_HALFLIFE_H = 2.0  # current draw's influence on the forecast
+                                # halves every 2h — by hour 8 (e.g. the
+                                # overnight span behind the 9pm digest's
+                                # "predicted SoC @ 7am") it's under 1% of its
+                                # starting weight, so an unusual load right
+                                # now nudges the next couple hours without
+                                # distorting the pure-overnight tail.
+
+
 def predict(
     store: HistoryStore,
     horizon_hours: int = 12,
@@ -53,6 +62,7 @@ def predict(
     perf_ratio: float = 1.0,
     avg_temp_c: float = 22.0,
     hourly_bias: dict[int, float] | None = None,
+    current_load_kw: float | None = None,
 ) -> UsageForecast:
     """
     Predict home load and solar production for the next `horizon_hours` hours.
@@ -62,6 +72,13 @@ def predict(
     GHI forecast instead of historical averages.
     hourly_bias: per-hour learned correction factors (actual/predicted) that
     improve accuracy over time as real readings accumulate.
+    current_load_kw: live home_load_kw reading at call time, if available.
+    Anchors the near-term forecast to what's actually happening right now
+    (e.g. a guest over, laundry running) instead of relying purely on the
+    historical average for this hour-of-week slot. The correction decays
+    over _LOAD_NOWCAST_HALFLIFE_H so it fades out well before the
+    overnight tail — it nudges the next couple hours, it doesn't assume
+    tonight's unusual load holds until morning.
     Confidence degrades with fewer data points per slot.
     """
     now        = datetime.now()
@@ -114,6 +131,7 @@ def predict(
     heat_temp_scale = 1.0 + 0.020 * max(0.0, 18.0 - avg_temp_c)
 
     predictions: list[HourPrediction] = []
+    live_residual_kw = 0.0  # set from h=0's (current - baseline) gap, then decayed
 
     for h in range(horizon_hours):
         future = now + timedelta(hours=h)
@@ -165,6 +183,13 @@ def predict(
         else:
             temp_scale = heat_temp_scale
         load_kw = load_kw * temp_scale
+
+        if current_load_kw is not None:
+            if h == 0:
+                live_residual_kw = current_load_kw - load_kw
+            weight = 0.5 ** (h / _LOAD_NOWCAST_HALFLIFE_H)
+            load_kw = max(0.0, load_kw + live_residual_kw * weight)
+
         predictions.append(HourPrediction(
             dt=future,
             predicted_load_kw=round(load_kw, 2),

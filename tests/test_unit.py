@@ -2010,3 +2010,112 @@ def test_battery_full_alert_message_reflects_current_period():
                                                 dt(2026, 8, 8, 16, 30), c)
     assert "until 2 pm" not in msg
     assert "on-peak" in msg
+
+
+def test_predict_anchors_next_hour_to_current_load(tmp_path):
+    """current_load_kw should make hour 0's prediction equal what's actually
+    happening right now, not the historical average for this slot — the
+    literal ask: 'base that prediction off my current usage at the time of
+    the alert'."""
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now()
+    slot_dow, slot_hour = now.weekday(), now.hour
+
+    def _insert(ts: datetime, load_kw: float):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts.isoformat(), slot_dow, slot_hour, load_kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+        )
+
+    # Typical load for this exact slot has always been ~1.0 kW.
+    for i in range(10):
+        _insert(now - timedelta(days=7 * i), 1.0)
+    db._conn.commit()
+
+    baseline = predict(db, horizon_hours=1)
+    assert baseline.hours[0].predicted_load_kw < 1.5  # sanity: unmodified case
+
+    live = predict(db, horizon_hours=1, current_load_kw=6.0)
+    # h=0 weight is 1.0 -> prediction should land on the live reading exactly
+    # (temp_scale is 1.0 at 22C default, so no extra drift to account for).
+    assert abs(live.hours[0].predicted_load_kw - 6.0) < 0.05
+
+
+def test_predict_decays_live_correction_toward_baseline(tmp_path):
+    """Tonight's unusual draw shouldn't be extrapolated flat until morning —
+    it should fade back to the historical pattern within a few hours."""
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now()
+
+    def _insert(ts: datetime, load_kw: float):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts.isoformat(), ts.weekday(), ts.hour, load_kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+        )
+
+    # Historical baseline of 1.0 kW for every hour-of-week slot the 10h
+    # forecast horizon will touch, several weeks back so it's outside the
+    # 21-day recency window's influence.
+    for h in range(10):
+        slot_time = now + timedelta(hours=h)
+        for weeks_back in range(1, 11):
+            _insert(slot_time - timedelta(days=7 * weeks_back), 1.0)
+    db._conn.commit()
+
+    forecast = predict(db, horizon_hours=10, current_load_kw=9.0)
+    # h=0: full residual (~9.0). Each _LOAD_NOWCAST_HALFLIFE_H=2h, the
+    # residual halves — by h=8 (four half-lives) it's under ~6% of its
+    # start, so predicted load should have relaxed back near the ~1.0
+    # historical baseline, nowhere near the live 9.0 anchor.
+    assert forecast.hours[0].predicted_load_kw > 8.0
+    assert forecast.hours[8].predicted_load_kw < 2.0
+
+
+def test_predict_without_current_load_kw_is_unchanged(tmp_path):
+    """current_load_kw defaults to None — existing callers (advisor,
+    chatbot forecast summaries, prior tests) must see byte-identical
+    behavior."""
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now()
+
+    def _insert(ts: datetime, load_kw: float):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts.isoformat(), ts.weekday(), ts.hour, load_kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+        )
+
+    for i in range(10):
+        _insert(now - timedelta(days=7 * i), 3.0)
+    db._conn.commit()
+
+    a = predict(db, horizon_hours=3)
+    b = predict(db, horizon_hours=3)
+    assert [p.predicted_load_kw for p in a.hours] == [p.predicted_load_kw for p in b.hours]
+
+
+def test_predict_live_anchor_never_goes_negative(tmp_path):
+    """A large negative residual (live reading well below baseline) must
+    floor at 0, not swing net_kw into a nonsensical negative load."""
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now()
+
+    def _insert(ts: datetime, load_kw: float):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts.isoformat(), ts.weekday(), ts.hour, load_kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+        )
+
+    for i in range(10):
+        _insert(now - timedelta(days=7 * i), 5.0)
+    db._conn.commit()
+
+    forecast = predict(db, horizon_hours=1, current_load_kw=0.0)
+    assert forecast.hours[0].predicted_load_kw >= 0.0

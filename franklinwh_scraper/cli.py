@@ -1476,7 +1476,8 @@ def cmd_advise(
                 usage_forecast = (
                     predict(history, 24, outlook=outlook, system_peak_kw=system_peak_kw,
                             perf_ratio=perf_ratio, avg_temp_c=avg_temp_c,
-                            hourly_bias=hourly_bias)
+                            hourly_bias=hourly_bias,
+                            current_load_kw=stats.current.home_load_kw)
                     if history.has_enough_data() else None
                 )
                 rec = recommend(
