@@ -58,7 +58,8 @@ Home:     32.4 kWh      ← total home consumption
 ─────────────────────
 🟢 ████████░░ 81%
 ⏱ Backup: ~4.2 hr at current load
-🌅 Predicted SoC @ 7 am: ~68%
+🌅 Without EV charging @ 7 am: ~68%     ← plain "Predicted SoC" if no EV configured
+🔌 With EV charging (~7.6 kW): ~41%     ← only shown if you charge an EV at home
 🎯 Solar forecast vs actual:
   Predicted: 26.0 kWh
   Actual:    28.5 kWh

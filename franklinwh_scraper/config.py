@@ -60,9 +60,10 @@ class Config:
     # EV charging — enables the off-peak EV charge-window advisor.
     ev_charging: bool = False
     ev_kwh_per_session: float = 0.0   # 0 = unknown; if set, shows $ savings estimate
-    # Estimated draw (kW) while charging — used only for the manual
-    # `account ev-charging on` flag's "predicted SoC without EV" digest
-    # line. 7.6 kW ~= a 240V/32A Level 2 session; adjust to your amperage.
+    # Typical charging draw (kW) — the evening digest uses this to show a
+    # "with EV charging" SoC estimate alongside its normal (no-EV)
+    # prediction, so you can see both before deciding whether to plug in.
+    # 7.6 kW ~= a 240V/32A Level 2 session; adjust to your amperage.
     ev_charging_kw: float = 7.6
 
     # Closed-loop EV charging control (Tesla Fleet API). See docs/TESLA_SETUP.md.

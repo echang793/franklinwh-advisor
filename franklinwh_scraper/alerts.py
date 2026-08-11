@@ -45,32 +45,6 @@ def _get_system_peak_kw(state: dict) -> float | None:
 
 _GHI_CLOUDY_THRESHOLD = 300  # W/m² avg over 12h — below this = dim/cloudy day
 
-_EV_CHARGING_MAX_HOURS = 12  # `account ev-charging on` auto-expires after this —
-                             # longer than any real overnight session, so a
-                             # forgotten toggle can't quietly keep showing a
-                             # stale "without EV" digest line for days.
-
-
-def _ev_charging_active(state: dict, now: datetime) -> bool:
-    """Whether the manual `account ev-charging on` flag is set and fresh.
-
-    Clears the flag in `state` (caller is responsible for persisting) once
-    it's older than _EV_CHARGING_MAX_HOURS — see the constant above.
-    """
-    if not state.get("ev_charging_active"):
-        return False
-    since = state.get("ev_charging_since")
-    if since:
-        try:
-            age = now - datetime.fromisoformat(since)
-            if age > timedelta(hours=_EV_CHARGING_MAX_HOURS):
-                state["ev_charging_active"] = False
-                state.pop("ev_charging_since", None)
-                return False
-        except ValueError:
-            pass
-    return True
-
 
 _soc_bar     = soc_bar
 _time_to_pct = time_to_pct
@@ -790,27 +764,34 @@ def _alert_eod_digest(
     soc_6am_str = ""
     overnight = _predict_overnight_soc(usage_forecast, now, soc, bat_cap)
     if overnight is not None:
+        # usage_forecast is already anchored to current_load_kw at digest
+        # time (see cli.py), which on a typical night doesn't include EV
+        # charging — that's the "without EV" baseline. "With EV" adds
+        # cfg.ev_charging_kw (typical overnight draw) on top of it, so both
+        # numbers are available up front to decide whether to charge —
+        # no separate toggle needed.
         pred_soc_6am, hour_label = overnight
-        soc_6am_str = f"\n🌅 Predicted SoC @ {hour_label}: ~{pred_soc_6am:.0f}%"
+        has_ev = getattr(cfg, "ev_charging", False)
+        label  = "Without EV charging" if has_ev else "Predicted SoC"
+        soc_6am_str = f"\n🌅 {label} @ {hour_label}: ~{pred_soc_6am:.0f}%"
 
-        # Manual `account ev-charging on` flag: show what tonight would look
-        # like without the EV draw baked into the live-usage anchor, so the
-        # user can gauge how much battery they have to spare for charging.
-        if _ev_charging_active(state, now) and store is not None:
-            no_ev_load = max(0.0, c.home_load_kw - cfg.ev_charging_kw)
-            cloudy_now  = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD if outlook else False
-            no_ev_forecast = predict(
+        if has_ev and store is not None:
+            with_ev_load = c.home_load_kw + cfg.ev_charging_kw
+            cloudy_now   = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD if outlook else False
+            with_ev_forecast = predict(
                 store, 24, outlook=outlook,
                 system_peak_kw=_get_system_peak_kw(state),
                 perf_ratio=_get_performance_ratio(state, cloudy=cloudy_now),
                 avg_temp_c=outlook.avg_temp_c(24) if outlook else 22.0,
                 hourly_bias=_get_hourly_bias(state),
-                current_load_kw=no_ev_load,
+                current_load_kw=with_ev_load,
             )
-            no_ev_overnight = _predict_overnight_soc(no_ev_forecast, now, soc, bat_cap)
-            if no_ev_overnight is not None:
-                no_ev_pct, _ = no_ev_overnight
-                soc_6am_str += f"\n🔌 Without EV charging: ~{no_ev_pct:.0f}%"
+            with_ev_overnight = _predict_overnight_soc(with_ev_forecast, now, soc, bat_cap)
+            if with_ev_overnight is not None:
+                with_ev_pct, _ = with_ev_overnight
+                soc_6am_str += (
+                    f"\n🔌 With EV charging (~{cfg.ev_charging_kw:.1f} kW): ~{with_ev_pct:.0f}%"
+                )
 
     precharge_str  = ""
     tmrw_solar_str = ""
