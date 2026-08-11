@@ -1761,10 +1761,10 @@ def test_critical_soc_still_fires_in_the_evening(monkeypatch):
     assert rec.urgency == "critical"
 
 
-def _digest_stats(soc=55.0):
+def _digest_stats(soc=55.0, home_load_kw=1.5):
     import types
     return types.SimpleNamespace(
-        current=types.SimpleNamespace(battery_soc_pct=soc),
+        current=types.SimpleNamespace(battery_soc_pct=soc, home_load_kw=home_load_kw),
         totals=types.SimpleNamespace(
             solar_kwh=0.0, battery_charge_kwh=0.0, battery_discharge_kwh=0.0,
             grid_load_kwh=2.0, grid_export_kwh=0.0, home_use_kwh=10.0,
@@ -2119,3 +2119,116 @@ def test_predict_live_anchor_never_goes_negative(tmp_path):
 
     forecast = predict(db, horizon_hours=1, current_load_kw=0.0)
     assert forecast.hours[0].predicted_load_kw >= 0.0
+
+
+def test_ev_charging_active_helper_fresh_and_stale():
+    from franklinwh_scraper.alerts import _ev_charging_active
+
+    now = datetime(2026, 8, 10, 21, 0)
+    assert _ev_charging_active({}, now) is False
+
+    fresh = {"ev_charging_active": True, "ev_charging_since": (now - timedelta(hours=3)).isoformat()}
+    assert _ev_charging_active(fresh, now) is True
+
+    stale = {"ev_charging_active": True, "ev_charging_since": (now - timedelta(hours=13)).isoformat()}
+    assert _ev_charging_active(stale, now) is False
+    # A 12h-forgotten toggle must not silently linger — helper clears it.
+    assert stale["ev_charging_active"] is False
+    assert "ev_charging_since" not in stale
+
+
+def test_ev_charging_active_helper_missing_timestamp_treated_as_active():
+    from franklinwh_scraper.alerts import _ev_charging_active
+
+    # Flag on with no since-timestamp (shouldn't happen via the CLI, but a
+    # hand-edited state file could do it) — no age to check, stays active.
+    state = {"ev_charging_active": True}
+    assert _ev_charging_active(state, datetime(2026, 8, 10, 21, 0)) is True
+
+
+def test_eod_digest_shows_without_ev_line_when_flag_active(monkeypatch):
+    """The literal ask: with the manual toggle on, the digest should show
+    what tonight's 7am SoC would be without the EV draw."""
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime.now().replace(hour=21, minute=30, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    readings = [(f"{today}T{h:02d}:00:00", 0.5, 1.0, 0.0) for h in range(0, 20, 2)]
+    store = _AttrStore(attr=(8.2, 5.1, 0.9), readings=readings)
+
+    def _forecast(net_kw):
+        hours = []
+        for h in range(9):
+            dt = now + timedelta(hours=h)
+            hours.append(HourPrediction(
+                dt=dt, predicted_load_kw=1.0,
+                predicted_solar_kw=0.0 if h < 8 else 1.0,  # "sunrise" at h=8
+                net_kw=net_kw, confidence="high",
+            ))
+        return UsageForecast(hours=hours, total_load_kwh=9.0, total_solar_kwh=1.0,
+                             net_kwh=net_kw * 9, peak_load_kw=1.0,
+                             confidence="high", data_days=30)
+
+    calls = []
+
+    def fake_predict(store_, horizon, **kw):
+        calls.append(kw.get("current_load_kw"))
+        return _forecast(-1.0)  # without EV: gentler overnight draw
+
+    monkeypatch.setattr(alerts, "predict", fake_predict)
+
+    usage_forecast = _forecast(-3.0)  # normal forecast: steeper draw, EV included
+    state = {"ev_charging_active": True, "ev_charging_since": now.isoformat()}
+    cfg = Config(ev_charging_kw=7.6)
+    stats = _digest_stats(soc=55.0, home_load_kw=5.6)
+
+    msg = alerts._alert_eod_digest(state, today, now, stats, cfg, None, usage_forecast, store)
+    assert msg is not None
+    assert "Predicted SoC @" in msg
+    assert "Without EV charging:" in msg
+    assert calls, "the no-EV forecast must call predict() again"
+    assert calls[0] == max(0.0, 5.6 - 7.6)  # floored at 0, not negative
+
+
+def test_eod_digest_omits_without_ev_line_when_flag_off():
+    now = datetime.now().replace(hour=21, minute=30, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    readings = [(f"{today}T{h:02d}:00:00", 0.5, 1.0, 0.0) for h in range(0, 20, 2)]
+    store = _AttrStore(attr=(8.2, 5.1, 0.9), readings=readings)
+
+    msg = alerts._alert_eod_digest({}, today, now, _digest_stats(), Config(),
+                                   None, None, store)
+    assert msg is not None
+    assert "Without EV charging:" not in msg
+
+
+def test_ev_charging_cli_toggle_roundtrip(tmp_path):
+    import json
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+
+    out = str(tmp_path)
+    runner = CliRunner()
+
+    r = runner.invoke(cli, ["account", "ev-charging", "status", "--out", out])
+    assert r.exit_code == 0
+    assert "off" in r.output
+
+    r = runner.invoke(cli, ["account", "ev-charging", "on", "--out", out])
+    assert r.exit_code == 0
+    assert "ON" in r.output
+
+    state = json.loads((tmp_path / ".peak_alert_state.json").read_text())
+    assert state["ev_charging_active"] is True
+    assert "ev_charging_since" in state
+
+    r = runner.invoke(cli, ["account", "ev-charging", "status", "--out", out])
+    assert "ON" in r.output
+
+    r = runner.invoke(cli, ["account", "ev-charging", "off", "--out", out])
+    assert r.exit_code == 0
+    state = json.loads((tmp_path / ".peak_alert_state.json").read_text())
+    assert state["ev_charging_active"] is False
+    assert "ev_charging_since" not in state

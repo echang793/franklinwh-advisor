@@ -19,8 +19,10 @@ from .account import AccountClient
 from .advisor import recommend
 from .alerts import (
     _BATTERY_CAPACITY_KWH,
+    _EV_CHARGING_MAX_HOURS,
     _GHI_CLOUDY_THRESHOLD,
     _check_peak_alerts,
+    _ev_charging_active,
     _get_hourly_bias,
     _get_performance_ratio,
     _get_system_peak_kw,
@@ -581,6 +583,11 @@ def setup() -> None:
         cfg.ev_kwh_per_session = click.prompt(
             "  Typical kWh per charge (0 if unsure)", type=float,
             default=cfg.ev_kwh_per_session or 0.0,
+        )
+        cfg.ev_charging_kw = click.prompt(
+            "  Typical charging draw in kW (used by `account ev-charging on`\n"
+            "  for the evening digest's 'without EV' SoC estimate)",
+            type=float, default=cfg.ev_charging_kw,
         )
         click.echo()
         cfg.ev_control_enabled = click.confirm(
@@ -1785,6 +1792,45 @@ def cmd_ev_status(ctx: click.Context, out: str | None, live: bool) -> None:
         except Exception as e:
             click.echo(click.style(f" FAILED: {e}", fg="red"))
     click.echo()
+
+
+@grp_account.command("ev-charging")
+@click.argument("action", type=click.Choice(["on", "off", "status"]))
+@click.option("--out", "-o", default=None)
+@click.pass_context
+def cmd_ev_charging_flag(ctx: click.Context, action: str, out: str | None) -> None:
+    """Flag EV charging in progress for the evening digest's 'without EV' SoC line.
+
+    Independent of the Tesla auto-control feature (`ev-status`/`tesla`) —
+    this is a manual toggle: flip it on when you start charging and the 9-10pm
+    digest adds a second prediction, "Without EV charging: ~Y%", alongside its
+    normal 7am forecast, using cfg.ev_charging_kw as the assumed draw. Auto-
+    expires after 12h so a forgotten toggle can't linger for days.
+    """
+    cfg    = ctx.obj["config"]
+    outdir = Path(out or cfg.output_dir)
+
+    if action == "status":
+        state  = _load_peak_state(outdir)
+        active = _ev_charging_active(state, datetime.now())
+        click.echo(f"EV charging flag: {'ON' if active else 'off'}")
+        return
+
+    with _state_lock(outdir):
+        state = _load_peak_state(outdir)
+        state["ev_charging_active"] = (action == "on")
+        if action == "on":
+            state["ev_charging_since"] = datetime.now().isoformat()
+        else:
+            state.pop("ev_charging_since", None)
+        _save_peak_state(outdir, state)
+
+    if action == "on":
+        _ok(f"EV charging flag ON — tonight's digest will show a 'without "
+            f"EV' SoC estimate assuming ~{cfg.ev_charging_kw:.1f} kW draw. "
+            f"Auto-expires in {_EV_CHARGING_MAX_HOURS}h if you forget to turn it off.")
+    else:
+        _ok("EV charging flag OFF.")
 
 
 @grp_account.command("accuracy")

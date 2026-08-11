@@ -22,6 +22,7 @@ from .notifier import notify_email, notify_imessage_text, notify_telegram, notif
 from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
                   cycle_bounds, export_rate_at, on_peak_window,
                   peak_export_hour, period_at, rate_at, rates_are_stale)
+from .predictor import predict
 from .savings import compute as savings_compute
 from .weather import (_outlook_cache, fetch_nws_storm_alerts)
 
@@ -43,6 +44,32 @@ def _get_system_peak_kw(state: dict) -> float | None:
 
 
 _GHI_CLOUDY_THRESHOLD = 300  # W/m² avg over 12h — below this = dim/cloudy day
+
+_EV_CHARGING_MAX_HOURS = 12  # `account ev-charging on` auto-expires after this —
+                             # longer than any real overnight session, so a
+                             # forgotten toggle can't quietly keep showing a
+                             # stale "without EV" digest line for days.
+
+
+def _ev_charging_active(state: dict, now: datetime) -> bool:
+    """Whether the manual `account ev-charging on` flag is set and fresh.
+
+    Clears the flag in `state` (caller is responsible for persisting) once
+    it's older than _EV_CHARGING_MAX_HOURS — see the constant above.
+    """
+    if not state.get("ev_charging_active"):
+        return False
+    since = state.get("ev_charging_since")
+    if since:
+        try:
+            age = now - datetime.fromisoformat(since)
+            if age > timedelta(hours=_EV_CHARGING_MAX_HOURS):
+                state["ev_charging_active"] = False
+                state.pop("ev_charging_since", None)
+                return False
+        except ValueError:
+            pass
+    return True
 
 
 _soc_bar     = soc_bar
@@ -636,6 +663,52 @@ def _alert_export_arbitrage(
     )
 
 
+def _predict_overnight_soc(
+    usage_forecast, now: datetime, soc: float, bat_cap: float,
+) -> tuple[float, str] | None:
+    """Predicted SoC at tomorrow's solar start, or None below min confidence.
+
+    Returns (predicted_pct, hour_label). Shared by the normal 7am prediction
+    and the manual EV-charging counterfactual so both use identical window
+    selection and confidence gating.
+    """
+    if not (usage_forecast and usage_forecast.hours):
+        return None
+    # Find the first forecasted hour tomorrow where solar meaningfully starts,
+    # rather than a fixed clock time — sunrise (and thus the useful "how low
+    # did the battery get overnight" checkpoint) shifts several hours across
+    # the year, so a fixed 6 am either checks too early in winter or misses
+    # the tail of the draw-down in summer.
+    sunrise_dt = next(
+        (p.dt for p in usage_forecast.hours if p.dt > now and p.predicted_solar_kw > 0.1),
+        None,
+    )
+    # Round to the nearest whole hour for the label — forecast hours are
+    # offset from "now"'s minute, not aligned to :00.
+    if sunrise_dt is not None:
+        sunrise_hour = sunrise_dt.replace(minute=0, second=0, microsecond=0)
+        if sunrise_dt.minute >= 30:
+            sunrise_hour += timedelta(hours=1)
+    else:
+        sunrise_hour = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+
+    night_hours = [p for p in usage_forecast.hours if now <= p.dt < sunrise_hour]
+    # Gate on the night window's own confidence, not the worst hour across
+    # the whole 24h forecast — a sparse hour later in the day (e.g. 3 pm
+    # tomorrow) shouldn't suppress a prediction that only uses tonight's data.
+    night_confs = {p.confidence for p in night_hours}
+    night_conf  = next(
+        (c for c in ("none", "low", "medium", "high") if c in night_confs),
+        "none",
+    )
+    if not night_hours or night_conf == "none":
+        return None
+
+    night_net_kwh = sum(p.net_kw for p in night_hours)
+    pred_pct      = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
+    return pred_pct, sunrise_hour.strftime("%-I %p")
+
+
 def _alert_eod_digest(
     state: dict, today: str, now: datetime, stats, cfg: Config,
     outlook, usage_forecast, store=None,
@@ -715,39 +788,29 @@ def _alert_eod_digest(
             )
 
     soc_6am_str = ""
-    if usage_forecast and usage_forecast.hours:
-        # Find the first forecasted hour tomorrow where solar meaningfully starts,
-        # rather than a fixed clock time — sunrise (and thus the useful "how low
-        # did the battery get overnight" checkpoint) shifts several hours across
-        # the year, so a fixed 6 am either checks too early in winter or misses
-        # the tail of the draw-down in summer.
-        sunrise_dt = next(
-            (p.dt for p in usage_forecast.hours if p.dt > now and p.predicted_solar_kw > 0.1),
-            None,
-        )
-        # Round to the nearest whole hour for the label — forecast hours are
-        # offset from "now"'s minute, not aligned to :00.
-        if sunrise_dt is not None:
-            sunrise_hour = sunrise_dt.replace(minute=0, second=0, microsecond=0)
-            if sunrise_dt.minute >= 30:
-                sunrise_hour += timedelta(hours=1)
-        else:
-            sunrise_hour = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+    overnight = _predict_overnight_soc(usage_forecast, now, soc, bat_cap)
+    if overnight is not None:
+        pred_soc_6am, hour_label = overnight
+        soc_6am_str = f"\n🌅 Predicted SoC @ {hour_label}: ~{pred_soc_6am:.0f}%"
 
-        night_hours  = [p for p in usage_forecast.hours if now <= p.dt < sunrise_hour]
-        # Gate on the night window's own confidence, not the worst hour across
-        # the whole 24h forecast — a sparse hour later in the day (e.g. 3 pm
-        # tomorrow) shouldn't suppress a prediction that only uses tonight's data.
-        night_confs  = {p.confidence for p in night_hours}
-        night_conf   = next(
-            (c for c in ("none", "low", "medium", "high") if c in night_confs),
-            "none",
-        )
-        if night_hours and night_conf != "none":
-            night_net_kwh = sum(p.net_kw for p in night_hours)
-            pred_soc_6am  = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
-            hour_label    = sunrise_hour.strftime("%-I %p")
-            soc_6am_str   = f"\n🌅 Predicted SoC @ {hour_label}: ~{pred_soc_6am:.0f}%"
+        # Manual `account ev-charging on` flag: show what tonight would look
+        # like without the EV draw baked into the live-usage anchor, so the
+        # user can gauge how much battery they have to spare for charging.
+        if _ev_charging_active(state, now) and store is not None:
+            no_ev_load = max(0.0, c.home_load_kw - cfg.ev_charging_kw)
+            cloudy_now  = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD if outlook else False
+            no_ev_forecast = predict(
+                store, 24, outlook=outlook,
+                system_peak_kw=_get_system_peak_kw(state),
+                perf_ratio=_get_performance_ratio(state, cloudy=cloudy_now),
+                avg_temp_c=outlook.avg_temp_c(24) if outlook else 22.0,
+                hourly_bias=_get_hourly_bias(state),
+                current_load_kw=no_ev_load,
+            )
+            no_ev_overnight = _predict_overnight_soc(no_ev_forecast, now, soc, bat_cap)
+            if no_ev_overnight is not None:
+                no_ev_pct, _ = no_ev_overnight
+                soc_6am_str += f"\n🔌 Without EV charging: ~{no_ev_pct:.0f}%"
 
     precharge_str  = ""
     tmrw_solar_str = ""
