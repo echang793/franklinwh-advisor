@@ -19,9 +19,9 @@ from .config import Config
 from .format_utils import fmt_hours, soc_bar, time_to_pct
 from .history import integrate_intervals
 from .notifier import notify_email, notify_imessage_text, notify_telegram, notify_webhook
-from .tou import (base_service_cost, cheap_charge_deadline,
+from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
                   cycle_bounds, export_rate_at, on_peak_window,
-                  peak_export_hour, rate_at, rates_are_stale)
+                  peak_export_hour, period_at, rate_at, rates_are_stale)
 from .savings import compute as savings_compute
 from .weather import (_outlook_cache, fetch_nws_storm_alerts)
 
@@ -1894,31 +1894,53 @@ def _alert_multiday_cloudy_precharge(
     )
 
 
+_FULL_RESET_SOC = 95.0  # drop below this re-arms the alert — see note below
+
 def _alert_solar_surplus_overflow(
     state: dict, today: str, now: datetime, c
 ) -> str | None:
-    """Battery ~full before 2 pm super-off-peak ends → advise Time-of-Use export mode.
+    """Battery full with solar exceeding load → advise Time-of-Use export mode.
 
-    Triggers when solar is filling a near-full battery during cheap hours so the
-    user can switch to TOU mode and push surplus to the grid instead of clipping.
+    Triggers when solar is filling an already-full battery, so the user can
+    switch to TOU mode and push surplus to the grid instead of clipping.
+
+    Window: 10 am–6 pm. Was 10 am–2 pm (tied to super-off-peak ending), but
+    on a day with a late morning load spike the battery can miss 100% until
+    mid-afternoon — see the 2026-08-08 case where it didn't fill until 4 pm.
+
+    Re-notify policy: `battery_full_notified` is a standing flag, not a
+    per-day key, so a multi-day sunny streak doesn't renotify every single
+    day the battery is still sitting at 100% — only the transition into
+    full is newsworthy. The flag re-arms once SoC meaningfully drops
+    (below _FULL_RESET_SOC), so the next time it fills is reported again.
+    This check runs unconditionally (before the window/hour gate) so a
+    drop is caught even outside 10 am–6 pm.
     """
-    if not (10 <= now.hour < 14):
-        return None
-    if state.get("surplus_overflow_date") == today:
-        return None
     soc = c.battery_soc_pct
+    if soc < _FULL_RESET_SOC:
+        state["battery_full_notified"] = False
+
+    if not (10 <= now.hour < 18):
+        return None
+    if state.get("battery_full_notified"):
+        return None
     if soc < 100.0:
         return None
     # Battery charging or holding — solar exceeds load
     if c.battery_use_kw > 0.1 or c.solar_production_kw < c.home_load_kw:
         return None
-    state["surplus_overflow_date"] = today
+    state["battery_full_notified"] = True
     logger.info("Solar surplus overflow alert: SoC=%.0f%%, solar=%.2f kW", soc, c.solar_production_kw)
+    period_label = {
+        TouPeriod.SUPER_OFF_PEAK: "super-off-peak",
+        TouPeriod.OFF_PEAK: "off-peak",
+        TouPeriod.ON_PEAK: "on-peak",
+    }[period_at(now)]
     return (
         f"☀️ <b>FranklinWH: Battery full — solar surplus available</b>\n"
         f"🔋 {_soc_bar(soc)}  ·  Solar {c.solar_production_kw:.2f} kW  ·  "
         f"Load {c.home_load_kw:.2f} kW\n"
-        f"Time: {now.strftime('%-I:%M %p')} — super-off-peak still active (until 2 pm).\n"
+        f"Time: {now.strftime('%-I:%M %p')} — currently {period_label}.\n"
         f"Consider switching to Time-of-Use mode to export surplus to grid."
     )
 

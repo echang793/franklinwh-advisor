@@ -1890,3 +1890,123 @@ def test_hourly_bias_matches_perf_ratio_weighting():
     samples = [1.0, 1.0, 1.0, 1.0, 1.0, 1.5]
     state = {"solar_bias_h11": samples}
     assert _get_hourly_bias(state)[11] == _ewma(samples)
+
+
+def test_battery_full_alert_widened_window_catches_late_charge():
+    """2026-08-08 case: battery didn't hit 100% until 4 pm — the old
+    10 am-2 pm window (tied to super-off-peak ending) would have missed it."""
+    import types
+    from datetime import datetime as dt
+    from franklinwh_scraper import alerts
+
+    c = types.SimpleNamespace(
+        battery_soc_pct=100.0, home_load_kw=0.56, solar_production_kw=2.05,
+        battery_use_kw=-0.02,
+    )
+    state = {}
+    msg = alerts._alert_solar_surplus_overflow(state, "2026-08-08",
+                                                dt(2026, 8, 8, 16, 3), c)
+    assert msg is not None
+    assert "Battery full" in msg
+
+
+def test_battery_full_alert_old_window_edge_still_fires():
+    import types
+    from datetime import datetime as dt
+    from franklinwh_scraper import alerts
+
+    c = types.SimpleNamespace(
+        battery_soc_pct=100.0, home_load_kw=0.5, solar_production_kw=2.0,
+        battery_use_kw=0.0,
+    )
+    msg = alerts._alert_solar_surplus_overflow({}, "2026-08-08",
+                                                dt(2026, 8, 8, 11, 0), c)
+    assert msg is not None
+
+
+def test_battery_full_alert_outside_window_silent():
+    import types
+    from datetime import datetime as dt
+    from franklinwh_scraper import alerts
+
+    c = types.SimpleNamespace(
+        battery_soc_pct=100.0, home_load_kw=0.5, solar_production_kw=2.0,
+        battery_use_kw=0.0,
+    )
+    assert alerts._alert_solar_surplus_overflow({}, "2026-08-08",
+                                                 dt(2026, 8, 8, 19, 0), c) is None
+
+
+def test_battery_full_alert_does_not_repeat_while_still_full():
+    """The exact behavior the user asked for: once notified, stays quiet
+    as long as the battery never meaningfully drops — even across the
+    widened window on the same day, and even into a second sunny day."""
+    import types
+    from datetime import datetime as dt
+    from franklinwh_scraper import alerts
+
+    c = types.SimpleNamespace(
+        battery_soc_pct=100.0, home_load_kw=0.5, solar_production_kw=2.0,
+        battery_use_kw=0.0,
+    )
+    state = {}
+    first = alerts._alert_solar_surplus_overflow(state, "2026-08-08",
+                                                  dt(2026, 8, 8, 10, 30), c)
+    assert first is not None
+
+    # Still full an hour later, same day.
+    again_same_day = alerts._alert_solar_surplus_overflow(
+        state, "2026-08-08", dt(2026, 8, 8, 15, 0), c)
+    assert again_same_day is None
+
+    # Still full the next sunny day — no per-day reset, so still silent.
+    again_next_day = alerts._alert_solar_surplus_overflow(
+        state, "2026-08-09", dt(2026, 8, 9, 11, 0), c)
+    assert again_next_day is None
+
+
+def test_battery_full_alert_rearms_after_meaningful_drop():
+    """A real discharge (e.g. overnight) re-arms the alert for the next fill."""
+    import types
+    from datetime import datetime as dt
+    from franklinwh_scraper import alerts
+
+    full = types.SimpleNamespace(
+        battery_soc_pct=100.0, home_load_kw=0.5, solar_production_kw=2.0,
+        battery_use_kw=0.0,
+    )
+    state = {}
+    assert alerts._alert_solar_surplus_overflow(
+        state, "2026-08-08", dt(2026, 8, 8, 10, 30), full) is not None
+
+    # Overnight discharge — the reset check runs every tick, even outside
+    # the alert's own hour window.
+    drained = types.SimpleNamespace(
+        battery_soc_pct=40.0, home_load_kw=0.5, solar_production_kw=0.0,
+        battery_use_kw=0.3,
+    )
+    assert alerts._alert_solar_surplus_overflow(
+        state, "2026-08-09", dt(2026, 8, 9, 3, 0), drained) is None
+    assert state["battery_full_notified"] is False
+
+    # Full again the next day — newsworthy again.
+    again = alerts._alert_solar_surplus_overflow(
+        state, "2026-08-09", dt(2026, 8, 9, 11, 0), full)
+    assert again is not None
+
+
+def test_battery_full_alert_message_reflects_current_period():
+    """The old hardcoded '(until 2 pm)' claim went false the moment the
+    window widened past 2 pm — the message must describe the real period."""
+    import types
+    from datetime import datetime as dt
+    from franklinwh_scraper import alerts
+
+    c = types.SimpleNamespace(
+        battery_soc_pct=100.0, home_load_kw=0.5, solar_production_kw=2.0,
+        battery_use_kw=0.0,
+    )
+    msg = alerts._alert_solar_surplus_overflow({}, "2026-08-08",
+                                                dt(2026, 8, 8, 16, 30), c)
+    assert "until 2 pm" not in msg
+    assert "on-peak" in msg
