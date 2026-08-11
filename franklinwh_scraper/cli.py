@@ -1478,11 +1478,14 @@ def cmd_advise(
                 perf_ratio     = _get_performance_ratio(_peak_state, cloudy=cloudy_now)
                 avg_temp_c     = outlook.avg_temp_c(24) if outlook else 22.0
                 hourly_bias    = _get_hourly_bias(_peak_state)
+                # No current_load_kw here — this forecast feeds recommend()'s
+                # Emergency-Backup decision and the chatbot, and a single
+                # noisy poll shouldn't ripple into those. The digest builds
+                # its own live-anchored forecast internally (alerts.py).
                 usage_forecast = (
                     predict(history, 24, outlook=outlook, system_peak_kw=system_peak_kw,
                             perf_ratio=perf_ratio, avg_temp_c=avg_temp_c,
-                            hourly_bias=hourly_bias,
-                            current_load_kw=stats.current.home_load_kw)
+                            hourly_bias=hourly_bias)
                     if history.has_enough_data() else None
                 )
                 rec = recommend(

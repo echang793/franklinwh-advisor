@@ -325,3 +325,45 @@ def test_decision_is_frozen_dataclass():
     except AttributeError:
         raised = True
     assert raised
+
+
+def test_controller_stop_clears_state_even_if_amps_restore_fails(tmp_path, monkeypatch):
+    """A STOP that successfully calls charge_stop() but then fails on the
+    best-effort amps-restore must not leave last_commanded_amps stale —
+    that would corrupt the next tick's deadband math against a session
+    that's actually already stopped."""
+    from franklinwh_scraper import ev_controller as evc
+    from franklinwh_scraper.config import Config
+    from franklinwh_scraper.ev_policy import EvAction, EvDecision
+    from franklinwh_scraper.tesla import TeslaError
+
+    calls = []
+
+    class FlakyClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def charge_stop(self):
+            calls.append("stop")
+
+        def set_charging_amps(self, amps):
+            calls.append(("amps", amps))
+            raise TeslaError("simulated transient failure")
+
+    monkeypatch.setattr(evc, "TeslaClient", FlakyClient)
+    cfg = Config(ev_control_enabled=True, ev_dry_run=False,
+                 tesla_vin="5YJ3TEST", tesla_client_id="cid")
+    ctl = evc.EvController(cfg, tmp_path)
+    ctl.state["last_commanded_amps"] = 15  # simulate an active session
+
+    try:
+        ctl._execute(datetime(2026, 7, 15, 17, 0),
+                     EvDecision(EvAction.STOP, reason="test"))
+        raised = False
+    except TeslaError:
+        raised = True
+
+    assert raised, "the amps-restore failure should still propagate"
+    assert calls == ["stop", ("amps", 32)]
+    assert ctl.state["last_commanded_amps"] is None, (
+        "state must reflect 'stopped' even though the restore-amps call failed")

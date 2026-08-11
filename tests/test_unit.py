@@ -2148,12 +2148,17 @@ def test_eod_digest_shows_without_then_with_ev_in_order(monkeypatch):
     calls = []
 
     def fake_predict(store_, horizon, **kw):
-        calls.append(kw.get("current_load_kw"))
-        return _forecast(-3.0)  # with EV added: steeper overnight draw
+        load = kw.get("current_load_kw")
+        calls.append(load)
+        # Steeper draw once the EV's typical kW is added on top of the
+        # digest's own live-anchored call — distinguishes the two calls
+        # by their result, not just their args.
+        return _forecast(-1.0 if load is not None and load < 5.0 else -3.0)
 
     monkeypatch.setattr(alerts, "predict", fake_predict)
 
-    usage_forecast = _forecast(-1.0)  # baseline (no EV): gentler draw
+    usage_forecast = _forecast(-9.0)  # what recommend() sees — must NOT
+                                       # leak into the digest's own numbers
     cfg = Config(ev_charging=True, ev_charging_kw=7.6)
     stats = _digest_stats(soc=55.0, home_load_kw=1.5)
 
@@ -2163,8 +2168,10 @@ def test_eod_digest_shows_without_then_with_ev_in_order(monkeypatch):
     assert "With EV charging" in msg
     # Order matters — without first, then with.
     assert msg.index("Without EV charging") < msg.index("With EV charging")
-    assert calls, "the with-EV forecast must call predict() again"
-    assert calls[0] == 1.5 + 7.6  # current load + typical EV draw, added on top
+    # Two live predict() calls: the digest's own nowcast-anchored baseline
+    # (current load alone), then with the typical EV draw added on top —
+    # neither is the -9.0 forecast passed in as the shared usage_forecast.
+    assert calls == [1.5, 1.5 + 7.6]
 
 
 def test_eod_digest_omits_with_ev_line_when_no_ev_configured():
@@ -2179,3 +2186,23 @@ def test_eod_digest_omits_with_ev_line_when_no_ev_configured():
                                    None, None, store)
     assert msg is not None
     assert "With EV charging" not in msg
+
+
+def test_cli_shared_forecast_never_gets_live_anchor():
+    """Regression guard: the shared usage_forecast built in cmd_advise's
+    watch loop feeds advisor.recommend()'s Emergency-Backup decision and
+    the chatbot, not just the digest. If current_load_kw is ever passed to
+    that call, a single noisy poll (a kettle running for 5 min) could ripple
+    into a spurious 'switch to Emergency Backup' recommendation. Only the
+    digest's own internal predict() call (alerts.py) should anchor to live
+    usage — this scans cli.py's source to make sure it stays that way."""
+    import inspect
+
+    from franklinwh_scraper import cli as cli_mod
+
+    src = inspect.getsource(cli_mod)
+    start = src.index("usage_forecast = (")
+    end = src.index(")", src.index("history.has_enough_data()", start)) + 1
+    block = src[start:end]
+    assert "current_load_kw" not in block, (
+        "shared usage_forecast must not be live-anchored:\n" + block)

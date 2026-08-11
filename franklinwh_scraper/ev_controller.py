@@ -278,12 +278,20 @@ class EvController:
         elif d.action in (EvAction.STOP, EvAction.RESTORE_MAX):
             if d.action is EvAction.STOP:
                 self.client.charge_stop()
+            # Once charge_stop() succeeds, charging IS stopped — clear state
+            # now, before the amps restore below, rather than after both
+            # calls. If set_charging_amps then fails, the exception still
+            # propagates to tick()'s handler (error gets counted), but
+            # last_commanded_amps no longer sits stale at the pre-stop
+            # value, which would otherwise corrupt the next tick's deadband
+            # math (decide() comparing a fresh target against amps that
+            # haven't actually applied to a stopped session in a while).
+            self.state["last_commanded_amps"] = None
+            self.state["last_command_iso"] = _now_iso(now)
             # Always restore max so a dead advisor can never leave the car
             # throttled — the in-car scheduled-charging backstop then works
             # at full speed.
             self.client.set_charging_amps(self.cfg.ev_max_amps)
-            self.state["last_commanded_amps"] = None
-            self.state["last_command_iso"] = _now_iso(now)
 
     # ------------------------------------------------------------ main tick
 

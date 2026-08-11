@@ -762,14 +762,37 @@ def _alert_eod_digest(
             )
 
     soc_6am_str = ""
-    overnight = _predict_overnight_soc(usage_forecast, now, soc, bat_cap)
+    # The digest builds its own live-anchored forecast rather than trusting
+    # the shared `usage_forecast` param to already be anchored — that param
+    # also drives advisor.recommend()'s Emergency-Backup decision, and a
+    # single noisy poll (a kettle running for 5 min) shouldn't ripple into
+    # "switch to Emergency Backup" just because it also happens to touch the
+    # digest's 7am estimate. Falls back to the passed-in forecast when no
+    # store is available (matches pre-nowcast behavior for those callers).
+    digest_forecast = usage_forecast
+    cloudy_now = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD if outlook else False
+    if store is not None:
+        try:
+            digest_forecast = predict(
+                store, 24, outlook=outlook,
+                system_peak_kw=_get_system_peak_kw(state),
+                perf_ratio=_get_performance_ratio(state, cloudy=cloudy_now),
+                avg_temp_c=outlook.avg_temp_c(24) if outlook else 22.0,
+                hourly_bias=_get_hourly_bias(state),
+                current_load_kw=c.home_load_kw,
+            )
+        except Exception:
+            # Never let the digest's live-anchor recompute take the whole
+            # alert down — fall back to whatever forecast was passed in.
+            logger.exception("EOD digest: live-anchored forecast failed")
+            digest_forecast = usage_forecast
+    overnight = _predict_overnight_soc(digest_forecast, now, soc, bat_cap)
     if overnight is not None:
-        # usage_forecast is already anchored to current_load_kw at digest
-        # time (see cli.py), which on a typical night doesn't include EV
-        # charging — that's the "without EV" baseline. "With EV" adds
+        # "Without EV" is the live-anchored baseline above, which on a
+        # typical night doesn't include EV charging. "With EV" adds
         # cfg.ev_charging_kw (typical overnight draw) on top of it, so both
-        # numbers are available up front to decide whether to charge —
-        # no separate toggle needed.
+        # numbers are available up front to decide whether to charge — no
+        # separate toggle needed.
         pred_soc_6am, hour_label = overnight
         has_ev = getattr(cfg, "ev_charging", False)
         label  = "Without EV charging" if has_ev else "Predicted SoC"
@@ -777,16 +800,19 @@ def _alert_eod_digest(
 
         if has_ev and store is not None:
             with_ev_load = c.home_load_kw + cfg.ev_charging_kw
-            cloudy_now   = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD if outlook else False
-            with_ev_forecast = predict(
-                store, 24, outlook=outlook,
-                system_peak_kw=_get_system_peak_kw(state),
-                perf_ratio=_get_performance_ratio(state, cloudy=cloudy_now),
-                avg_temp_c=outlook.avg_temp_c(24) if outlook else 22.0,
-                hourly_bias=_get_hourly_bias(state),
-                current_load_kw=with_ev_load,
-            )
-            with_ev_overnight = _predict_overnight_soc(with_ev_forecast, now, soc, bat_cap)
+            with_ev_overnight = None
+            try:
+                with_ev_forecast = predict(
+                    store, 24, outlook=outlook,
+                    system_peak_kw=_get_system_peak_kw(state),
+                    perf_ratio=_get_performance_ratio(state, cloudy=cloudy_now),
+                    avg_temp_c=outlook.avg_temp_c(24) if outlook else 22.0,
+                    hourly_bias=_get_hourly_bias(state),
+                    current_load_kw=with_ev_load,
+                )
+                with_ev_overnight = _predict_overnight_soc(with_ev_forecast, now, soc, bat_cap)
+            except Exception:
+                logger.exception("EOD digest: with-EV forecast failed")
             if with_ev_overnight is not None:
                 with_ev_pct, _ = with_ev_overnight
                 soc_6am_str += (
