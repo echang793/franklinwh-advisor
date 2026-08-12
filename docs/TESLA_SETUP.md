@@ -29,22 +29,20 @@ Newer vehicles only accept signed commands, which requires an EC keypair
 whose public half is hosted on your app's domain.
 
 ```bash
-openssl ecparam -name prime256v1 -genkey -noout -out ~/.franklinwh_tesla_key.pem
-chmod 600 ~/.franklinwh_tesla_key.pem
-openssl ec -in ~/.franklinwh_tesla_key.pem -pubout -out /tmp/tesla-public-key.pem
+python3 scrape.py tesla keygen
 ```
 
-Host `/tmp/tesla-public-key.pem` at exactly:
-
-```
-https://<your-domain>/.well-known/appspecific/com.tesla.3p.public-key.pem
-```
-
-With the vantage-hub Caddy setup, add a route serving that path, then verify:
+Writes the private key to `~/.franklinwh_tesla_key.pem` (0600) and the
+public key to `output/tesla-public-key.pem`, and prints the exact path to
+host it at plus a ready-to-paste Caddy route block. Host it, then verify:
 
 ```bash
 curl -s https://<your-domain>/.well-known/appspecific/com.tesla.3p.public-key.pem
 ```
+
+(Equivalent manual openssl commands, if you'd rather not run Python for this:
+`openssl ecparam -name prime256v1 -genkey -noout -out ~/.franklinwh_tesla_key.pem`
+then `chmod 600` it, then `openssl ec -in ~/.franklinwh_tesla_key.pem -pubout -out output/tesla-public-key.pem`.)
 
 ## 3. Register the partner account (once)
 

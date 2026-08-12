@@ -6,6 +6,7 @@ import atexit
 import json
 import logging
 import os
+import stat
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -219,15 +220,29 @@ def cli(ctx: click.Context, verbose: bool, delay: float) -> None:
 # ── Setup wizard ─────────────────────────────────────────────────────
 
 @cli.command()
-def setup() -> None:
+@click.option("--quick", is_flag=True, default=False,
+              help="On a re-run, skip the AI Chatbot / EV charging / Tesla "
+                   "/ Uptime monitoring sections and leave them exactly as "
+                   "configured — for touching up one thing (credentials, "
+                   "location, alert toggles) without wading through the "
+                   "whole wizard again. Has no effect on first-time setup.")
+def setup(quick: bool) -> None:
     """Interactive setup — saves your credentials and location once."""
     cfg = load_config()
+    # Captured before any prompts run: whether this is a genuine re-run
+    # (--quick only skips sections when there's something configured to
+    # skip — a first-time setup always gets the full wizard).
+    quick = quick and cfg.is_complete()
 
     click.echo()
     click.echo(click.style("  FranklinWH Setup Wizard", bold=True, fg="cyan"))
     _hr()
     click.echo("  Credentials are saved to ~/.franklinwh.json (chmod 600).")
     click.echo("  Press Enter to keep the current value shown in [brackets].")
+    if quick:
+        click.echo(click.style(
+            "  --quick: skipping Chatbot / EV / Tesla / Uptime sections "
+            "(already configured).", dim=True))
     click.echo()
 
     # ── Credentials ──────────────────────────────────────────────────
@@ -412,7 +427,7 @@ def setup() -> None:
         _warn("No notification channels configured — you won't receive any alerts.")
 
     # ── AI Chatbot ────────────────────────────────────────────────────
-    if cfg.telegram_bot_token and cfg.telegram_chat_id:
+    if cfg.telegram_bot_token and cfg.telegram_chat_id and not quick:
         click.echo()
         click.echo(click.style("  AI Chatbot (optional)", bold=True))
         click.echo('  Answer questions like "How much did I save this week?" in Telegram.')
@@ -572,12 +587,13 @@ def setup() -> None:
     cfg.output_dir = click.prompt("  Output directory", default=cfg.output_dir)
 
     # ── EV charging ───────────────────────────────────────────────────
-    click.echo()
-    cfg.ev_charging = click.confirm(
-        "  Do you charge an EV at home? (enables off-peak charging advice)",
-        default=cfg.ev_charging,
-    )
-    if cfg.ev_charging:
+    if not quick:
+        click.echo()
+        cfg.ev_charging = click.confirm(
+            "  Do you charge an EV at home? (enables off-peak charging advice)",
+            default=cfg.ev_charging,
+        )
+    if cfg.ev_charging and not quick:
         cfg.ev_kwh_per_session = click.prompt(
             "  Typical kWh per charge (0 if unsure)", type=float,
             default=cfg.ev_kwh_per_session or 0.0,
@@ -614,13 +630,14 @@ def setup() -> None:
                   "commands are sent. Disable with: franklinwh tesla go-live")
 
     # ── Uptime monitoring ─────────────────────────────────────────────
-    click.echo()
-    click.echo(click.style("  Uptime monitoring (optional)", bold=True))
-    click.echo("  Get a free ping URL at healthchecks.io — you'll be notified if the advisor stops running.")
-    cfg.healthcheck_url = click.prompt(
-        "  Healthcheck ping URL (leave blank to skip)",
-        default=cfg.healthcheck_url or "",
-    ).strip()
+    if not quick:
+        click.echo()
+        click.echo(click.style("  Uptime monitoring (optional)", bold=True))
+        click.echo("  Get a free ping URL at healthchecks.io — you'll be notified if the advisor stops running.")
+        cfg.healthcheck_url = click.prompt(
+            "  Healthcheck ping URL (leave blank to skip)",
+            default=cfg.healthcheck_url or "",
+        ).strip()
 
     # ── Save ─────────────────────────────────────────────────────────
     save_config(cfg)
@@ -679,6 +696,17 @@ def doctor() -> None:
     _check("Notification channel", has_channel)
     _check("Uptime monitoring",    bool(cfg.healthcheck_url),
            "configured" if cfg.healthcheck_url else "optional — set up at healthchecks.io")
+
+    # EV draw estimate — feeds the digest's "with EV charging" SoC line
+    # whenever cfg.ev_charging is set, independent of Tesla control below.
+    if getattr(cfg, "ev_charging", False):
+        _ev_kw = getattr(cfg, "ev_charging_kw", 7.6)
+        _check("EV charging draw estimate", _ev_kw != 7.6,
+               f"{_ev_kw:.1f} kW"
+               if _ev_kw != 7.6 else
+               "still the 7.6 kW default guess — run `franklinwh setup` "
+               "and set it to your actual charging amperage for an "
+               "accurate 'with EV' digest line")
 
     # EV charge control (optional feature — only checked when enabled)
     if getattr(cfg, "ev_control_enabled", False):
@@ -739,6 +767,84 @@ def doctor() -> None:
 @cli.group("tesla")
 def grp_tesla() -> None:
     """Tesla Fleet API setup for EV charge control."""
+
+
+@grp_tesla.command("keygen")
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite an existing key pair.")
+@click.option("--out", "-o", default=None,
+              help="Where to write the public key for hosting (default: output/tesla-public-key.pem).")
+@click.pass_context
+def tesla_keygen(ctx: click.Context, force: bool, out: str | None) -> None:
+    """Generate the EC key pair newer vehicles require for signed commands.
+
+    Turns docs/TESLA_SETUP.md step 2's two raw openssl commands into one —
+    writes the private key to ~/.franklinwh_tesla_key.pem (0600) and the
+    public key to output/tesla-public-key.pem, then prints exactly what to
+    host and where, matching the Vehicle Command protocol's required path.
+    """
+    from .tesla import TESLA_KEY_PATH
+
+    cfg = ctx.obj["config"]
+
+    if TESLA_KEY_PATH.exists() and not force:
+        raise click.ClickException(
+            f"{TESLA_KEY_PATH} already exists — pairing a new key with your "
+            f"vehicle requires redoing the phone-app pairing step too, so "
+            f"this won't overwrite silently. Re-run with --force if you "
+            f"mean to replace it.")
+
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except ImportError as e:
+        raise click.ClickException(
+            "cryptography not installed — "
+            "pip3 install 'franklinwh-scraper[ev]' or pip3 install cryptography") from e
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+    fd = os.open(TESLA_KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                 stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(private_pem)
+    finally:
+        TESLA_KEY_PATH.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+    pub_path = Path(out) if out else Path(cfg.output_dir) / "tesla-public-key.pem"
+    pub_path.parent.mkdir(parents=True, exist_ok=True)
+    pub_path.write_bytes(public_pem)
+
+    _ok(f"Private key written to {TESLA_KEY_PATH} (0600)")
+    _ok(f"Public key written to {pub_path}")
+    click.echo()
+    click.echo("  Host the public key at exactly:")
+    click.echo("  https://<your-domain>/.well-known/appspecific/com.tesla.3p.public-key.pem")
+    click.echo()
+    click.echo("  Caddy route (add to your vantage-hub Caddyfile):")
+    click.echo(click.style(
+        f"  handle /.well-known/appspecific/com.tesla.3p.public-key.pem {{\n"
+        f"      root * {pub_path.parent.resolve()}\n"
+        f"      rewrite * /tesla-public-key.pem\n"
+        f"      file_server\n"
+        f"  }}", dim=True,
+    ))
+    click.echo()
+    click.echo("  Then verify with:")
+    click.echo("  curl -s https://<your-domain>/.well-known/appspecific/com.tesla.3p.public-key.pem")
+    click.echo()
+    _ok("Next: docs/TESLA_SETUP.md steps 3-4 (partner registration, phone pairing), "
+        "then `franklinwh tesla auth`.")
 
 
 @grp_tesla.command("auth")
@@ -1726,8 +1832,14 @@ def cmd_savings(ctx: click.Context, days: int, out: str | None) -> None:
 @click.option("--out", "-o", default=None)
 @click.option("--live", is_flag=True, default=False,
               help="Do one billable Tesla poll ($0.002) for fresh vehicle state.")
+@click.option("--days", type=int, default=None,
+              help="Show the full decision history over this many days "
+                   "(default: just the last 5 entries) — useful for "
+                   "judging the controller during a dry-run soak before "
+                   "`tesla go-live`.")
 @click.pass_context
-def cmd_ev_status(ctx: click.Context, out: str | None, live: bool) -> None:
+def cmd_ev_status(ctx: click.Context, out: str | None, live: bool,
+                  days: int | None) -> None:
     """EV charge controller status: session, last decision, spend."""
     cfg    = ctx.obj["config"]
     outdir = Path(out or cfg.output_dir)
@@ -1766,15 +1878,33 @@ def cmd_ev_status(ctx: click.Context, out: str | None, live: bool) -> None:
     log_path = outdir / "ev_controller.jsonl"
     if log_path.exists():
         _hr()
-        click.echo(click.style("  Recent decisions", bold=True))
-        lines = log_path.read_text().splitlines()[-5:]
-        for line in lines:
-            try:
-                e = json.loads(line)
+        all_lines = log_path.read_text().splitlines()
+        if days is not None:
+            cutoff = datetime.now() - timedelta(days=days)
+            entries = []
+            for line in all_lines:
+                try:
+                    e = json.loads(line)
+                    if datetime.fromisoformat(e["timestamp"]) >= cutoff:
+                        entries.append(e)
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    continue
+            actions = [e for e in entries if e.get("action") != "none"]
+            click.echo(click.style(
+                f"  Decisions — last {days} day(s)", bold=True))
+            click.echo(f"  {len(entries)} logged, {len(actions)} action(s) taken")
+            for e in actions:
                 click.echo(f"  {e['timestamp']}  {e['action']:<10} "
                            f"{e.get('amps') or '':>3}  {e['reason']}")
-            except (json.JSONDecodeError, KeyError):
-                continue
+        else:
+            click.echo(click.style("  Recent decisions", bold=True))
+            for line in all_lines[-5:]:
+                try:
+                    e = json.loads(line)
+                    click.echo(f"  {e['timestamp']}  {e['action']:<10} "
+                               f"{e.get('amps') or '':>3}  {e['reason']}")
+                except (json.JSONDecodeError, KeyError):
+                    continue
 
     if live:
         _hr()

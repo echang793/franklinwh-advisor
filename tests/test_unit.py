@@ -2206,3 +2206,174 @@ def test_cli_shared_forecast_never_gets_live_anchor():
     block = src[start:end]
     assert "current_load_kw" not in block, (
         "shared usage_forecast must not be live-anchored:\n" + block)
+
+
+def test_doctor_flags_untuned_ev_charging_kw(monkeypatch):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+
+    default_cfg = Config(email="e", password="p", lat=1.0, lon=1.0,
+                         ev_charging=True, ev_charging_kw=7.6,
+                         output_dir="/tmp/nonexistent-doctor-test")
+    with patch("franklinwh_scraper.cli.load_config", return_value=default_cfg), \
+         patch("franklinwh_scraper.cli.AccountClient") as ac:
+        ac.side_effect = RuntimeError("skip login")
+        out = CliRunner().invoke(cli, ["doctor"]).output
+    assert "still the 7.6 kW default guess" in out
+
+    tuned_cfg = Config(email="e", password="p", lat=1.0, lon=1.0,
+                       ev_charging=True, ev_charging_kw=9.6,
+                       output_dir="/tmp/nonexistent-doctor-test")
+    with patch("franklinwh_scraper.cli.load_config", return_value=tuned_cfg), \
+         patch("franklinwh_scraper.cli.AccountClient") as ac:
+        ac.side_effect = RuntimeError("skip login")
+        out = CliRunner().invoke(cli, ["doctor"]).output
+    assert "still the 7.6 kW default guess" not in out
+    assert "9.6 kW" in out
+
+    no_ev_cfg = Config(email="e", password="p", lat=1.0, lon=1.0,
+                       ev_charging=False, output_dir="/tmp/nonexistent-doctor-test")
+    with patch("franklinwh_scraper.cli.load_config", return_value=no_ev_cfg), \
+         patch("franklinwh_scraper.cli.AccountClient") as ac:
+        ac.side_effect = RuntimeError("skip login")
+        out = CliRunner().invoke(cli, ["doctor"]).output
+    assert "EV charging draw" not in out
+
+
+def test_tesla_keygen_writes_key_pair_and_refuses_overwrite(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    import franklinwh_scraper.tesla as tesla_mod
+    from franklinwh_scraper.cli import cli
+
+    key_path = tmp_path / "key.pem"
+    monkeypatch.setattr(tesla_mod, "TESLA_KEY_PATH", key_path)
+    pub_path = tmp_path / "pub.pem"
+    cfg = Config(output_dir=str(tmp_path / "output"))
+    runner = CliRunner()
+
+    r = runner.invoke(cli, ["tesla", "keygen", "--out", str(pub_path)], obj={"config": cfg})
+    assert r.exit_code == 0, r.output
+    assert key_path.exists()
+    assert oct(key_path.stat().st_mode)[-3:] == "600"
+    assert pub_path.exists()
+    assert pub_path.read_text().startswith("-----BEGIN PUBLIC KEY-----")
+    assert key_path.read_text().startswith("-----BEGIN EC PRIVATE KEY-----")
+    assert ".well-known/appspecific/com.tesla.3p.public-key.pem" in r.output
+
+    r2 = runner.invoke(cli, ["tesla", "keygen", "--out", str(pub_path)], obj={"config": cfg})
+    assert r2.exit_code != 0
+    assert "already exists" in str(r2.output) + str(r2.exception)
+
+    old_private = key_path.read_bytes()
+    r3 = runner.invoke(cli, ["tesla", "keygen", "--force", "--out", str(pub_path)],
+                       obj={"config": cfg})
+    assert r3.exit_code == 0, r3.output
+    assert key_path.read_bytes() != old_private  # --force actually regenerated
+
+
+def test_ev_status_days_filters_and_summarizes(tmp_path):
+    import json as _json
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+
+    now = datetime.now()
+    log = tmp_path / "ev_controller.jsonl"
+    entries = [
+        {"timestamp": (now - timedelta(days=10)).isoformat(), "action": "start",
+         "amps": 12, "reason": "old start", "dry_run": True},
+        {"timestamp": (now - timedelta(hours=5)).isoformat(), "action": "none",
+         "amps": None, "reason": "waiting", "dry_run": True},
+        {"timestamp": (now - timedelta(hours=3)).isoformat(), "action": "stop",
+         "amps": None, "reason": "on-peak", "dry_run": True},
+        {"timestamp": (now - timedelta(hours=1)).isoformat(), "action": "set_amps",
+         "amps": 20, "reason": "track surplus", "dry_run": True},
+    ]
+    log.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
+
+    cfg = Config(ev_control_enabled=True, output_dir=str(tmp_path))
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        default_out = CliRunner().invoke(
+            cli, ["account", "ev-status", "--out", str(tmp_path)]).output
+        windowed_out = CliRunner().invoke(
+            cli, ["account", "ev-status", "--out", str(tmp_path), "--days", "1"]).output
+
+    # Default (no --days): unchanged behavior — old entries still shown.
+    assert "old start" in default_out
+    # --days 1: the 10-day-old entry is excluded, summary counts are right,
+    # and the no-op "waiting" tick isn't listed among actions taken.
+    assert "old start" not in windowed_out
+    assert "3 logged, 2 action(s) taken" in windowed_out
+    assert "waiting" not in windowed_out
+    assert "on-peak" in windowed_out
+    assert "track surplus" in windowed_out
+
+
+def test_setup_quick_skips_chatbot_ev_uptime_when_already_configured():
+    """--quick on a re-run: skip the three optional sections entirely and
+    leave their values exactly as configured."""
+    import types
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+
+    fake_loc = types.SimpleNamespace(lat=32.97, lon=-117.07,
+                                     name="San Diego", country="US")
+    cfg = Config(email="e", password="p", lat=32.97, lon=-117.07,
+                 location_name="San Diego, US",
+                 telegram_bot_token="t", telegram_chat_id="c",
+                 chat_backend="anthropic", anthropic_api_key="sk-ant-xyz",
+                 ev_charging=True, ev_charging_kw=9.6, ev_kwh_per_session=42.0,
+                 healthcheck_url="https://hc-ping.com/abc")
+    saved = {}
+
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg), \
+         patch("franklinwh_scraper.cli.save_config",
+               side_effect=lambda c: saved.__setitem__("cfg", c)), \
+         patch("franklinwh_scraper.cli.geocode", return_value=fake_loc), \
+         patch("franklinwh_scraper.cli.fetch_telegram_chat_id", return_value="c"), \
+         patch("franklinwh_scraper.cli.AccountClient") as ac:
+        ac.return_value.__enter__.return_value.login.return_value = None
+        ac.return_value.__enter__.return_value.get_gateways.return_value = []
+        r = CliRunner().invoke(cli, ["setup", "--quick"], input="\n" * 60)
+
+    assert r.exit_code == 0, r.output
+    assert "--quick: skipping" in r.output
+    assert "AI Chatbot" not in r.output
+    assert "Do you charge an EV" not in r.output
+    assert "Uptime monitoring" not in r.output
+
+    s = saved["cfg"]
+    assert s.chat_backend == "anthropic"
+    assert s.anthropic_api_key == "sk-ant-xyz"
+    assert s.ev_charging is True
+    assert s.ev_charging_kw == 9.6
+    assert s.ev_kwh_per_session == 42.0
+    assert s.healthcheck_url == "https://hc-ping.com/abc"
+    # Credentials/location still went through — --quick doesn't touch those.
+    assert s.email == "e"
+
+
+def test_setup_quick_is_noop_on_first_time_setup():
+    """--quick must not hide sections from a genuinely first-time user —
+    only skip already-answered ones on a re-run."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+
+    with patch("franklinwh_scraper.cli.load_config", return_value=Config()):
+        # Aborts partway through (no scripted input for the full wizard) —
+        # only the banner, printed before any prompt, is being checked.
+        r = CliRunner().invoke(cli, ["setup", "--quick"], input="")
+
+    assert "--quick: skipping" not in r.output
