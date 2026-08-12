@@ -1866,6 +1866,14 @@ def cmd_ev_status(ctx: click.Context, out: str | None, live: bool,
     if state.get("last_error"):
         click.echo(f"  {'Last error':24} {state['last_error']}")
 
+    n_samples = len(state.get("ev_draw_samples", []))
+    if n_samples:
+        click.echo(f"  {'EV draw calibration':24} "
+                   f"{n_samples} real reading(s), current estimate "
+                   f"{cfg.ev_charging_kw:.1f} kW"
+                   + (f" (last tuned {state['ev_kw_last_tuned_iso']})"
+                      if state.get("ev_kw_last_tuned_iso") else ""))
+
     month = datetime.now().strftime("%Y-%m")
     counts = state.get("spend", {}).get(month, {})
     spend = (counts.get("data", 0) * 0.002 + counts.get("cmd", 0) * 0.001

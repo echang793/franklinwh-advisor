@@ -2377,3 +2377,39 @@ def test_setup_quick_is_noop_on_first_time_setup():
         r = CliRunner().invoke(cli, ["setup", "--quick"], input="")
 
     assert "--quick: skipping" not in r.output
+
+
+def test_ev_status_shows_calibration_line(tmp_path):
+    import json as _json
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+
+    (tmp_path / ".ev_controller_state.json").write_text(_json.dumps({
+        "ev_draw_samples": [9.5, 9.6, 9.7, 9.4, 9.6],
+        "ev_kw_last_tuned_iso": "2026-08-11T12:00:00",
+    }))
+    cfg = Config(ev_control_enabled=True, ev_charging_kw=9.6, output_dir=str(tmp_path))
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        out = CliRunner().invoke(
+            cli, ["account", "ev-status", "--out", str(tmp_path)]).output
+    assert "EV draw calibration" in out
+    assert "5 real reading(s)" in out
+    assert "9.6 kW" in out
+    assert "2026-08-11T12:00:00" in out
+
+
+def test_ev_status_omits_calibration_line_when_no_samples(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+
+    cfg = Config(ev_control_enabled=True, output_dir=str(tmp_path))
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        out = CliRunner().invoke(
+            cli, ["account", "ev-status", "--out", str(tmp_path)]).output
+    assert "EV draw calibration" not in out

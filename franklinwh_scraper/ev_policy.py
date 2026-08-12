@@ -38,6 +38,12 @@ _RESERVE_KW = 0.25       # headroom so quantization rounding never imports
 _OVERNIGHT_END_HOUR = 6  # weekday super-off-peak ends 06:00; the 10-14
                          # midday SOP block stays surplus-tracked instead
 _SOLAR_MIN_KW = 0.1      # below this there is no "daytime" to track
+# ev_controller._at_home() correlation tolerance: the car's reported AC draw
+# must be within this of home_load_kw to count as "actually here" — was
+# referenced (ev_controller.py) but never defined here, a real gap between
+# the original design and the shipped constants that crashed _at_home() with
+# AttributeError on any tick where the EV charged above 0.5 kW.
+_HOME_MATCH_TOL_KW = 0.7
 
 
 class EvAction(str, Enum):

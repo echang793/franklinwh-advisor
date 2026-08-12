@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import json
 import logging
+import statistics
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import ev_policy, tou
 from .config import Config
+from .config import save as save_config
 from .ev_policy import (EvAction, EvDecision, EvInputs, EvParams,
                         VehicleChargeState)
 from .notifier import notify_telegram
@@ -43,6 +45,14 @@ _EV_API_ERROR_LIMIT = 5    # Telegram note after this many consecutive failures
 _COST = {"data": 0.002, "cmd": 0.001, "wake": 0.02}
 _BUDGET_DEGRADE_USD = 8.0   # projection past this -> double poll intervals
 _BUDGET_HALT_USD = 9.50     # spend past this -> no new sessions this month
+
+# Auto-calibrate cfg.ev_charging_kw from real charging sessions instead of
+# leaving it at whatever the setup wizard guessed — same rolling-median idea
+# as the solar system-peak-kW calibration (_get_system_peak_kw in alerts.py).
+_EV_KW_MIN_SAMPLES = 5        # real charging readings needed before trusting it
+_EV_KW_SAMPLE_CAP = 60        # rolling window — a handful of real sessions
+_EV_KW_UPDATE_THRESHOLD = 0.10  # only write cfg on a >=10% swing from current
+_EV_KW_UPDATE_COOLDOWN_H = 24   # at most one auto-tune write per day
 
 
 def _now_iso(now: datetime) -> str:
@@ -149,7 +159,55 @@ class EvController:
         self._clear_errors(now)
         self.state["last_vehicle"] = {**asdict(v),
                                       "fetched_at": _now_iso(v.fetched_at)}
+        self._record_ev_kw_sample(v, now)
         return v
+
+    def _record_ev_kw_sample(self, v: VehicleChargeState, now: datetime) -> None:
+        """Feed a real charging reading into the ev_charging_kw calibration.
+
+        Only called from a genuinely fresh Tesla poll (never a cached
+        snapshot) — a stale reading resampled every tick between polls
+        would bias the median toward whatever amps happened to be set the
+        last time we actually asked.
+        """
+        if not v.charging or v.actual_current_a <= 0:
+            return
+        kw = v.actual_current_a * (v.charger_voltage or 240.0) / 1000.0
+        samples = self.state.get("ev_draw_samples", [])
+        samples.append(round(kw, 2))
+        self.state["ev_draw_samples"] = samples[-_EV_KW_SAMPLE_CAP:]
+        self._maybe_auto_tune_ev_kw(now)
+
+    def _maybe_auto_tune_ev_kw(self, now: datetime) -> None:
+        samples = self.state.get("ev_draw_samples", [])
+        if len(samples) < _EV_KW_MIN_SAMPLES or self.cfg.ev_charging_kw <= 0:
+            return
+        calibrated = statistics.median(samples)
+        current = self.cfg.ev_charging_kw
+        if abs(calibrated - current) / current < _EV_KW_UPDATE_THRESHOLD:
+            return
+        last_tuned = self.state.get("ev_kw_last_tuned_iso")
+        if last_tuned:
+            try:
+                if (now - datetime.fromisoformat(last_tuned)
+                        < timedelta(hours=_EV_KW_UPDATE_COOLDOWN_H)):
+                    return
+            except ValueError:
+                pass
+        old = current
+        self.cfg.ev_charging_kw = round(calibrated, 1)
+        try:
+            save_config(self.cfg)
+        except OSError:
+            logger.exception("ev: failed to persist auto-tuned ev_charging_kw")
+            self.cfg.ev_charging_kw = old  # don't claim a tune that didn't save
+            return
+        self.state["ev_kw_last_tuned_iso"] = _now_iso(now)
+        self._notify(
+            f"🔌 EV charging draw estimate auto-tuned: {old:.1f} kW → "
+            f"{self.cfg.ev_charging_kw:.1f} kW, from {len(samples)} real "
+            f"charging readings. The digest's 'with EV charging' line will "
+            f"use the new number.")
 
     def _bump_error(self, now: datetime, msg: str) -> None:
         n = self.state.get("consec_tesla_errors", 0) + 1

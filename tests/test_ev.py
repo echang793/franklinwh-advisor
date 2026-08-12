@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from franklinwh_scraper.ev_policy import (
     EvAction,
@@ -367,3 +367,139 @@ def test_controller_stop_clears_state_even_if_amps_restore_fails(tmp_path, monke
     assert calls == ["stop", ("amps", 32)]
     assert ctl.state["last_commanded_amps"] is None, (
         "state must reflect 'stopped' even though the restore-amps call failed")
+
+
+def test_ev_kw_auto_tune_requires_min_samples_and_meaningful_swing(tmp_path, monkeypatch):
+    """No auto-tune below _EV_KW_MIN_SAMPLES, and none for a swing smaller
+    than _EV_KW_UPDATE_THRESHOLD even with enough samples."""
+    from franklinwh_scraper import ev_controller as evc
+    from franklinwh_scraper.config import Config
+
+    saved = []
+    monkeypatch.setattr(evc, "save_config", lambda cfg: saved.append(cfg.ev_charging_kw))
+
+    class StubClient:
+        def __init__(self, *a, **kw):
+            self.amps = 30  # 30 A * 240 V = 7.2 kW -> ~5% off the 7.6 default
+
+        def get_charge_state(self):
+            return _vehicle(charging=True, actual_current_a=self.amps)
+
+    monkeypatch.setattr(evc, "TeslaClient", StubClient)
+    cfg = Config(ev_control_enabled=True, tesla_vin="v", tesla_client_id="c",
+                ev_charging_kw=7.6)
+    ctl = evc.EvController(cfg, tmp_path)
+
+    now = datetime(2026, 7, 15, 12, 0)
+    for i in range(4):  # below the 5-sample minimum
+        ctl._poll_vehicle(now + timedelta(minutes=i))
+    assert not saved
+    assert cfg.ev_charging_kw == 7.6
+
+    ctl._poll_vehicle(now + timedelta(minutes=4))  # 5th sample, but <10% swing
+    assert not saved, "a <10% swing must not trigger an auto-tune write"
+    assert cfg.ev_charging_kw == 7.6
+
+
+def test_ev_kw_auto_tune_writes_config_on_meaningful_swing(tmp_path, monkeypatch):
+    """A real, sustained draw that differs >=10% from the configured
+    estimate gets written to cfg.ev_charging_kw, with a Telegram note."""
+    from franklinwh_scraper import ev_controller as evc
+    from franklinwh_scraper.config import Config
+
+    saved = []
+    notified = []
+    monkeypatch.setattr(evc, "save_config", lambda cfg: saved.append(cfg.ev_charging_kw))
+    monkeypatch.setattr(evc, "notify_telegram",
+                        lambda body, token, chat: notified.append(body))
+
+    class StubClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_charge_state(self):
+            return _vehicle(charging=True, actual_current_a=40.0,
+                            charger_voltage=240.0)  # 9.6 kW vs 7.6 default = 26%
+
+    monkeypatch.setattr(evc, "TeslaClient", StubClient)
+    cfg = Config(ev_control_enabled=True, tesla_vin="v", tesla_client_id="c",
+                ev_charging_kw=7.6, telegram_bot_token="t", telegram_chat_id="c")
+    ctl = evc.EvController(cfg, tmp_path)
+
+    now = datetime(2026, 7, 15, 12, 0)
+    for i in range(5):
+        ctl._poll_vehicle(now + timedelta(minutes=i))
+
+    assert saved == [9.6]
+    assert cfg.ev_charging_kw == 9.6
+    assert notified and "7.6 kW" in notified[0] and "9.6 kW" in notified[0]
+
+    # Cooldown: another big swing right after must not re-trigger.
+    saved.clear()
+    notified.clear()
+
+    class StubClient2:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_charge_state(self):
+            return _vehicle(charging=True, actual_current_a=10.0, charger_voltage=240.0)
+
+    monkeypatch.setattr(evc, "TeslaClient", StubClient2)
+    ctl.client = StubClient2()
+    for i in range(5):
+        ctl._poll_vehicle(now + timedelta(minutes=10 + i))
+    assert not saved, "cooldown must block a second auto-tune within 24h"
+
+
+def test_ev_kw_auto_tune_ignores_stale_cached_readings(tmp_path, monkeypatch):
+    """Calibration only samples from _poll_vehicle (fresh polls) — tick()'s
+    cached-snapshot reuse between polls must never resample the same
+    reading repeatedly."""
+    from types import SimpleNamespace
+
+    from franklinwh_scraper import ev_controller as evc
+    from franklinwh_scraper.config import Config
+
+    monkeypatch.setattr(evc, "save_config", lambda cfg: None)
+
+    class StubClient:
+        def __init__(self, *a, **kw):
+            self.calls = 0
+
+        def get_charge_state(self):
+            self.calls += 1
+            return _vehicle(charging=True, actual_current_a=40.0, charger_voltage=240.0)
+
+    stub = StubClient()
+    monkeypatch.setattr(evc, "TeslaClient", lambda *a, **kw: stub)
+    cfg = Config(ev_control_enabled=True, ev_dry_run=True,
+                tesla_vin="v", tesla_client_id="c", ev_charging_kw=7.6)
+    ctl = evc.EvController(cfg, tmp_path)
+
+    stats = SimpleNamespace(current=SimpleNamespace(
+        solar_production_kw=0.0, home_load_kw=1.0, grid_use_kw=1.0,
+        battery_use_kw=0.0, battery_soc_pct=50.0, grid_status="normal"))
+    now = datetime(2026, 7, 15, 0, 30)  # overnight window -> polls every tick
+    for i in range(3):
+        ctl.tick(stats, now + timedelta(minutes=i))
+
+    # Each tick that actually polled added exactly one sample per real
+    # get_charge_state() call — not more.
+    assert len(ctl.state.get("ev_draw_samples", [])) == stub.calls
+
+
+def test_at_home_does_not_crash_while_actively_charging(tmp_path, monkeypatch):
+    """Regression: _HOME_MATCH_TOL_KW was referenced via ev_policy but never
+    defined there — _at_home() raised AttributeError on any tick where the
+    car charged above 0.5 kW, which is to say almost any real session."""
+    from franklinwh_scraper import ev_controller as evc
+    from franklinwh_scraper.config import Config
+
+    monkeypatch.setattr(evc, "TeslaClient", lambda *a, **kw: None)
+    cfg = Config(ev_control_enabled=True, tesla_vin="v", tesla_client_id="c")
+    ctl = evc.EvController(cfg, tmp_path)
+
+    charging = _vehicle(charging=True, actual_current_a=32.0, charger_voltage=240.0)
+    assert ctl._at_home(charging, home_load_kw=8.0) is True
+    assert ctl._at_home(charging, home_load_kw=0.1) is False
