@@ -2413,3 +2413,59 @@ def test_ev_status_omits_calibration_line_when_no_samples(tmp_path):
         out = CliRunner().invoke(
             cli, ["account", "ev-status", "--out", str(tmp_path)]).output
     assert "EV draw calibration" not in out
+
+
+def test_api_ev_short_circuits_when_no_ev_configured(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+
+    monkeypatch.setattr(webapi, "_cfg", Config(ev_charging=False), raising=False)
+    client = TestClient(webapi.app)
+    r = client.get("/api/ev")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"ev_charging": False, "control_enabled": False, "error": False}
+
+
+def test_api_ev_reports_controller_status_and_null_prediction_without_history(
+    tmp_path, monkeypatch,
+):
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+
+    (tmp_path / ".ev_controller_state.json").write_text(_json.dumps({
+        "session": "solar", "last_commanded_amps": 20,
+        "consec_tesla_errors": 0, "ev_draw_samples": [9.5, 9.6, 9.4],
+        "spend": {datetime.now().strftime("%Y-%m"): {"data": 10, "cmd": 3, "wake": 1}},
+    }))
+    (tmp_path / "ev_controller.jsonl").write_text(
+        _json.dumps({"timestamp": datetime.now().isoformat(), "action": "set_amps",
+                     "amps": 20, "reason": "tracking surplus"}) + "\n")
+
+    cfg = Config(ev_charging=True, ev_control_enabled=True, ev_dry_run=True,
+                ev_charging_kw=9.6, output_dir=str(tmp_path))
+    monkeypatch.setattr(webapi, "_cfg", cfg, raising=False)
+    monkeypatch.setattr(webapi, "_OUT", tmp_path, raising=False)
+
+    client = TestClient(webapi.app)
+    r = client.get("/api/ev")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["ev_charging"] is True
+    assert body["control_enabled"] is True
+    ctl = body["controller"]
+    assert ctl["session"] == "solar"
+    assert ctl["commanded_amps"] == 20
+    assert ctl["calibration_samples"] == 3
+    assert ctl["spend_month_usd"] == round(10 * 0.002 + 3 * 0.001 + 1 * 0.02, 2)
+    assert len(ctl["recent_decisions"]) == 1
+    # No real history.db at tmp_path -> "prediction" key must still be
+    # present (None), not silently missing, so the dashboard never has to
+    # special-case an absent key vs an explicit null.
+    assert "prediction" in body
+    assert body["prediction"] is None

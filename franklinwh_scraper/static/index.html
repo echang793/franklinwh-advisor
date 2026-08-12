@@ -131,8 +131,8 @@ const DEMO = new URLSearchParams(location.search).get('demo') === '1';
 const CAP0 = 13.6;
 const $ = id => document.getElementById(id);
 const M = "'JetBrains Mono',monospace";
-const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','batteryhealth','alerts','digests'];
-const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',alerts:'ALERTS',digests:'DIGESTS'};
+const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','batteryhealth','alerts','digests','ev'];
+const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING'};
 
 // ── Live state ───────────────────────────────────────────────────────
 const S = {
@@ -368,6 +368,24 @@ mkPanel('digests', `
   </div>
   <div id="dg-body"></div>`);
 
+mkPanel('ev', `
+  <div class="plabel">EV CHARGING</div>
+  <div id="ev-empty" class="mono" style="font-size:11px;color:#4c5f50;margin-top:18px;"></div>
+  <div id="ev-body" style="display:none;">
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:18px;">
+      <div class="tile"><div id="ev-noev" style="font-size:24px;font-weight:700;color:#b9d8be;">— <span style="font-size:14px;color:#7d937f;">%</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">without EV @ <span id="ev-hour">—</span></div></div>
+      <div class="tile"><div id="ev-withev" style="font-size:24px;font-weight:700;color:#57e389;">— <span style="font-size:14px;color:#7d937f;">%</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">with EV (<span id="ev-kw">—</span> kW)</div></div>
+    </div>
+    <div id="ev-ctl" style="display:none;border-top:1px solid #18261b;margin-top:16px;padding-top:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;">TESLA CONTROLLER</div>
+        <span id="ev-mode" class="mono" style="font-size:10px;letter-spacing:.08em;padding:3px 10px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;">—</span>
+      </div>
+      <div id="ev-status" class="mono" style="font-size:11.5px;color:#6d8272;margin-top:10px;line-height:1.6;"></div>
+      <div id="ev-decisions" style="display:flex;flex-direction:column;gap:8px;margin-top:12px;"></div>
+    </div>
+  </div>`);
+
 // ── Toolbar ──────────────────────────────────────────────────────────
 function buildToolbar(){
   const tb = $('toolbar');
@@ -415,7 +433,7 @@ function snapshot(){
 }
 
 // ── Layout system ────────────────────────────────────────────────────
-function defaultLayout(){ return { left:['battery','flow','forecast','ebplan','accuracy','alerts'], right:['history','bill','mode','touclock','batteryhealth','digests'] }; }
+function defaultLayout(){ return { left:['battery','flow','forecast','ebplan','accuracy','alerts'], right:['history','bill','mode','touclock','batteryhealth','digests','ev'] }; }
 // Merge a saved layout against the current PANEL_IDS instead of requiring
 // an exact set match — previously, adding (or renaming) even one panel
 // silently discarded every user's custom drag arrangement back to default,
@@ -825,6 +843,57 @@ function renderBatteryHealth(){
   const drift = last.pct_of_nameplate - first.pct_of_nameplate;
   $('bh-foot').textContent = `🔋 ${last.capacity_kwh.toFixed(1)} kWh effective (${last.pct_of_nameplate.toFixed(0)}% of ${S.batteryHealthNameplate.toFixed(1)} kWh nameplate) · ${drift>=0?'+':''}${drift.toFixed(1)}pt vs ${first.label}.`;
 }
+function renderEv(){
+  const ev = S.ev;
+  if (!ev || !ev.ev_charging) {
+    $('ev-empty').textContent = 'EV charging not configured — enable in `franklinwh setup`.';
+    $('ev-empty').style.display = '';
+    $('ev-body').style.display = 'none';
+    return;
+  }
+  $('ev-empty').style.display = 'none';
+  $('ev-body').style.display = '';
+
+  const p = ev.prediction;
+  if (p && p.without_ev_pct != null) {
+    $('ev-noev').innerHTML = `${p.without_ev_pct.toFixed(0)} <span style="font-size:14px;color:#7d937f;">%</span>`;
+    $('ev-hour').textContent = p.hour_label || '—';
+  } else {
+    $('ev-noev').innerHTML = '— <span style="font-size:14px;color:#7d937f;">%</span>';
+    $('ev-hour').textContent = '—';
+  }
+  if (p && p.with_ev_pct != null) {
+    $('ev-withev').innerHTML = `${p.with_ev_pct.toFixed(0)} <span style="font-size:14px;color:#7d937f;">%</span>`;
+    $('ev-kw').textContent = (p.ev_charging_kw != null ? p.ev_charging_kw.toFixed(1) : '—');
+  } else {
+    $('ev-withev').innerHTML = '— <span style="font-size:14px;color:#7d937f;">%</span>';
+    $('ev-kw').textContent = '—';
+  }
+
+  const ctl = ev.controller;
+  if (!ctl) { $('ev-ctl').style.display = 'none'; return; }
+  $('ev-ctl').style.display = '';
+  $('ev-mode').textContent = ctl.dry_run ? 'DRY RUN' : 'LIVE';
+  $('ev-mode').style.cssText = ctl.dry_run
+    ? "font-size:10px;letter-spacing:.08em;padding:3px 10px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;"
+    : "font-size:10px;letter-spacing:.08em;padding:3px 10px;border-radius:999px;background:#57e389;color:#07160b;border:1px solid #57e389;";
+  const bits = [`session: ${ctl.session}`];
+  if (ctl.commanded_amps != null) bits.push(`${ctl.commanded_amps} A`);
+  if (ctl.override_until) bits.push(`override until ${new Date(ctl.override_until).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}`);
+  if (ctl.consec_errors > 0) bits.push(`⚠ ${ctl.consec_errors} API error(s)`);
+  bits.push(`$${ctl.spend_month_usd.toFixed(2)} this month`);
+  if (ctl.calibration_samples > 0) bits.push(`${ctl.calibration_samples} calibration reading(s)`);
+  $('ev-status').textContent = bits.join(' · ');
+
+  const dec = (ctl.recent_decisions || []).slice(-5).reverse();
+  $('ev-decisions').innerHTML = dec.length ? dec.map(d => {
+    const acted = d.action !== 'none';
+    return `<div style="display:flex;justify-content:space-between;gap:10px;font-size:11px;">
+      <span style="color:${acted?'#57e389':'#5f7263'};">${d.action}${d.amps ? ' '+d.amps+'A' : ''}</span>
+      <span style="color:#6d8272;flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${d.reason||''}</span>
+      <span class="mono" style="color:#4c5f50;">${relTime(d.timestamp)}</span></div>`;
+  }).join('') : '<div class="mono" style="font-size:11px;color:#4c5f50;">no decisions logged yet</div>';
+}
 function renderTou(){
   const t = S.tou;
   const now = nowT();
@@ -1176,10 +1245,10 @@ async function pollSlow(){
   // update instead of blanking all 7 slow-refresh panels for the cycle —
   // each panel keeps showing its last-known-good data until that specific
   // endpoint recovers.
-  const [h, f, acc, tou, bill, rec, health, bh] = await Promise.allSettled([
+  const [h, f, acc, tou, bill, rec, health, bh, ev] = await Promise.allSettled([
     J('/api/history?hours=48'), J('/api/forecast'), J('/api/accuracy'),
     J('/api/tou'), J('/api/bill'), J('/api/recommendation'), J('/api/health'),
-    J('/api/battery-health'),
+    J('/api/battery-health'), J('/api/ev'),
   ]);
   const ok = r => r.status === 'fulfilled' ? r.value : null;
   const now = Date.now();
@@ -1210,6 +1279,9 @@ async function pollSlow(){
 
   const bhv = ok(bh);
   if (bhv) { S.batteryHealth = bhv.weeks || []; S.batteryHealthNameplate = bhv.nameplate_kwh || 0; renderBatteryHealth(); }
+
+  const evv = ok(ev);
+  if (evv) { S.ev = evv; renderEv(); }
 
   const healthv = ok(health);
   S.apiHealth = healthv || S.apiHealth;
@@ -1303,7 +1375,7 @@ function demoData(){
     { ts: new Date(Date.now()-120000).toISOString(), body: '⚡ Switch to <b>Time-of-Use</b> mode. Battery at 78% with 14 kWh of solar still expected — hold charge for the 4–9 PM peak window and export at <b>$0.529/kWh</b>.' },
     { ts: new Date(Date.now()-120000).toISOString(), body: 'Heads up: grid peak pricing starts in 1h 28m. Current plan saves an estimated <b>$4.80</b> today vs Self-Use.' },
   ], true);
-  renderHistory(); renderForecast(); renderAccuracy(); renderBatteryHealth(); renderTou(); renderBill(); renderMode();
+  renderHistory(); renderForecast(); renderAccuracy(); renderBatteryHealth(); renderTou(); renderBill(); renderMode(); renderEv();
   $('m-apply').addEventListener('click', () => {
     if (S.applying || S.modeApplied) return;
     S.applying = true; $('m-apply').textContent = '◈ SWITCHING…';

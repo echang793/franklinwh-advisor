@@ -29,6 +29,7 @@ from .alerts import (
     _get_system_peak_kw,
     _GHI_CLOUDY_THRESHOLD,
     _load_peak_state,
+    _predict_overnight_soc,
 )
 from .advisor import _tou_eb_plan
 from .config import load as load_config
@@ -335,6 +336,82 @@ def api_battery_health(weeks: int = Query(12, ge=1, le=52)):
         return {"weeks": out, "nameplate_kwh": _BAT_CAP, "error": False}
     except Exception:
         return {"weeks": [], "nameplate_kwh": _BAT_CAP, "error": True}
+
+
+@app.get("/api/ev", dependencies=_authed)
+def api_ev():
+    """EV closed-loop controller status plus tonight's without/with-EV SoC
+    prediction — the dashboard equivalent of the evening digest's second
+    line, computed live rather than waiting for the 9-10pm alert to fire.
+    """
+    out = {
+        "ev_charging": bool(getattr(_cfg, "ev_charging", False)),
+        "control_enabled": bool(getattr(_cfg, "ev_control_enabled", False)),
+        "error": False,
+    }
+    if not out["ev_charging"]:
+        return out
+
+    if out["control_enabled"]:
+        try:
+            ctl_state = json.loads((_OUT / ".ev_controller_state.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            ctl_state = {}
+        month = datetime.now().strftime("%Y-%m")
+        counts = ctl_state.get("spend", {}).get(month, {})
+        spend = (counts.get("data", 0) * 0.002 + counts.get("cmd", 0) * 0.001
+                 + counts.get("wake", 0) * 0.02)
+        recent = []
+        log_path = _OUT / "ev_controller.jsonl"
+        if log_path.exists():
+            try:
+                for line in log_path.read_text().splitlines()[-5:]:
+                    recent.append(json.loads(line))
+            except (OSError, json.JSONDecodeError):
+                pass
+        out["controller"] = {
+            "dry_run": bool(_cfg.ev_dry_run),
+            "session": ctl_state.get("session", "none"),
+            "commanded_amps": ctl_state.get("last_commanded_amps"),
+            "override_until": ctl_state.get("override_until_iso"),
+            "consec_errors": ctl_state.get("consec_tesla_errors", 0),
+            "last_error": ctl_state.get("last_error"),
+            "calibration_samples": len(ctl_state.get("ev_draw_samples", [])),
+            "spend_month_usd": round(spend, 2),
+            "recent_decisions": recent,
+        }
+
+    r = _latest_reading()
+    out["prediction"] = None
+    if r is not None:
+        try:
+            peak_state = _load_peak_state(_OUT)
+            with HistoryStore(_OUT / "history.db") as history:
+                outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
+                if history.has_enough_data():
+                    sp = _get_system_peak_kw(peak_state)
+                    cloudy = bool(outlook and outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD)
+                    pr = _get_performance_ratio(peak_state, cloudy=cloudy)
+                    hb = _get_hourly_bias(peak_state)
+                    now = datetime.now()
+                    soc = r["battery_soc"]
+                    without_fc = predict(history, 24, outlook=outlook,
+                                         system_peak_kw=sp, perf_ratio=pr,
+                                         hourly_bias=hb, current_load_kw=r["home_load_kw"])
+                    with_fc = predict(history, 24, outlook=outlook,
+                                      system_peak_kw=sp, perf_ratio=pr, hourly_bias=hb,
+                                      current_load_kw=r["home_load_kw"] + _cfg.ev_charging_kw)
+                    without_ov = _predict_overnight_soc(without_fc, now, soc, _BAT_CAP)
+                    with_ov = _predict_overnight_soc(with_fc, now, soc, _BAT_CAP)
+                    out["prediction"] = {
+                        "without_ev_pct": without_ov[0] if without_ov else None,
+                        "with_ev_pct": with_ov[0] if with_ov else None,
+                        "hour_label": without_ov[1] if without_ov else None,
+                        "ev_charging_kw": _cfg.ev_charging_kw,
+                    }
+        except Exception:
+            out["prediction"] = None
+    return out
 
 
 @app.get("/api/until", dependencies=_authed)
