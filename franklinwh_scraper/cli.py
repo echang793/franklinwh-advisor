@@ -482,7 +482,7 @@ def setup(quick: bool) -> None:
         (
             "Peak-hour monitoring",
             "Alerts during 4–9 pm: grid import, low SoC, battery not charging, export opportunity, EV charging window",
-            ["grid_import", "low_soc_1pm", "low_noon_soc",
+            ["grid_import", "eb_ready", "low_soc_1pm", "low_noon_soc",
              "low_morning_solar", "solar_stopped", "not_charging", "export_arbitrage",
              "ev_charge_window"],
         ),

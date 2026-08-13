@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .advisor import _EB_CHARGE_KW
 from .config import Config
 from .format_utils import fmt_hours, soc_bar, time_to_pct
 from .history import integrate_intervals
@@ -554,6 +555,40 @@ def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c, cfg: Config) -
         f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW\n"
         + tte_str
         + "Consider switching to Emergency Backup to charge before peak."
+    )
+
+
+# Tolerance around advisor._EB_CHARGE_KW (5.0 kW) — the conservative
+# FranklinWH AC charge rate in EB mode. Requiring the reading to actually
+# sit near that rate (not just "any positive charging") is what tells us
+# Emergency Backup grid-charging is genuinely active, rather than a
+# coincidental SoC crossing from ordinary solar charging.
+_EB_CHARGE_RATE_TOLERANCE_KW = 0.5
+
+
+def _alert_eb_ready(state: dict, today: str, now: datetime, c) -> str | None:
+    """Only fires while actively charging at ~5.0 kW (see _EB_CHARGE_RATE_TOLERANCE_KW) —
+    confirms Emergency Backup is really charging from the grid, not just a
+    battery that happened to reach 80% from solar while still on
+    Self-Consumption."""
+    charging_at_eb_rate = (
+        -(_EB_CHARGE_KW + _EB_CHARGE_RATE_TOLERANCE_KW)
+        <= c.battery_use_kw
+        <= -(_EB_CHARGE_KW - _EB_CHARGE_RATE_TOLERANCE_KW)
+    )
+    if not charging_at_eb_rate or c.battery_soc_pct < 80.0:
+        return None
+    if state.get("eb_80pct_alerted_date") == today:
+        return None
+    state["eb_80pct_alerted_date"] = today
+    logger.info("EB 80%% SoC alert sent for %s (%.0f%%, charging %.2f kW)",
+                today, c.battery_soc_pct, c.battery_use_kw)
+    return (
+        f"🟢 <b>FranklinWH: Battery at {c.battery_soc_pct:.0f}% — Emergency Backup target reached</b>\n"
+        f"Time: {now.strftime('%-I:%M %p')} — battery ready before 4 pm peak\n"
+        f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW  ·  "
+        f"Charging {abs(c.battery_use_kw):.1f} kW (EB rate)\n"
+        f"You can now switch modes if needed."
     )
 
 
@@ -2160,6 +2195,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
         _candidates = [
             ("morning_preview",   lambda: _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store, cfg)),
             ("grid_import",       lambda: _alert_grid_import(state, today, now, c)),
+            ("eb_ready",          lambda: _alert_eb_ready(state, today, now, c)),
             ("low_soc_1pm",       lambda: _alert_low_soc_1pm(state, today, now, c, cfg)),
             ("low_morning_solar", lambda: _alert_low_morning_solar(state, today, now, c)),
             ("solar_stopped",     lambda: _alert_solar_stopped(state, today, now, c)),
