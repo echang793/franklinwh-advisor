@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .advisor import _EB_CHARGE_KW
 from .config import Config
 from .format_utils import fmt_hours, soc_bar, time_to_pct
 from .history import integrate_intervals
@@ -557,18 +558,36 @@ def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c, cfg: Config) -
     )
 
 
+# Tolerance around advisor._EB_CHARGE_KW (5.0 kW) — the conservative
+# FranklinWH AC charge rate in EB mode. Requiring the reading to actually
+# sit near that rate (not just "any positive charging") is what tells us
+# Emergency Backup grid-charging is genuinely active, rather than a
+# coincidental SoC crossing from ordinary solar charging.
+_EB_CHARGE_RATE_TOLERANCE_KW = 0.5
+
+
 def _alert_eb_ready(state: dict, today: str, now: datetime, c) -> str | None:
-    in_window = now.hour in (13, 14)
-    if not in_window or c.battery_soc_pct < 80.0:
+    """Only fires while actively charging at ~5.0 kW (see _EB_CHARGE_RATE_TOLERANCE_KW) —
+    confirms Emergency Backup is really charging from the grid, not just a
+    battery that happened to reach 80% from solar while still on
+    Self-Consumption."""
+    charging_at_eb_rate = (
+        -(_EB_CHARGE_KW + _EB_CHARGE_RATE_TOLERANCE_KW)
+        <= c.battery_use_kw
+        <= -(_EB_CHARGE_KW - _EB_CHARGE_RATE_TOLERANCE_KW)
+    )
+    if not charging_at_eb_rate or c.battery_soc_pct < 80.0:
         return None
     if state.get("eb_80pct_alerted_date") == today:
         return None
     state["eb_80pct_alerted_date"] = today
-    logger.info("EB 80%% SoC alert sent for %s (%.0f%%)", today, c.battery_soc_pct)
+    logger.info("EB 80%% SoC alert sent for %s (%.0f%%, charging %.2f kW)",
+                today, c.battery_soc_pct, c.battery_use_kw)
     return (
         f"🟢 <b>FranklinWH: Battery at {c.battery_soc_pct:.0f}% — Emergency Backup target reached</b>\n"
         f"Time: {now.strftime('%-I:%M %p')} — battery ready before 4 pm peak\n"
-        f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW\n"
+        f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW  ·  "
+        f"Charging {abs(c.battery_use_kw):.1f} kW (EB rate)\n"
         f"You can now switch modes if needed."
     )
 
@@ -2015,10 +2034,13 @@ _FULL_RESET_SOC = 95.0  # drop below this re-arms the alert — see note below
 def _alert_solar_surplus_overflow(
     state: dict, today: str, now: datetime, c
 ) -> str | None:
-    """Battery full with solar exceeding load → advise Time-of-Use export mode.
+    """Battery full with solar exceeding load → informational only.
 
-    Triggers when solar is filling an already-full battery, so the user can
-    switch to TOU mode and push surplus to the grid instead of clipping.
+    Triggers when solar is filling an already-full battery. On Self-Consumption
+    (this system's assumed mode at all times — see advisor.Mode.SELF_CONSUMPTION
+    and cli._dispatch_notifications) the surplus already exports to grid
+    automatically, so this no longer suggests switching to Time-of-Use mode —
+    that switch is never something this system's user makes.
 
     Window: 10 am–6 pm. Was 10 am–2 pm (tied to super-off-peak ending), but
     on a day with a late morning load spike the battery can miss 100% until
@@ -2057,7 +2079,7 @@ def _alert_solar_surplus_overflow(
         f"🔋 {_soc_bar(soc)}  ·  Solar {c.solar_production_kw:.2f} kW  ·  "
         f"Load {c.home_load_kw:.2f} kW\n"
         f"Time: {now.strftime('%-I:%M %p')} — currently {period_label}.\n"
-        f"Consider switching to Time-of-Use mode to export surplus to grid."
+        f"Self-Consumption mode is optimal — excess going to grid."
     )
 
 

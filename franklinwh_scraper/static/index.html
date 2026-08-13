@@ -1333,7 +1333,10 @@ function demoPoll(dtSecs){
   S.savedToday += (S.dis*0.529 + S.exp*0.05 + (inPeak ? Math.min(S.solar,S.load)*0.529 : 0))*dtH*60;
   S.onPeak = inPeak && !S.outage;
   S.lastPoll = new Date().toISOString(); S.nextPoll = new Date(Date.now()+4000).toISOString();
-  if (S.soc >= 80 && !firedEB) { firedEB = true; demoAlert('BATTERY', `🟢 Battery at 80% — <b>Emergency Backup target reached</b>. Battery ready before 4 PM peak. Solar ${S.solar.toFixed(2)} kW · Load ${S.load.toFixed(2)} kW.`); }
+  // Real alert only fires while charging at ~5.0 kW — the EB grid-charge rate —
+  // not just from any solar surplus reaching 80%. S.chg pegged at its 5 kW cap
+  // is this demo's stand-in for "charging at the EB rate."
+  if (S.soc >= 80 && S.chg >= 4.5 && !firedEB) { firedEB = true; demoAlert('BATTERY', `🟢 Battery at ${S.soc.toFixed(0)}% — <b>Emergency Backup target reached</b>. Battery ready before 4 PM peak. Solar ${S.solar.toFixed(2)} kW · Load ${S.load.toFixed(2)} kW · Charging ${S.chg.toFixed(1)} kW (EB rate).`); }
   if (S.soc < 20 && !firedLow) { firedLow = true; demoAlert('BATTERY', `🪫 <b>Battery below 20% — reserve threshold hit.</b> Conserve load or schedule an EB charge in the next super off-peak window.`, true); }
   if (S.soc > 30) firedLow = false;
   renderBanners(); sweep();

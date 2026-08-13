@@ -49,7 +49,7 @@ alerts = [
         "3/8 — Emergency Backup Ready",
         "🟢 FranklinWH: Battery at 82% — Emergency Backup target reached\n"
         "Time: 1:52 PM — battery ready before 4 pm peak\n"
-        "Solar 3.40 kW  |  Load 1.10 kW\n"
+        "Solar 3.40 kW  |  Load 1.10 kW  |  Charging 5.0 kW (EB rate)\n"
         "You can now switch modes if needed.\n[TEST ALERT]"
     ),
     (
