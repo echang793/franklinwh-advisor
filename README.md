@@ -22,7 +22,6 @@ attention. A local dashboard is there when you do want the detail.
 | **Not charging** | Solar > 1.5 kW but battery not charging; possible mode or inverter issue |
 | **Solar dropped mid-day** | Solar kW dropped sharply during 11am–3pm; cloud cover or inverter alert |
 | **Low morning solar** | 9–10 am and solar < 0.5 kW; flags cloudy day ahead |
-| **EB target reached** | SoC hits ≥ 80% during 1–2 pm window — battery ready for peak |
 | **Fast drain** | SoC dropping >8%/hr below 35%; shows estimated time to empty |
 | **Grid outage** | Immediate alert with estimated backup time, generator status (if running), conservation advice |
 | **Grid restored** | Outage duration and kWh used from battery |
