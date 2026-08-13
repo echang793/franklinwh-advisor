@@ -2469,3 +2469,73 @@ def test_api_ev_reports_controller_status_and_null_prediction_without_history(
     # special-case an absent key vs an explicit null.
     assert "prediction" in body
     assert body["prediction"] is None
+
+
+def test_log_solar_calibration_inputs_writes_expected_fields(tmp_path):
+    import json as _json
+
+    from franklinwh_scraper.alerts import _log_solar_calibration_inputs
+
+    cfg = Config(output_dir=str(tmp_path))
+    now = datetime(2026, 8, 13, 7, 45, 0)
+    _log_solar_calibration_inputs(
+        cfg, "2026-08-13", now,
+        system_peak_kw=4.06, perf_ratio=1.02, hourly_bias={7: 1.2, 13: 0.88},
+        avg_ghi=620.5, cloudy_day=False, predicted_kwh=25.9, cal_samples_n=240,
+    )
+    lines = (tmp_path / "solar_calibration_log.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    entry = _json.loads(lines[0])
+    assert entry["date"] == "2026-08-13"
+    assert entry["timestamp"] == now.isoformat()
+    assert entry["system_peak_kw"] == 4.06
+    assert entry["perf_ratio"] == 1.02
+    assert entry["cloudy_day"] is False
+    assert entry["avg_ghi"] == 620.5
+    assert entry["predicted_kwh"] == 25.9
+    assert entry["cal_samples_n"] == 240
+    assert entry["hourly_bias"] == {"7": 1.2, "13": 0.88}
+
+
+def test_log_solar_calibration_inputs_appends_across_days(tmp_path):
+    import json as _json
+
+    from franklinwh_scraper.alerts import _log_solar_calibration_inputs
+
+    cfg = Config(output_dir=str(tmp_path))
+    for i, d in enumerate(["2026-08-13", "2026-08-14"]):
+        _log_solar_calibration_inputs(
+            cfg, d, datetime(2026, 8, 13 + i, 7, 45),
+            system_peak_kw=4.0, perf_ratio=1.0, hourly_bias={},
+            avg_ghi=600.0, cloudy_day=False, predicted_kwh=25.0 + i,
+            cal_samples_n=240,
+        )
+    lines = (tmp_path / "solar_calibration_log.jsonl").read_text().splitlines()
+    assert len(lines) == 2
+    assert _json.loads(lines[0])["date"] == "2026-08-13"
+    assert _json.loads(lines[1])["date"] == "2026-08-14"
+
+
+def test_log_solar_calibration_inputs_noop_without_cfg(tmp_path):
+    from franklinwh_scraper.alerts import _log_solar_calibration_inputs
+
+    # Must not raise — some call sites (direct tests) may not pass cfg.
+    _log_solar_calibration_inputs(
+        None, "2026-08-13", datetime(2026, 8, 13, 7, 45),
+        system_peak_kw=4.0, perf_ratio=1.0, hourly_bias={},
+        avg_ghi=600.0, cloudy_day=False, predicted_kwh=25.0, cal_samples_n=240,
+    )
+    assert not (tmp_path / "solar_calibration_log.jsonl").exists()
+
+
+def test_log_solar_calibration_inputs_survives_bad_output_dir():
+    from franklinwh_scraper.alerts import _log_solar_calibration_inputs
+
+    # A path that can't be written to (parent doesn't exist) must degrade
+    # silently, not take down the morning-preview alert.
+    cfg = Config(output_dir="/nonexistent-dir-xyz/deeper")
+    _log_solar_calibration_inputs(
+        cfg, "2026-08-13", datetime(2026, 8, 13, 7, 45),
+        system_peak_kw=4.0, perf_ratio=1.0, hourly_bias={},
+        avg_ghi=600.0, cloudy_day=False, predicted_kwh=25.0, cal_samples_n=240,
+    )  # no assertion needed — just must not raise

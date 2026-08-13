@@ -363,6 +363,47 @@ def _get_hourly_bias(state: dict) -> dict[int, float]:
     return bias
 
 
+_SOLAR_CAL_LOG_FILE = "solar_calibration_log.jsonl"
+
+
+def _log_solar_calibration_inputs(
+    cfg: Config | None, today: str, now: datetime, *,
+    system_peak_kw: float, perf_ratio: float, hourly_bias: dict[int, float],
+    avg_ghi: float, cloudy_day: bool, predicted_kwh: float, cal_samples_n: int,
+) -> None:
+    """Append the exact inputs behind today's solar prediction to a JSONL log.
+
+    `state` only ever holds *current* calibration values — every morning
+    overwrites perf_ratio/hourly_bias/system_peak_kw in place, so a
+    surprising-in-hindsight prediction can't be diagnosed after the fact.
+    Two real cases (2026-07-14 and 2026-07-26, kWh error +46% and +34% with
+    GHI forecast error in the normal range both days — the miss was in the
+    calibration, not the weather) could only be half-explained from the
+    surrounding cloud-cover trend, because there was no record of what
+    perf_ratio/hourly_bias actually were that morning. This is the fix: one
+    line per day, append-only, survives every subsequent recalibration.
+    """
+    if cfg is None:
+        return
+    try:
+        path = Path(cfg.output_dir) / _SOLAR_CAL_LOG_FILE
+        entry = {
+            "date": today,
+            "timestamp": now.isoformat(),
+            "system_peak_kw": round(system_peak_kw, 3),
+            "perf_ratio": round(perf_ratio, 3),
+            "cloudy_day": cloudy_day,
+            "avg_ghi": round(avg_ghi, 1),
+            "predicted_kwh": predicted_kwh,
+            "cal_samples_n": cal_samples_n,
+            "hourly_bias": {str(h): round(v, 3) for h, v in hourly_bias.items()},
+        }
+        with open(path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        logger.debug("Solar calibration log write failed", exc_info=True)
+
+
 def _alert_morning_preview(
     state: dict, today: str, now: datetime, c,
     outlook, usage_forecast, store, cfg: Config | None = None,
@@ -427,6 +468,11 @@ def _alert_morning_preview(
         gen_kwh    = round(outlook.today_generation_kwh(system_peak_kw, perf_ratio, hourly_bias), 1)
         state[f"predicted_kwh_{today}"]     = gen_kwh
         state[f"predicted_avg_ghi_{today}"] = round(avg_ghi, 1)
+        _log_solar_calibration_inputs(
+            cfg, today, now, system_peak_kw=system_peak_kw, perf_ratio=perf_ratio,
+            hourly_bias=hourly_bias, avg_ghi=avg_ghi, cloudy_day=cloudy_day,
+            predicted_kwh=gen_kwh, cal_samples_n=len(cal_samples),
+        )
 
         sky = "Sunny" if avg_ghi >= 400 else ("Partly cloudy" if avg_ghi >= _GHI_CLOUDY_THRESHOLD else "Cloudy")
         cloudy_samples = state.get("perf_ratio_cloudy_samples", [])
