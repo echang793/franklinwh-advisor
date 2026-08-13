@@ -30,8 +30,10 @@ class Mode(str, Enum):
     # covers pre-peak grid charging and SELF_CONSUMPTION already discharges
     # on-peak, so the branch would add flapping, not capability.
     #
-    # TOU is instead suggested in prose by alerts._alert_solar_surplus_overflow
-    # and _alert_export_arbitrage, which is the right delivery mechanism.
+    # TOU is instead surfaced in prose by alerts._alert_export_arbitrage.
+    # alerts._alert_solar_surplus_overflow used to suggest a TOU switch too,
+    # but this system's user never runs TOU — that alert now just reports
+    # the surplus (Self-Consumption already exports it automatically).
     TIME_OF_USE = "time_of_use"
     NO_CHANGE = "no_change"
 

@@ -17,7 +17,7 @@ import click
 logger = logging.getLogger(__name__)
 
 from .account import AccountClient
-from .advisor import recommend
+from .advisor import Mode, recommend
 from .alerts import (
     _BATTERY_CAPACITY_KWH,
     _GHI_CLOUDY_THRESHOLD,
@@ -150,6 +150,15 @@ def _dispatch_notifications(rec, cfg: Config, notify_flag: bool, last_mode: str 
 
     # Never notify for NO_CHANGE — "Battery OK" messages are noise.
     if not rec.needs_action and not critical:
+        return
+
+    # Self-Consumption is the user's assumed baseline mode at all times, so
+    # "switch to Self-Consumption" is never actionable news — it's either
+    # reverting from a rare Emergency-Backup excursion or confirming a
+    # default the user never left. Emergency Backup (the only mode the user
+    # actually switches into, and only for super-off-peak charging) still
+    # notifies normally below.
+    if rec.mode == Mode.SELF_CONSUMPTION:
         return
 
     # Suppress info-level alerts during quiet hours (midnight–7am).

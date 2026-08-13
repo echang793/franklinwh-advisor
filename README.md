@@ -17,7 +17,7 @@ attention. A local dashboard is there when you do want the detail.
 | **2-day cloudy warning** | 7–9 am — when two consecutive low-solar days are forecast and battery is below 65%; advises charging now at cheap super-off-peak rate |
 | **Low battery at 1 pm** | SoC < 40% heading into 4–9 pm peak; shows estimated time to empty at current load |
 | **Low battery at noon** | SoC < 30% at 11am–noon despite solar; flags battery mode issue |
-| **Battery full — solar surplus** | 10 am–6 pm — battery at 100% and solar > load; advises switching to Time-of-Use to export surplus. Fires once per fill, not once per day — stays quiet as long as the battery is still full |
+| **Battery full — solar surplus** | 10 am–6 pm — battery at 100% and solar > load; reports the surplus (Self-Consumption already exports it to grid automatically). Fires once per fill, not once per day — stays quiet as long as the battery is still full |
 | **Grid import during peak** | 4–9 pm — drawing from grid when battery should be covering load |
 | **Not charging** | Solar > 1.5 kW but battery not charging; possible mode or inverter issue |
 | **Solar dropped mid-day** | Solar kW dropped sharply during 11am–3pm; cloud cover or inverter alert |
