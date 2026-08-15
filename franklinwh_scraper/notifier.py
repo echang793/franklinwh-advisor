@@ -129,16 +129,20 @@ def _with_retry(fn, label: str, attempts: int = 3, base_delay: float = 2.0) -> b
     return False
 
 
-def notify_telegram(body: str, bot_token: str, chat_id: str) -> None:
-    """Send a Telegram message via the Bot API (cross-platform, free)."""
+def notify_telegram(body: str, bot_token: str, chat_id: str,
+                     reply_markup: dict | None = None) -> None:
+    """Send a Telegram message via the Bot API (cross-platform, free).
+
+    `reply_markup` — optional inline keyboard dict (e.g. mute buttons on an
+    alert), passed straight through to the Bot API as-is.
+    """
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": body, "parse_mode": "HTML"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     for attempt in range(3):
         try:
-            r = requests.post(
-                url,
-                json={"chat_id": chat_id, "text": body, "parse_mode": "HTML"},
-                timeout=10,
-            )
+            r = requests.post(url, json=payload, timeout=10)
             if r.ok:
                 logger.debug("Telegram message sent to chat %s", chat_id)
                 return

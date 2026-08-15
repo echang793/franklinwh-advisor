@@ -1434,7 +1434,7 @@ def test_grid_down_dispatches_as_urgent(tmp_path, monkeypatch):
     import types
     sent = []
     monkeypatch.setattr(alerts, "_send_alert",
-                        lambda body, cfg, urgent=False: sent.append((body, urgent)))
+                        lambda body, cfg, urgent=False, alert_name=None: sent.append((body, urgent)))
 
     c = types.SimpleNamespace(
         battery_soc_pct=80.0, home_load_kw=1.0, solar_production_kw=0.0,
@@ -2399,6 +2399,27 @@ def test_ev_status_days_filters_and_summarizes(tmp_path):
     assert "waiting" not in windowed_out
     assert "on-peak" in windowed_out
     assert "track surplus" in windowed_out
+
+
+def test_send_alert_attaches_mute_buttons_except_always_on(monkeypatch):
+    """Alerts should carry the same 2h/8h mute buttons as the standalone
+    /mute command — except the safety alerts _alert_enabled never lets
+    /mute silence in the first place, which must never even look mutable."""
+    calls = []
+    monkeypatch.setattr(
+        alerts, "notify_telegram",
+        lambda body, token, chat_id, reply_markup=None: calls.append(reply_markup))
+
+    cfg = Config(telegram_bot_token="x", telegram_chat_id="y")
+
+    alerts._send_alert("battery full", cfg, alert_name="solar_surplus_overflow")
+    assert calls[-1] == alerts._MUTE_KEYBOARD
+
+    alerts._send_alert("grid down!", cfg, alert_name="grid_down")
+    assert calls[-1] is None
+
+    alerts._send_alert("no name given", cfg)
+    assert calls[-1] is None
 
 
 def test_solar_audit_flags_outliers_and_groups_by_cloudy(tmp_path):

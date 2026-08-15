@@ -102,12 +102,29 @@ def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
 
 # ── Multi-channel alert dispatcher ───────────────────────────────────
 
-def _send_alert(body: str, cfg: Config, urgent: bool = False) -> None:
-    """Send to all configured channels."""
+_MUTE_KEYBOARD = {"inline_keyboard": [[
+    {"text": "🔕 Mute 2h", "callback_data": "mute:2"},
+    {"text": "🔕 Mute 8h", "callback_data": "mute:8"},
+]]}
+
+
+def _send_alert(body: str, cfg: Config, urgent: bool = False, alert_name: str | None = None) -> None:
+    """Send to all configured channels.
+
+    `alert_name` — when given and not one of `_ALWAYS_ON_ALERTS`, the
+    Telegram message carries the same 2h/8h mute buttons as the standalone
+    `/mute` command, so muting doesn't require leaving the alert to type a
+    command. `_handle_callback_query` in chatbot.py already handles any
+    `mute:N` tap regardless of which message it came from, so no chatbot
+    change was needed to wire this up. Omitted (None) or an always-on
+    safety alert → plain message, no buttons — matches _alert_enabled's
+    own always-on carve-out so a safety alert can never even look mutable.
+    """
     if cfg.imessage_phone:
         notify_imessage_text(body, cfg.imessage_phone)
     if cfg.telegram_bot_token and cfg.telegram_chat_id:
-        notify_telegram(body, cfg.telegram_bot_token, cfg.telegram_chat_id)
+        kb = _MUTE_KEYBOARD if (alert_name and alert_name not in _ALWAYS_ON_ALERTS) else None
+        notify_telegram(body, cfg.telegram_bot_token, cfg.telegram_chat_id, reply_markup=kb)
     if cfg.smtp_host and cfg.email_to:
         notify_email(body, cfg)
     if cfg.webhook_url:
@@ -2277,14 +2294,14 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
         # advisory) and both inherit urgent=True. Splitting it into two
         # candidates would fragment its last_soc/last_soc_time bookkeeping,
         # which is worse; it's an always-on safety alert either way.
-        to_send: list[tuple[str, bool]] = []
+        to_send: list[tuple[str, bool, str]] = []
         for _name, _fn in _candidates:
             if _alert_enabled(cfg, _name, state, now):
                 _body = _fn()
                 if _body:
-                    to_send.append((_body, _name in _URGENT_ALERTS))
+                    to_send.append((_body, _name in _URGENT_ALERTS, _name))
         _save_peak_state(out, state)
 
-    for body, urgent in to_send:
-        _send_alert(body, cfg, urgent=urgent)
+    for body, urgent, name in to_send:
+        _send_alert(body, cfg, urgent=urgent, alert_name=name)
 
