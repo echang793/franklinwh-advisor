@@ -32,11 +32,21 @@ logger = logging.getLogger(__name__)
 _BATTERY_CAPACITY_KWH = 13.6  # fallback default — overridden by cfg.battery_capacity_kwh at runtime
 
 def _get_system_peak_kw(state: dict) -> float | None:
-    """Return calibrated system peak kW (P75 of sunny-day samples), or None if < 3 samples.
+    """Return calibrated system peak kW, or None if not enough data yet.
 
-    P75 balances the two failure modes: P50 under-predicts on clear summer days,
-    P85 over-predicts because cloud-edge enhancement spikes inflate the top decile.
+    P75-per-day balances the two failure modes: P50 under-predicts on clear
+    summer days, P85 over-predicts because cloud-edge enhancement spikes
+    inflate the top decile. Once >=3 daily P75s exist (`solar_peak_daily`,
+    written by `_calibrate_solar`), EWMA them the same way `_get_hourly_bias`
+    EWMAs its per-hour buckets — a flat P75 over the whole 240-sample/~5-day
+    window (the old behavior, kept below as the bootstrap path) took up to
+    5 days to fully reflect a real step-change like panel cleaning or a
+    seasonal tilt-angle shift. Daily-bucketed EWMA responds within a couple
+    of days instead, same fix class as the hourly_bias EWMA change.
     """
+    daily = state.get("solar_peak_daily", [])
+    if len(daily) >= 3:
+        return _ewma(daily)
     samples = state.get("solar_cal_samples", [])
     if len(samples) < 3:
         return None
@@ -333,6 +343,21 @@ def _calibrate_solar(state: dict, solar_kw: float, outlook, now: datetime | None
     samples.append(sample)
     # ~48 midday samples/day at 5-min polls — 240 spans ~5 days instead of one.
     state["solar_cal_samples"] = samples[-240:]
+
+    # Daily-bucketed feed for the EWMA in _get_system_peak_kw: roll today's
+    # accepted samples into one P75 when a new day starts, same shape as
+    # _calibrate_solar_hourly's per-hour buckets.
+    today_str = (now or datetime.now()).strftime("%Y-%m-%d")
+    if state.get("solar_peak_today_date") != today_str:
+        prior = state.get("solar_peak_today_samples", [])
+        if len(prior) >= 5:  # enough midday polls for a meaningful day
+            prior_sorted = sorted(prior)
+            daily = state.get("solar_peak_daily", [])
+            daily.append(prior_sorted[int(len(prior_sorted) * 0.75)])
+            state["solar_peak_daily"] = daily[-14:]  # ~14 days, oldest first
+        state["solar_peak_today_date"] = today_str
+        state["solar_peak_today_samples"] = []
+    state["solar_peak_today_samples"].append(sample)
 
 
 def _calibrate_solar_hourly(state: dict, solar_kw: float, outlook, now: datetime) -> None:

@@ -21,6 +21,7 @@ from .advisor import Mode, recommend
 from .alerts import (
     _BATTERY_CAPACITY_KWH,
     _GHI_CLOUDY_THRESHOLD,
+    _SOLAR_CAL_LOG_FILE,
     _check_peak_alerts,
     _get_hourly_bias,
     _get_performance_ratio,
@@ -1995,6 +1996,76 @@ def cmd_accuracy(ctx: click.Context, out: str | None) -> None:
     click.echo()
     _info(f"Overall: {len(all_errs)} day(s), mean error {sum(all_errs)/len(all_errs):.1f}%, "
           f"{within_5}/{len(all_errs)} within 5%")
+
+
+@grp_account.command("solar-audit")
+@click.option("--days", type=int, default=14, show_default=True)
+@click.option("--out", "-o", default=None)
+@click.pass_context
+def cmd_solar_audit(ctx: click.Context, days: int, out: str | None) -> None:
+    """Per-day solar calibration inputs vs actual — diagnose outlier days.
+
+    Complements `accuracy` (weekly error trend) with the exact inputs behind
+    each day's prediction — system_peak_kw, perf_ratio, cloudy_day, avg_ghi —
+    read from output/solar_calibration_log.jsonl. Days with >15% error are
+    flagged and grouped by cloudy_day so a recurring clear-day vs cloudy-day
+    skew is visible at a glance, instead of another one-off grep/jq session.
+    """
+    cfg      = ctx.obj["config"]
+    outdir   = Path(out or cfg.output_dir)
+    log_path = outdir / _SOLAR_CAL_LOG_FILE
+    db_path  = outdir / "history.db"
+
+    if not log_path.exists():
+        raise click.ClickException(
+            f"No calibration log yet at {log_path} — it's written once/day "
+            "by the morning preview alert. Check back after it's run a few days."
+        )
+
+    cutoff = datetime.now() - timedelta(days=days)
+    entries = []
+    for line in log_path.read_text().splitlines():
+        try:
+            e = json.loads(line)
+            if datetime.fromisoformat(e["timestamp"]) >= cutoff:
+                entries.append(e)
+        except (json.JSONDecodeError, KeyError, ValueError):
+            continue
+    entries.sort(key=lambda e: e["date"], reverse=True)
+
+    if not entries:
+        raise click.ClickException(f"No calibration log entries in the last {days} day(s).")
+
+    _header(f"Solar Calibration Audit — last {days} day(s)")
+    click.echo(click.style(
+        "  Date         Predicted  Actual   Err%   Cloudy  PeakKW  PR", bold=True))
+    _hr()
+
+    outliers: list[tuple[dict, float]] = []
+    with HistoryStore(db_path) as store:
+        for e in entries:
+            actual = store.daily_solar_kwh(e["date"])
+            predicted = e["predicted_kwh"]
+            err_pct = ((predicted - actual) / actual * 100) if actual > 0 else 0.0
+            flag = " ⚠" if abs(err_pct) > 15 else ""
+            click.echo(
+                f"  {e['date']:10}   {predicted:>7.1f}   {actual:>6.1f}  "
+                f"{err_pct:>+6.1f}%  {'yes' if e['cloudy_day'] else 'no':<6}  "
+                f"{e['system_peak_kw']:>5.1f}  {e['perf_ratio']:.2f}{flag}"
+            )
+            if abs(err_pct) > 15:
+                outliers.append((e, err_pct))
+
+    if outliers:
+        _hr()
+        clear_out = [e for e, _ in outliers if not e["cloudy_day"]]
+        cloudy_out = [e for e, _ in outliers if e["cloudy_day"]]
+        click.echo(click.style(f"  {len(outliers)} day(s) over 15% error", bold=True))
+        click.echo(f"  Clear-day outliers:  {len(clear_out)}"
+                    + (f" ({', '.join(e['date'] for e in clear_out)})" if clear_out else ""))
+        click.echo(f"  Cloudy-day outliers: {len(cloudy_out)}"
+                    + (f" ({', '.join(e['date'] for e in cloudy_out)})" if cloudy_out else ""))
+    click.echo()
 
 
 # ── Shared helpers ────────────────────────────────────────────────────

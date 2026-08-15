@@ -1918,6 +1918,66 @@ def test_hourly_bias_matches_perf_ratio_weighting():
     assert _get_hourly_bias(state)[11] == _ewma(samples)
 
 
+# ── system_peak_kw EWMA (closes the P75-lag lead left after the hourly_bias fix) ──
+
+def test_system_peak_kw_none_below_3_samples():
+    assert alerts._get_system_peak_kw({}) is None
+
+
+def test_system_peak_kw_bootstrap_flat_p75_without_daily_buckets():
+    """Fewer than 3 finalized days: fall back to the old flat-P75-over-raw-
+    samples behavior so existing state files (pre-fix) still work day one."""
+    state = {"solar_cal_samples": [3.0, 3.2, 3.4, 3.6, 3.8]}
+    peak = alerts._get_system_peak_kw(state)
+    s = sorted(state["solar_cal_samples"])
+    assert peak == s[int(len(s) * 0.75)]
+
+
+def test_system_peak_kw_ewma_tracks_recent_daily_regime():
+    """A step-change in daily peaks (panel cleaning, seasonal tilt shift)
+    should pull the estimate toward the recent days faster than a flat
+    median of the whole history would — same fix class as hourly_bias."""
+    state = {"solar_peak_daily": [4.0, 4.0, 4.0] + [5.6, 5.7, 5.8]}
+    peak = alerts._get_system_peak_kw(state)
+    flat_mean = sum(state["solar_peak_daily"]) / len(state["solar_peak_daily"])
+    assert peak > flat_mean  # recency weighting pulls above an unweighted average
+
+
+def test_calibrate_solar_finalizes_prior_day_into_daily_bucket():
+    """_calibrate_solar should roll each day's accepted samples into one P75
+    entry in solar_peak_daily once a new day's polls start, feeding
+    _get_system_peak_kw's EWMA."""
+    import types
+
+    outlook = types.SimpleNamespace(avg_ghi=lambda h: 700.0)
+    state = {}
+    for _ in range(6):  # day 1 — >=5 samples so it's a "meaningful day"
+        alerts._calibrate_solar(state, solar_kw=2.5, outlook=outlook,
+                                now=datetime(2026, 7, 15, 12))
+    assert "solar_peak_daily" not in state  # still mid-day-1, nothing finalized yet
+
+    alerts._calibrate_solar(state, solar_kw=2.5, outlook=outlook,
+                            now=datetime(2026, 7, 16, 12))  # day 2 arrives
+    assert state["solar_peak_daily"] == [pytest.approx(3.57)]
+    assert state["solar_peak_today_date"] == "2026-07-16"
+    assert state["solar_peak_today_samples"] == [pytest.approx(3.57)]
+
+
+def test_calibrate_solar_skips_thin_day_from_daily_bucket():
+    """A day with <5 accepted samples (e.g. advisor was down most of the
+    day) shouldn't pollute the daily-peak EWMA with a noisy partial read."""
+    import types
+
+    outlook = types.SimpleNamespace(avg_ghi=lambda h: 700.0)
+    state = {}
+    for _ in range(2):  # only 2 samples on day 1 — below the 5-sample floor
+        alerts._calibrate_solar(state, solar_kw=2.5, outlook=outlook,
+                                now=datetime(2026, 7, 15, 12))
+    alerts._calibrate_solar(state, solar_kw=2.5, outlook=outlook,
+                            now=datetime(2026, 7, 16, 12))  # day 2 arrives
+    assert state.get("solar_peak_daily", []) == []
+
+
 def test_battery_full_alert_widened_window_catches_late_charge():
     """2026-08-08 case: battery didn't hit 100% until 4 pm — the old
     10 am-2 pm window (tied to super-off-peak ending) would have missed it."""
@@ -2339,6 +2399,63 @@ def test_ev_status_days_filters_and_summarizes(tmp_path):
     assert "waiting" not in windowed_out
     assert "on-peak" in windowed_out
     assert "track surplus" in windowed_out
+
+
+def test_solar_audit_flags_outliers_and_groups_by_cloudy(tmp_path):
+    import json as _json
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+    from franklinwh_scraper.history import HistoryStore
+
+    day1 = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")  # clear, big miss
+    day2 = datetime.now().strftime("%Y-%m-%d")                        # cloudy, on target
+
+    db = HistoryStore(tmp_path / "history.db")
+    for date_str in (day1, day2):
+        base = datetime.strptime(date_str, "%Y-%m-%d")
+        for h in range(11):  # 11 points, 1h apart, constant 2.0 kW -> 20 kWh actual
+            ts = (base + timedelta(hours=h)).isoformat()
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (ts, 0, h, 1.0, 2.0, 50.0, 0.0, "normal", 0.0, 0.0),
+            )
+    db._conn.commit()
+    db.close()
+
+    log_path = tmp_path / "solar_calibration_log.jsonl"
+    entries = [
+        {"date": day1, "timestamp": f"{day1}T07:30:00", "system_peak_kw": 4.0,
+         "perf_ratio": 1.1, "cloudy_day": False, "avg_ghi": 550.0,
+         "predicted_kwh": 25.0, "cal_samples_n": 200, "hourly_bias": {}},  # +25% -> outlier
+        {"date": day2, "timestamp": f"{day2}T07:30:00", "system_peak_kw": 4.0,
+         "perf_ratio": 1.0, "cloudy_day": True, "avg_ghi": 200.0,
+         "predicted_kwh": 20.5, "cal_samples_n": 200, "hourly_bias": {}},  # +2.5% -> fine
+    ]
+    log_path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
+
+    cfg = Config(output_dir=str(tmp_path))
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = CliRunner().invoke(cli, ["account", "solar-audit", "--out", str(tmp_path)])
+
+    assert res.exit_code == 0, res.output
+    assert "⚠" in res.output
+    assert "Clear-day outliers:  1" in res.output
+    assert "Cloudy-day outliers: 0" in res.output
+
+
+def test_solar_audit_errors_without_log_file(tmp_path):
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+
+    res = CliRunner().invoke(cli, ["account", "solar-audit", "--out", str(tmp_path)])
+    assert res.exit_code != 0
+    assert "No calibration log yet" in res.output
 
 
 def test_setup_quick_skips_chatbot_ev_uptime_when_already_configured():
