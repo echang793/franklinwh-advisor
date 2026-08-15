@@ -374,7 +374,7 @@ mkPanel('ev', `
   <div id="ev-body" style="display:none;">
     <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:18px;">
       <div class="tile"><div id="ev-noev" style="font-size:24px;font-weight:700;color:#b9d8be;">— <span style="font-size:14px;color:#7d937f;">%</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">without EV @ <span id="ev-hour">—</span></div></div>
-      <div class="tile"><div id="ev-withev" style="font-size:24px;font-weight:700;color:#57e389;">— <span style="font-size:14px;color:#7d937f;">%</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">with EV (<span id="ev-kw">—</span> kW)</div></div>
+      <div class="tile"><div id="ev-withev" style="font-size:24px;font-weight:700;color:#57e389;">— <span style="font-size:14px;color:#7d937f;">%</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">with EV (to <span id="ev-kw">—</span>% floor)</div></div>
     </div>
     <div id="ev-ctl" style="display:none;border-top:1px solid #18261b;margin-top:16px;padding-top:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
@@ -864,7 +864,7 @@ function renderEv(){
   }
   if (p && p.with_ev_pct != null) {
     $('ev-withev').innerHTML = `${p.with_ev_pct.toFixed(0)} <span style="font-size:14px;color:#7d937f;">%</span>`;
-    $('ev-kw').textContent = (p.ev_charging_kw != null ? p.ev_charging_kw.toFixed(1) : '—');
+    $('ev-kw').textContent = (p.ev_charge_floor_soc != null ? p.ev_charge_floor_soc.toFixed(0) : '—');
   } else {
     $('ev-withev').innerHTML = '— <span style="font-size:14px;color:#7d937f;">%</span>';
     $('ev-kw').textContent = '—';

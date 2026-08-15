@@ -918,34 +918,29 @@ def _alert_eod_digest(
     overnight = _predict_overnight_soc(digest_forecast, now, soc, bat_cap)
     if overnight is not None:
         # "Without EV" is the live-anchored baseline above, which on a
-        # typical night doesn't include EV charging. "With EV" adds
-        # cfg.ev_charging_kw (typical overnight draw) on top of it, so both
-        # numbers are available up front to decide whether to charge — no
-        # separate toggle needed.
+        # typical night doesn't include EV charging. "With EV" models
+        # charging down to a target floor (see below), so both numbers are
+        # available up front to decide whether to charge — no separate
+        # toggle needed.
         pred_soc_6am, hour_label = overnight
         has_ev = getattr(cfg, "ev_charging", False)
         label  = "Without EV charging" if has_ev else "Predicted SoC"
         soc_6am_str = f"\n🌅 {label} @ {hour_label}: ~{pred_soc_6am:.0f}%"
 
-        if has_ev and store is not None:
-            with_ev_load = c.home_load_kw + cfg.ev_charging_kw
-            with_ev_overnight = None
-            try:
-                with_ev_forecast = predict(
-                    store, 24, outlook=outlook,
-                    system_peak_kw=_get_system_peak_kw(state),
-                    perf_ratio=_get_performance_ratio(state, cloudy=cloudy_now),
-                    avg_temp_c=outlook.avg_temp_c(24) if outlook else 22.0,
-                    hourly_bias=_get_hourly_bias(state),
-                    current_load_kw=with_ev_load,
-                )
-                with_ev_overnight = _predict_overnight_soc(with_ev_forecast, now, soc, bat_cap)
-            except Exception:
-                logger.exception("EOD digest: with-EV forecast failed")
-            if with_ev_overnight is not None:
-                with_ev_pct, _ = with_ev_overnight
-                soc_6am_str += (
-                    f"\n🔌 With EV charging (~{cfg.ev_charging_kw:.1f} kW): ~{with_ev_pct:.0f}%"
+        if has_ev:
+            # Charge-to-floor, not fixed-kW-all-night: most people watching
+            # the FranklinWH/Tesla app throttle EV charging to avoid tapping
+            # the grid overnight, landing at roughly a target floor SoC
+            # rather than wherever a constant ev_charging_kw draw for the
+            # whole night would predict (that old model could read near 0%
+            # even on nights the user never touched the grid). Only spends
+            # the headroom above the floor — if home load alone already
+            # drains the no-EV baseline below it, EV charging isn't the
+            # variable, so "with EV" just matches the no-EV baseline.
+            floor = getattr(cfg, "ev_charge_floor_soc", 10.0)
+            with_ev_pct = floor if pred_soc_6am > floor else pred_soc_6am
+            soc_6am_str += (
+                f"\n🔌 With EV charging (to ~{floor:.0f}% floor): ~{with_ev_pct:.0f}%"
                 )
 
     precharge_str  = ""

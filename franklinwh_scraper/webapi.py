@@ -398,16 +398,18 @@ def api_ev():
                     without_fc = predict(history, 24, outlook=outlook,
                                          system_peak_kw=sp, perf_ratio=pr,
                                          hourly_bias=hb, current_load_kw=r["home_load_kw"])
-                    with_fc = predict(history, 24, outlook=outlook,
-                                      system_peak_kw=sp, perf_ratio=pr, hourly_bias=hb,
-                                      current_load_kw=r["home_load_kw"] + _cfg.ev_charging_kw)
                     without_ov = _predict_overnight_soc(without_fc, now, soc, _BAT_CAP)
-                    with_ov = _predict_overnight_soc(with_fc, now, soc, _BAT_CAP)
+                    # Charge-to-floor, not fixed-kW-all-night — same model
+                    # and rationale as alerts.py's _alert_eod_digest.
+                    floor = getattr(_cfg, "ev_charge_floor_soc", 10.0)
+                    with_ev_pct = None
+                    if without_ov is not None:
+                        with_ev_pct = floor if without_ov[0] > floor else without_ov[0]
                     out["prediction"] = {
                         "without_ev_pct": without_ov[0] if without_ov else None,
-                        "with_ev_pct": with_ov[0] if with_ov else None,
+                        "with_ev_pct": with_ev_pct,
                         "hour_label": without_ov[1] if without_ov else None,
-                        "ev_charging_kw": _cfg.ev_charging_kw,
+                        "ev_charge_floor_soc": floor,
                     }
         except Exception:
             out["prediction"] = None

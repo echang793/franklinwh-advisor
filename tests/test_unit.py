@@ -2207,10 +2207,12 @@ def test_predict_live_anchor_never_goes_negative(tmp_path):
     assert forecast.hours[0].predicted_load_kw >= 0.0
 
 
-def test_eod_digest_shows_without_then_with_ev_in_order(monkeypatch):
+def test_eod_digest_shows_without_then_with_ev_charge_to_floor(monkeypatch):
     """No toggle needed: with an EV configured, the digest always shows the
-    no-EV baseline first, then a 'with EV' estimate using the configured
-    typical draw — so both are visible before deciding whether to charge."""
+    no-EV baseline first, then a 'with EV' charge-to-floor estimate — so
+    both are visible before deciding whether to charge. The 'with EV'
+    number models self-limited overnight charging (down to a target floor
+    SoC), not a constant ev_charging_kw draw for the whole night."""
     from franklinwh_scraper.predictor import HourPrediction, UsageForecast
 
     now = datetime.now().replace(hour=21, minute=30, second=0, microsecond=0)
@@ -2234,30 +2236,64 @@ def test_eod_digest_shows_without_then_with_ev_in_order(monkeypatch):
     calls = []
 
     def fake_predict(store_, horizon, **kw):
-        load = kw.get("current_load_kw")
-        calls.append(load)
-        # Steeper draw once the EV's typical kW is added on top of the
-        # digest's own live-anchored call — distinguishes the two calls
-        # by their result, not just their args.
-        return _forecast(-1.0 if load is not None and load < 5.0 else -3.0)
+        calls.append(kw.get("current_load_kw"))
+        return _forecast(-0.5)  # mild draw — baseline stays comfortably above the floor
 
     monkeypatch.setattr(alerts, "predict", fake_predict)
 
     usage_forecast = _forecast(-9.0)  # what recommend() sees — must NOT
                                        # leak into the digest's own numbers
-    cfg = Config(ev_charging=True, ev_charging_kw=7.6)
+    cfg = Config(ev_charging=True, ev_charge_floor_soc=10.0)
     stats = _digest_stats(soc=55.0, home_load_kw=1.5)
 
     msg = alerts._alert_eod_digest({}, today, now, stats, cfg, None, usage_forecast, store)
     assert msg is not None
     assert "Without EV charging" in msg
-    assert "With EV charging" in msg
+    assert "With EV charging (to ~10% floor)" in msg
     # Order matters — without first, then with.
     assert msg.index("Without EV charging") < msg.index("With EV charging")
-    # Two live predict() calls: the digest's own nowcast-anchored baseline
-    # (current load alone), then with the typical EV draw added on top —
-    # neither is the -9.0 forecast passed in as the shared usage_forecast.
-    assert calls == [1.5, 1.5 + 7.6]
+    # Only ONE live predict() call now — charge-to-floor derives "with EV"
+    # from the baseline instead of a second forecast with EV kW added on.
+    assert calls == [1.5]
+
+
+def test_eod_digest_with_ev_matches_baseline_when_already_below_floor(monkeypatch):
+    """If home load alone already drains the no-EV baseline below the
+    floor, EV charging isn't the variable driving the drain — 'with EV'
+    must not claim a rosier number than the baseline actually predicts."""
+    import re
+
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime.now().replace(hour=21, minute=30, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    readings = [(f"{today}T{h:02d}:00:00", 0.5, 1.0, 0.0) for h in range(0, 20, 2)]
+    store = _AttrStore(attr=(8.2, 5.1, 0.9), readings=readings)
+
+    def _forecast(net_kw):
+        hours = []
+        for h in range(9):
+            dt = now + timedelta(hours=h)
+            hours.append(HourPrediction(
+                dt=dt, predicted_load_kw=1.0,
+                predicted_solar_kw=0.0 if h < 8 else 1.0,
+                net_kw=net_kw, confidence="high",
+            ))
+        return UsageForecast(hours=hours, total_load_kwh=9.0, total_solar_kwh=1.0,
+                             net_kwh=net_kw * 9, peak_load_kw=1.0,
+                             confidence="high", data_days=30)
+
+    monkeypatch.setattr(alerts, "predict", lambda *a, **kw: _forecast(-1.5))  # steep draw
+
+    usage_forecast = _forecast(-9.0)
+    cfg = Config(ev_charging=True, ev_charge_floor_soc=10.0)
+    stats = _digest_stats(soc=55.0, home_load_kw=1.5)
+
+    msg = alerts._alert_eod_digest({}, today, now, stats, cfg, None, usage_forecast, store)
+    without_pct = float(re.search(r"Without EV charging.*?: ~(\d+)%", msg).group(1))
+    with_pct    = float(re.search(r"With EV charging.*?\): ~(\d+)%", msg).group(1))
+    assert without_pct < 10  # steep draw already puts baseline below the floor
+    assert with_pct == without_pct
 
 
 def test_eod_digest_omits_with_ev_line_when_no_ev_configured():

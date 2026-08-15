@@ -60,11 +60,21 @@ class Config:
     # EV charging — enables the off-peak EV charge-window advisor.
     ev_charging: bool = False
     ev_kwh_per_session: float = 0.0   # 0 = unknown; if set, shows $ savings estimate
-    # Typical charging draw (kW) — the evening digest uses this to show a
-    # "with EV charging" SoC estimate alongside its normal (no-EV)
-    # prediction, so you can see both before deciding whether to plug in.
+    # Typical charging draw (kW) — informational only in the digest label;
+    # not used to compute the "with EV" SoC estimate itself (see
+    # ev_charge_floor_soc below) since most people throttle amps to a
+    # target floor rather than charge at a fixed rate all night.
     # 7.6 kW ~= a 240V/32A Level 2 session; adjust to your amperage.
     ev_charging_kw: float = 7.6
+    # The evening digest's "with EV charging" SoC estimate models
+    # charge-to-floor, not fixed-kW-all-night: if you self-limit charging
+    # (watching the FranklinWH/Tesla app) to avoid tapping the grid
+    # overnight, you land at roughly this SoC, not wherever a constant
+    # ev_charging_kw draw for the whole night would predict. Only applies
+    # when the no-EV baseline prediction is above this floor already — if
+    # home load alone would already drain below it, EV charging isn't the
+    # variable, so "with EV" just matches the no-EV baseline.
+    ev_charge_floor_soc: float = 10.0
 
     # Closed-loop EV charging control (Tesla Fleet API). See docs/TESLA_SETUP.md.
     # Tokens live in ~/.franklinwh_tesla.json (they rotate; keeping them out of
