@@ -153,10 +153,32 @@ _ALWAYS_ON_ALERTS = frozenset({"grid_down", "grid_restored", "area_power_outage"
 _URGENT_ALERTS = frozenset({"grid_down", "area_power_outage", "fast_drain"})
 
 
-def _alert_enabled(cfg: Config, name: str) -> bool:
+def _alerts_muted(state: dict, now: datetime) -> bool:
+    """Whether the Telegram /mute snooze window is still active.
+
+    Same shape as the ev-charging-flag/override-standdown patterns
+    elsewhere in this file: a standing `until` timestamp, auto-cleared
+    (caller persists the clear) once it's passed, so a forgotten mute can't
+    silently linger.
+    """
+    until = state.get("alerts_muted_until")
+    if not until:
+        return False
+    try:
+        if now < datetime.fromisoformat(until):
+            return True
+    except ValueError:
+        pass
+    state.pop("alerts_muted_until", None)
+    return False
+
+
+def _alert_enabled(cfg: Config, name: str, state: dict, now: datetime) -> bool:
     if name in _ALWAYS_ON_ALERTS:
-        return True
-    return name not in (cfg.disabled_alerts or [])
+        return True  # grid outage, fast drain, area outage — /mute never touches these
+    if name in (cfg.disabled_alerts or []):
+        return False
+    return not _alerts_muted(state, now)
 
 
 
@@ -2232,7 +2254,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
         # which is worse; it's an always-on safety alert either way.
         to_send: list[tuple[str, bool]] = []
         for _name, _fn in _candidates:
-            if _alert_enabled(cfg, _name):
+            if _alert_enabled(cfg, _name, state, now):
                 _body = _fn()
                 if _body:
                     to_send.append((_body, _name in _URGENT_ALERTS))

@@ -183,14 +183,40 @@ def test_peak_export_hour():
 
 
 def test_alert_enabled():
+    now = datetime(2026, 8, 13, 12, 0)
+    state = {}
     cfg = Config()
-    assert alerts._alert_enabled(cfg, "morning_preview")
+    assert alerts._alert_enabled(cfg, "morning_preview", state, now)
     cfg.disabled_alerts = ["morning_preview"]
-    assert not alerts._alert_enabled(cfg, "morning_preview")
+    assert not alerts._alert_enabled(cfg, "morning_preview", state, now)
     # always-on can't be disabled
     cfg.disabled_alerts = ["grid_down", "fast_drain"]
-    assert alerts._alert_enabled(cfg, "grid_down")
-    assert alerts._alert_enabled(cfg, "fast_drain")
+    assert alerts._alert_enabled(cfg, "grid_down", state, now)
+    assert alerts._alert_enabled(cfg, "fast_drain", state, now)
+
+
+def test_alert_enabled_respects_mute():
+    now = datetime(2026, 8, 13, 12, 0)
+    cfg = Config()
+    muted = {"alerts_muted_until": (now + timedelta(hours=1)).isoformat()}
+    assert not alerts._alert_enabled(cfg, "morning_preview", muted, now)
+    # always-on alerts are never muted
+    assert alerts._alert_enabled(cfg, "grid_down", muted, now)
+    assert alerts._alert_enabled(cfg, "fast_drain", muted, now)
+    assert alerts._alert_enabled(cfg, "area_power_outage", muted, now)
+
+
+def test_alerts_muted_helper_expiry():
+    now = datetime(2026, 8, 13, 12, 0)
+    assert alerts._alerts_muted({}, now) is False
+
+    fresh = {"alerts_muted_until": (now + timedelta(hours=2)).isoformat()}
+    assert alerts._alerts_muted(fresh, now) is True
+
+    expired = {"alerts_muted_until": (now - timedelta(minutes=1)).isoformat()}
+    assert alerts._alerts_muted(expired, now) is False
+    # auto-cleared once expired
+    assert "alerts_muted_until" not in expired
 
 
 def test_safe_float():
@@ -2539,3 +2565,66 @@ def test_log_solar_calibration_inputs_survives_bad_output_dir():
         system_peak_kw=4.0, perf_ratio=1.0, hourly_bias={},
         avg_ghi=600.0, cloudy_day=False, predicted_kwh=25.0, cal_samples_n=240,
     )  # no assertion needed — just must not raise
+
+
+def test_set_mute_writes_and_clears_state(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    bot = TelegramChatBot(Config(output_dir=str(tmp_path)), api_key="x")
+
+    msg = bot._set_mute(2.0)
+    assert "muted until" in msg
+    assert "2h" in msg
+    assert "never muted" in msg
+    state = _load_peak_state(tmp_path)
+    assert "alerts_muted_until" in state
+
+    msg2 = bot._set_mute(0)
+    assert msg2 == "🔔 Alerts unmuted."
+    state2 = _load_peak_state(tmp_path)
+    assert "alerts_muted_until" not in state2
+
+
+def test_mute_status_line_reflects_state(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state, _save_peak_state, _state_lock
+
+    bot = TelegramChatBot(Config(output_dir=str(tmp_path)), api_key="x")
+    assert bot._mute_status_line() == ""
+
+    bot._set_mute(8.0)
+    assert "muted until" in bot._mute_status_line()
+
+    with _state_lock(tmp_path):
+        state = _load_peak_state(tmp_path)
+        state["alerts_muted_until"] = (datetime.now() - timedelta(minutes=1)).isoformat()
+        _save_peak_state(tmp_path, state)
+    assert bot._mute_status_line() == ""
+
+
+def test_handle_callback_query_mute_button(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    cfg = Config(output_dir=str(tmp_path), telegram_chat_id="")  # no owner set -> any chat authorized
+    bot = TelegramChatBot(cfg, api_key="x")
+    sent, answered = [], []
+    bot._send = lambda chat_id, text, reply_markup=None: sent.append((chat_id, text))
+    bot._answer_callback_query = lambda cq_id, text="": answered.append((cq_id, text))
+
+    bot._handle_callback_query({"id": "cbq1", "message": {"chat": {"id": 123}}, "data": "mute:2"})
+
+    assert answered == [("cbq1", "Muted")]
+    assert sent and sent[0][0] == "123" and "muted until" in sent[0][1]
+    assert "alerts_muted_until" in _load_peak_state(tmp_path)
+
+
+def test_handle_callback_query_ignores_unauthorized_chat():
+    cfg = Config(telegram_chat_id="owner123")
+    bot = TelegramChatBot(cfg, api_key="x")
+    sent, answered = [], []
+    bot._send = lambda chat_id, text, reply_markup=None: sent.append((chat_id, text))
+    bot._answer_callback_query = lambda cq_id, text="": answered.append((cq_id, text))
+
+    bot._handle_callback_query({"id": "cbq2", "message": {"chat": {"id": "stranger"}}, "data": "mute:2"})
+
+    assert not sent  # never replies to an unauthorized chat
+    assert answered == [("cbq2", "")]  # spinner still dismissed

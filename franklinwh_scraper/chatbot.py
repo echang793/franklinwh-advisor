@@ -292,6 +292,10 @@ class TelegramChatBot:
                     data = json.loads(resp.read())
                 for upd in data.get("result", []):
                     self._offset = upd["update_id"] + 1
+                    cq = upd.get("callback_query")
+                    if cq:
+                        self._handle_callback_query(cq)
+                        continue
                     msg  = upd.get("message") or upd.get("edited_message")
                     if not msg:
                         continue
@@ -318,6 +322,8 @@ class TelegramChatBot:
                             "/until N  — time to reach N% SoC at current rate\n"
                             "/sundown  — projected SoC when today's solar is done\n"
                             "/sundown H — projected SoC in H hours (1-24)\n"
+                            "/mute     — snooze non-safety alerts (2h or 8h)\n"
+                            "/unmute   — cancel an active mute\n"
                             "/clear    — reset conversation history"
                         )
                         continue
@@ -384,6 +390,26 @@ class TelegramChatBot:
                             args=(chat_id,),
                             daemon=True,
                         ).start()
+                        continue
+                    # /mute — buttons for the two durations, matching the
+                    # CMR News bot's mute UX. /mute N (hours) skips the
+                    # round-trip for anyone who already knows the duration.
+                    if text.lower() == "/mute":
+                        kb = {"inline_keyboard": [[
+                            {"text": "2 hours", "callback_data": "mute:2"},
+                            {"text": "8 hours", "callback_data": "mute:8"},
+                        ]]}
+                        self._send(chat_id,
+                            "Mute alerts for how long?\n"
+                            "Safety alerts (grid outage, fast drain, area "
+                            "outage) are never muted.", reply_markup=kb)
+                        continue
+                    _mm = re.search(r'/mute\s+(\d+(?:\.\d+)?)', text.lower())
+                    if _mm:
+                        self._send(chat_id, self._set_mute(float(_mm.group(1))))
+                        continue
+                    if text.lower() == "/unmute":
+                        self._send(chat_id, self._set_mute(0))
                         continue
                     # /until <N[%]> or natural language "until/time to/reach N%"
                     _um = re.search(
@@ -457,9 +483,12 @@ class TelegramChatBot:
             if stats is None:
                 self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
                 return
-            self._send(chat_id, build_context(stats, store, outlook, self._cfg,
-                                              rec=rec, forecast=forecast,
-                                              outdir=self._outdir))
+            text = build_context(stats, store, outlook, self._cfg,
+                                 rec=rec, forecast=forecast, outdir=self._outdir)
+            mute_note = self._mute_status_line()
+            if mute_note:
+                text += f"\n\n{mute_note}"
+            self._send(chat_id, text)
         except Exception as e:
             logger.warning("_send_status error: %s", e)
             self._send(chat_id, f"Error fetching status: {e}")
@@ -932,11 +961,93 @@ class TelegramChatBot:
             logger.warning("_send_sundown error: %s", e)
             self._send(chat_id, f"Error: {e}")
 
-    def _send(self, chat_id: str, text: str) -> None:
-        url  = f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}/sendMessage"
-        data = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode()
+    def _handle_callback_query(self, cq: dict) -> None:
+        """Inline-keyboard button tap — currently only the /mute buttons."""
+        cq_id   = cq.get("id", "")
+        chat_id = str(cq.get("message", {}).get("chat", {}).get("id", ""))
+        if not chat_id or not self._is_authorized(chat_id):
+            self._answer_callback_query(cq_id)
+            return
+        data = cq.get("data", "")
+        if data.startswith("mute:"):
+            try:
+                hours = float(data.split(":", 1)[1])
+            except ValueError:
+                hours = 0.0
+            reply = self._set_mute(hours)
+            self._answer_callback_query(cq_id, "Muted" if hours > 0 else "Unmuted")
+            self._send(chat_id, reply)
+            return
+        self._answer_callback_query(cq_id)
+
+    def _set_mute(self, hours: float) -> str:
+        """Mute (hours > 0) or clear (hours <= 0) the alert snooze.
+
+        Writes alerts_muted_until to the same .peak_alert_state.json the
+        watch loop's dispatcher reads (alerts._alert_enabled), under the
+        same lock — mirrors the /sundown prediction-persist pattern above.
+        Safety alerts are structurally exempt regardless of this flag; see
+        alerts._ALWAYS_ON_ALERTS.
+        """
+        from pathlib import Path
+
+        from .alerts import _load_peak_state, _save_peak_state, _state_lock
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        now = datetime.now()
+        until = now + timedelta(hours=hours) if hours > 0 else None
+        with _state_lock(out):
+            state = _load_peak_state(out)
+            if until:
+                state["alerts_muted_until"] = until.isoformat()
+            else:
+                state.pop("alerts_muted_until", None)
+            _save_peak_state(out, state)
+        if until:
+            return (f"🔕 Alerts muted until {until.strftime('%-I:%M %p')} "
+                    f"({hours:g}h). Safety alerts (grid outage, fast drain, "
+                    f"area outage) are never muted.")
+        return "🔔 Alerts unmuted."
+
+    def _mute_status_line(self) -> str:
+        """One-line mute status for /status, or '' if not muted. Read-only
+        peek at state — no lock needed for an informational display."""
+        from pathlib import Path
+
+        from .alerts import _load_peak_state
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        until_raw = _load_peak_state(out).get("alerts_muted_until")
+        if not until_raw:
+            return ""
+        try:
+            until = datetime.fromisoformat(until_raw)
+        except ValueError:
+            return ""
+        if datetime.now() >= until:
+            return ""
+        return f"🔕 Alerts muted until {until.strftime('%-I:%M %p')}."
+
+    def _send(self, chat_id: str, text: str, reply_markup: dict | None = None) -> None:
+        url = f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        data = json.dumps(payload).encode()
         req  = Request(url, data=data, headers={"Content-Type": "application/json"})
         try:
             urlopen(req, timeout=10)
         except Exception as e:
             logger.warning("Chatbot send error: %s", e)
+
+    def _answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
+        """Dismiss an inline-keyboard button's loading spinner. Telegram
+        expects this within a few seconds of any callback_query, tap or not."""
+        url = f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}/answerCallbackQuery"
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        data = json.dumps(payload).encode()
+        req  = Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            urlopen(req, timeout=10)
+        except Exception as e:
+            logger.warning("Chatbot answerCallbackQuery error: %s", e)

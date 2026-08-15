@@ -247,6 +247,8 @@ Enable it by running `python3 scrape.py setup` again and picking a chatbot backe
 | `/tip` | Best action right now based on current SoC, rate, and solar |
 | `/modes` | Explanation of Self-Consumption, Emergency Backup, and Time-of-Use modes |
 | `/until N` | Estimated time to reach N% SoC at the current charge or discharge rate — e.g. `/until 20`, `/until 80` |
+| `/mute` | Snooze non-safety alerts — tap 2h or 8h, or type `/mute 2` / `/mute 8` directly. Grid outage, fast drain, and area-outage alerts are never muted |
+| `/unmute` | Cancel an active mute |
 | `/clear` | Reset conversation history |
 
 The `/until N` command also understands natural language: `"time to 80%"`, `"until 50%"`, `"reach 30%"`.
