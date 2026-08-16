@@ -945,6 +945,120 @@ def test_eod_digest_labels_sundown_fallback_when_no_reading_near_predicted_time(
     assert "not directly comparable" in msg
 
 
+def test_eod_digest_records_sundown_bias_sample_from_raw_prediction():
+    """The learning sample must be actual - raw_pct (the model's real miss),
+    not actual - pct (which may already include a prior correction) — same
+    convention _calibrate_solar_hourly uses. Falls back to pct for state
+    written before raw_pct existed."""
+    import types
+
+    from franklinwh_scraper import alerts
+
+    today = "2026-07-20"
+    now = datetime(2026, 7, 20, 21, 0, 0)
+    sundown_dt = datetime(2026, 7, 20, 17, 30, 0)
+
+    state = {f"sundown_pred_{today}": {
+        "pct": 82.0, "raw_pct": 85.0,  # correction was already applied when this was shown
+        "dt": sundown_dt.isoformat(), "requested_at": "2026-07-20T12:00:00",
+    }}
+
+    stats = types.SimpleNamespace(
+        current=types.SimpleNamespace(battery_soc_pct=60.0),
+        totals=types.SimpleNamespace(
+            solar_kwh=0.0, battery_charge_kwh=0.0, battery_discharge_kwh=0.0,
+            grid_load_kwh=0.0, grid_export_kwh=0.0, home_use_kwh=0.0,
+        ),
+    )
+
+    class _FakeStore:
+        def daily_solar_kwh_api(self, d): return 0.0
+        def daily_solar_kwh(self, d): return 0.0
+        def daily_battery_kwh(self, d): return (0.0, 0.0)
+        def weekly_readings(self, s, e): return []
+        def soc_near(self, ts): return 79.0
+
+    cfg = Config(battery_capacity_kwh=13.6)
+    alerts._alert_eod_digest(state, today, now, stats, cfg, None, None, store=_FakeStore())
+
+    # actual (79) - raw_pct (85) = -6, not actual (79) - pct (82) = -3.
+    assert state["sundown_bias_samples"] == [-6.0]
+
+
+def test_eod_digest_sundown_bias_sample_falls_back_to_pct_without_raw_pct():
+    """Old-format state (pre-raw_pct field) shouldn't crash or drop the
+    sample — falls back to comparing against pct itself."""
+    import types
+
+    from franklinwh_scraper import alerts
+
+    today = "2026-07-20"
+    now = datetime(2026, 7, 20, 21, 0, 0)
+    sundown_dt = datetime(2026, 7, 20, 17, 30, 0)
+
+    state = {f"sundown_pred_{today}": {
+        "pct": 85.0, "dt": sundown_dt.isoformat(), "requested_at": "2026-07-20T12:00:00",
+    }}
+
+    stats = types.SimpleNamespace(
+        current=types.SimpleNamespace(battery_soc_pct=60.0),
+        totals=types.SimpleNamespace(
+            solar_kwh=0.0, battery_charge_kwh=0.0, battery_discharge_kwh=0.0,
+            grid_load_kwh=0.0, grid_export_kwh=0.0, home_use_kwh=0.0,
+        ),
+    )
+
+    class _FakeStore:
+        def daily_solar_kwh_api(self, d): return 0.0
+        def daily_solar_kwh(self, d): return 0.0
+        def daily_battery_kwh(self, d): return (0.0, 0.0)
+        def weekly_readings(self, s, e): return []
+        def soc_near(self, ts): return 79.0
+
+    cfg = Config(battery_capacity_kwh=13.6)
+    alerts._alert_eod_digest(state, today, now, stats, cfg, None, None, store=_FakeStore())
+
+    assert state["sundown_bias_samples"] == [-6.0]  # 79 - 85
+
+
+def test_eod_digest_no_sundown_bias_sample_on_not_directly_comparable():
+    """The fallback (no reading near sundown, using digest-time SoC
+    instead) must not feed the learning loop — it's explicitly labeled not
+    comparable, and treating it as a real miss would poison the EWMA."""
+    import types
+
+    from franklinwh_scraper import alerts
+
+    today = "2026-07-20"
+    now = datetime(2026, 7, 20, 21, 0, 0)
+    sundown_dt = datetime(2026, 7, 20, 17, 30, 0)
+
+    state = {f"sundown_pred_{today}": {
+        "pct": 85.0, "raw_pct": 85.0,
+        "dt": sundown_dt.isoformat(), "requested_at": "2026-07-20T12:00:00",
+    }}
+
+    stats = types.SimpleNamespace(
+        current=types.SimpleNamespace(battery_soc_pct=58.0),
+        totals=types.SimpleNamespace(
+            solar_kwh=0.0, battery_charge_kwh=0.0, battery_discharge_kwh=0.0,
+            grid_load_kwh=0.0, grid_export_kwh=0.0, home_use_kwh=0.0,
+        ),
+    )
+
+    class _FakeStore:
+        def daily_solar_kwh_api(self, d): return 0.0
+        def daily_solar_kwh(self, d): return 0.0
+        def daily_battery_kwh(self, d): return (0.0, 0.0)
+        def weekly_readings(self, s, e): return []
+        def soc_near(self, ts): return None  # no reading near sundown -> fallback branch
+
+    cfg = Config(battery_capacity_kwh=13.6)
+    alerts._alert_eod_digest(state, today, now, stats, cfg, None, None, store=_FakeStore())
+
+    assert "sundown_bias_samples" not in state
+
+
 # ── Audit fixes (2026-07-26) ────────────────────────────────────────────
 
 def test_notify_email_reports_real_failure(monkeypatch):
@@ -1124,6 +1238,120 @@ def test_send_sundown_writes_state_under_the_shared_lock(monkeypatch, tmp_path):
         chatbot_mod.datetime = real_datetime
 
     assert calls == ["enter", "exit"]
+
+
+def test_send_sundown_live_anchors_current_load_when_store_available(monkeypatch, tmp_path):
+    """/sundown should recompute a live-anchored forecast (current_load_kw
+    passed to predict()) when a HistoryStore is available — same nowcast
+    mechanism the EOD digest already uses. The shared self._usage_forecast
+    deliberately isn't live-anchored (it also drives recommend()'s
+    Emergency-Backup decision), so /sundown must build its own."""
+    import types as _types
+
+    from franklinwh_scraper import chatbot as chatbot_mod
+    from franklinwh_scraper import predictor as predictor_mod
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 15, 12, 0, 0)
+
+    def _forecast():
+        hours = [HourPrediction(dt=now + timedelta(hours=i), predicted_load_kw=1.0,
+                                predicted_solar_kw=3.0 if i < 4 else 0.0,
+                                net_kw=2.0 if i < 4 else -1.0, confidence="high")
+                 for i in range(1, 8)]
+        return UsageForecast(hours=hours, total_load_kwh=7.0, total_solar_kwh=12.0,
+                             net_kwh=5.0, peak_load_kw=1.0, confidence="high", data_days=30)
+
+    calls = []
+
+    def _fake_predict(store, horizon, **kw):
+        calls.append(kw.get("current_load_kw"))
+        return _forecast()
+
+    monkeypatch.setattr(predictor_mod, "predict", _fake_predict)
+
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6, output_dir=str(tmp_path)), api_key="x")
+    bot._stats = _types.SimpleNamespace(current=_types.SimpleNamespace(
+        battery_soc_pct=50.0, home_load_kw=2.3))
+    bot._usage_forecast = _forecast()
+    bot._hist_store = object()  # any non-None sentinel — code only checks `is not None`
+    bot._outlook = None
+    bot._send = lambda chat_id, text: None
+
+    real_datetime = chatbot_mod.datetime
+    try:
+        class _FakeDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        chatbot_mod.datetime = _FakeDatetime
+        bot._send_sundown("123")
+    finally:
+        chatbot_mod.datetime = real_datetime
+
+    assert calls == [2.3]  # live-anchored to the current home_load_kw reading
+
+
+def test_send_sundown_applies_learned_bias_correction(tmp_path):
+    """A learned sundown_bias_samples correction should shift the displayed
+    number, while raw_pct (stored for future learning) stays uncorrected —
+    otherwise the correction would compound on itself over time."""
+    import types as _types
+    from pathlib import Path
+
+    from franklinwh_scraper import chatbot as chatbot_mod
+    from franklinwh_scraper.alerts import _ewma, _load_peak_state, _save_peak_state
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    # Must be near-present, not a fixed historical date — this test reads
+    # the persisted state back afterward, and _prune_old_state (via
+    # _save_peak_state) strips sundown_pred_<date> keys older than 30 real
+    # days, which a hardcoded past date can silently drift past.
+    now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    hours = []
+    t = now
+    while t.date() == now.date() and t.hour <= 23:
+        solar = 3.0 if 12 <= t.hour < 18 else 0.0
+        hours.append(HourPrediction(dt=t, predicted_load_kw=1.0, predicted_solar_kw=solar,
+                                    net_kw=solar - 1.0, confidence="high"))
+        t += timedelta(hours=1)
+    forecast = UsageForecast(hours=hours, total_load_kwh=24.0, total_solar_kwh=18.0,
+                             net_kwh=-6.0, peak_load_kw=1.0, confidence="high", data_days=30)
+
+    samples = [-2.0, -4.0, -6.0]  # consistent over-prediction, like the real data
+    _save_peak_state(Path(tmp_path), {"sundown_bias_samples": samples})
+
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6, output_dir=str(tmp_path)), api_key="x")
+    bot._stats = _types.SimpleNamespace(current=_types.SimpleNamespace(battery_soc_pct=27.0))
+    bot._usage_forecast = forecast
+    # No _hist_store -> falls back to the shared forecast, isolating this
+    # test to the bias-correction path rather than also exercising live-anchor.
+
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+
+    real_datetime = chatbot_mod.datetime
+    try:
+        class _FakeDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        chatbot_mod.datetime = _FakeDatetime
+        bot._send_sundown("123")
+    finally:
+        chatbot_mod.datetime = real_datetime
+
+    # Raw projection clamps to 100% (same math as test_send_sundown_projects_soc_to_last_solar_hour).
+    bias = _ewma(samples)
+    expected_corrected = round(max(0.0, min(100.0, 100.0 + bias)))
+    assert "text" in sent
+    assert f"{expected_corrected}%" in sent["text"]
+    assert "100%" not in sent["text"]  # proves the correction actually shifted the raw number
+
+    state = _load_peak_state(Path(tmp_path))
+    pred = state[f"sundown_pred_{now.strftime('%Y-%m-%d')}"]
+    assert pred["raw_pct"] == 100.0        # uncorrected, for future learning
+    assert pred["pct"] != pred["raw_pct"]  # displayed/stored value is the corrected one
 
 
 def test_export_csv_preserves_column_alignment_on_schema_drift(tmp_path):
@@ -1888,6 +2116,8 @@ def test_dashboard_static_dir_resolves():
 def test_dashboard_refuses_public_bind_without_token(monkeypatch):
     """The /api/* routes expose live load and billing data and have no auth
     unless dashboard_token is set."""
+    from unittest.mock import patch
+
     from click.testing import CliRunner
     from franklinwh_scraper import cli as cli_mod
 
@@ -1895,9 +2125,16 @@ def test_dashboard_refuses_public_bind_without_token(monkeypatch):
     import uvicorn
     monkeypatch.setattr(uvicorn, "run", lambda *a, **k: called.append(a))
 
+    # cli()'s group callback always overwrites ctx.obj["config"] with a
+    # fresh load_config() call, so passing obj={"config": cfg} to invoke()
+    # alone doesn't reach the command — must patch load_config itself (this
+    # test used to pass only because the real ~/.franklinwh.json happened to
+    # have no dashboard_token set; it broke for real once one was added for
+    # the kitchen-kiosk setup, exposing that the obj= override was a no-op).
     cfg = Config(email="a@b.c", password="p", lat=32.9, lon=-117.0, dashboard_token="")
     runner = CliRunner()
-    res = runner.invoke(cli_mod.cli, ["dashboard", "--host", "0.0.0.0"], obj={"config": cfg})
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["dashboard", "--host", "0.0.0.0"])
     assert res.exit_code != 0
     assert "Refusing to bind" in res.output
     assert not called, "uvicorn.run must not be reached on a refused bind"
@@ -1947,6 +2184,24 @@ def test_hourly_bias_matches_perf_ratio_weighting():
     samples = [1.0, 1.0, 1.0, 1.0, 1.0, 1.5]
     state = {"solar_bias_h11": samples}
     assert _get_hourly_bias(state)[11] == _ewma(samples)
+
+
+def test_sundown_bias_needs_3_samples():
+    from franklinwh_scraper.alerts import _get_sundown_bias
+
+    assert _get_sundown_bias({}) == 0.0
+    assert _get_sundown_bias({"sundown_bias_samples": [-5.0, -3.0]}) == 0.0
+
+
+def test_sundown_bias_uses_ewma():
+    """Same EWMA weighting as the other calibration layers — additive
+    (percentage points), not multiplicative like perf_ratio/hourly_bias,
+    since a ratio breaks down near a 0% SoC value."""
+    from franklinwh_scraper.alerts import _ewma, _get_sundown_bias
+
+    samples = [-2.0, -4.0, -6.0]  # one-directional over-prediction, matches the real data
+    state = {"sundown_bias_samples": samples}
+    assert _get_sundown_bias(state) == _ewma(samples)
 
 
 # ── system_peak_kw EWMA (closes the P75-lag lead left after the hourly_bias fix) ──

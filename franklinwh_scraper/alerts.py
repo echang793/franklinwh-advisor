@@ -100,6 +100,28 @@ def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
         return max(_ewma(samples), 0.60)
 
 
+_SUNDOWN_BIAS_CAP = 25  # ~a month of graded /sundown calls (not every day has one)
+
+
+def _get_sundown_bias(state: dict) -> float:
+    """Return the learned additive correction (percentage points) for
+    /sundown's raw projection, or 0.0 until enough graded samples exist.
+
+    Additive, not the multiplicative-ratio EWMA `perf_ratio`/`hourly_bias`
+    use — those correct open-ended kWh values, this corrects a 0-100%
+    quantity where a ratio breaks down near 0. Samples are `actual - raw`
+    deltas recorded once per graded /sundown call (see `_alert_eod_digest`'s
+    sundown-accuracy block) — 6 real calls from 2026-07-26 to 08-15 averaged
+    -10.2pt, one-directional (4 of 5 comparable days over-predicted), which
+    is what motivated this fix. Same `_ewma`/`_PR_EWMA_ALPHA` weighting as
+    the other calibration layers.
+    """
+    samples = state.get("sundown_bias_samples", [])
+    if len(samples) < 3:
+        return 0.0
+    return _ewma(samples)
+
+
 # ── Multi-channel alert dispatcher ───────────────────────────────────
 
 _MUTE_KEYBOARD = {"inline_keyboard": [[
@@ -908,6 +930,15 @@ def _alert_eod_digest(
                 f"\n🌇 /sundown accuracy (~{pred_dt.strftime('%-I:%M %p')}): "
                 f"predicted {pred_pct:.0f}%, actual {actual_pct:.0f}% ({delta:+.0f} pt)"
             )
+            # Learn from the model's *raw* miss, not the already-corrected
+            # one shown above — same convention as _calibrate_solar_hourly
+            # (measures against the uncorrected prediction so the bias
+            # estimate doesn't compound on itself). raw_pct falls back to
+            # pct for state written before this field existed.
+            raw_pct = sundown_pred.get("raw_pct", pred_pct)
+            bias_samples = state.get("sundown_bias_samples", [])
+            bias_samples.append(actual_pct - raw_pct)
+            state["sundown_bias_samples"] = bias_samples[-_SUNDOWN_BIAS_CAP:]
 
     soc_6am_str = ""
     # The digest builds its own live-anchored forecast rather than trusting

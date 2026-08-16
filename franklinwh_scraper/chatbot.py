@@ -894,6 +894,8 @@ class TelegramChatBot:
             with self._lock:
                 stats    = self._stats
                 forecast = self._usage_forecast
+                outlook  = self._outlook
+                store    = self._hist_store
             if stats is None:
                 self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
                 return
@@ -905,13 +907,47 @@ class TelegramChatBot:
             c   = stats.current
             soc = c.battery_soc_pct
             kwh = soc / 100.0 * cap
-
             now = datetime.now()
+
+            from pathlib import Path
+
+            from .alerts import (_GHI_CLOUDY_THRESHOLD, _get_hourly_bias,
+                                 _get_performance_ratio, _get_sundown_bias,
+                                 _get_system_peak_kw, _load_peak_state,
+                                 _save_peak_state, _state_lock)
+            from .predictor import predict
+
+            out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+            state = _load_peak_state(out)
+
+            # Live-anchor to what's actually happening right now, same as
+            # the EOD digest's own recompute (alerts.py) — the shared
+            # `self._usage_forecast` deliberately isn't live-anchored (it
+            # also drives recommend()'s Emergency-Backup decision, where a
+            # single noisy poll shouldn't ripple in), but /sundown is asked
+            # in the moment and should reflect the moment. Falls back to
+            # the shared forecast on any failure — never let this take the
+            # whole command down.
+            live_forecast = forecast
+            if store is not None:
+                try:
+                    cloudy = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD if outlook else False
+                    live_forecast = predict(
+                        store, 24, outlook=outlook,
+                        system_peak_kw=_get_system_peak_kw(state),
+                        perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
+                        hourly_bias=_get_hourly_bias(state),
+                        current_load_kw=c.home_load_kw,
+                    )
+                except Exception:
+                    logger.exception("/sundown: live-anchored forecast failed")
+                    live_forecast = forecast
+
             # Last forecast hour today still expecting real solar — mirrors the
             # sunrise-detection approach in alerts._alert_eod_digest, just for
             # the trailing edge of the day instead of the leading edge.
             today_sun_hours = [
-                h for h in forecast.hours
+                h for h in live_forecast.hours
                 if h.dt > now and h.dt.date() == now.date() and h.predicted_solar_kw > 0.1
             ]
             if not today_sun_hours:
@@ -919,23 +955,27 @@ class TelegramChatBot:
                 return
             sundown_dt = today_sun_hours[-1].dt
 
-            for h in forecast.hours:
+            for h in live_forecast.hours:
                 if h.dt <= now or h.dt > sundown_dt:
                     continue
                 kwh = max(0.0, min(cap, kwh + h.predicted_solar_kw - h.predicted_load_kw))
 
-            end_pct = kwh / cap * 100.0
+            raw_pct = kwh / cap * 100.0
+            # Learned additive correction from how past /sundown calls
+            # actually did (state["sundown_bias_samples"], recorded by the
+            # EOD digest's accuracy check) — 0.0 until >=3 graded samples
+            # exist, so this is a no-op until there's real signal.
+            bias = _get_sundown_bias(state)
+            end_pct = max(0.0, min(100.0, raw_pct + bias))
 
             # Persist the prediction so the EOD digest can report how it did —
             # only meaningful if the user actually asked, so this is opt-in
             # per-day rather than something the advisor predicts on its own.
-            from pathlib import Path
-            from .alerts import _load_peak_state, _save_peak_state, _state_lock
-            out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
             with _state_lock(out):
-                state = _load_peak_state(out)
+                state = _load_peak_state(out)  # re-load under the lock — avoid clobbering a concurrent writer
                 state[f"sundown_pred_{now.strftime('%Y-%m-%d')}"] = {
                     "pct": round(end_pct, 1),
+                    "raw_pct": round(raw_pct, 1),
                     "dt": sundown_dt.isoformat(),
                     "requested_at": now.isoformat(),
                 }
@@ -954,7 +994,7 @@ class TelegramChatBot:
             self._send(chat_id,
                 f"🌇 Projected SoC at sundown (~{sundown_dt.strftime('%-I:%M %p')}, using solar+load forecast)\n"
                 f"Now: <b>{soc:.0f}%</b>  →  Sundown: ~<b>{end_pct:.0f}%</b>\n"
-                f"<i>{forecast.confidence.title()} confidence, {forecast.data_days}d data — actual weather/load will vary.</i>"
+                f"<i>{live_forecast.confidence.title()} confidence, {live_forecast.data_days}d data — actual weather/load will vary.</i>"
                 f"{followup}"
             )
         except Exception as e:
