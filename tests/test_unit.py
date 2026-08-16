@@ -650,6 +650,7 @@ def test_prune_old_state_covers_previously_unmatched_prefixes():
         f"predicted_kwh_{old_date}": 25.0,
         f"predicted_avg_ghi_{old_date}": 400.0,
         f"daily_import_cost_{old_date}": 1.5,
+        f"soc_7am_pred_{old_date}": {"pct": 40.0, "dt": f"{old_date}T07:00:00"},
         "solar_degradation_alerted_week": old_week,
         f"predicted_kwh_{datetime.now().strftime('%Y-%m-%d')}": 30.0,  # keep: today
     }
@@ -657,6 +658,7 @@ def test_prune_old_state_covers_previously_unmatched_prefixes():
     assert f"predicted_kwh_{old_date}" not in pruned
     assert f"predicted_avg_ghi_{old_date}" not in pruned
     assert f"daily_import_cost_{old_date}" not in pruned
+    assert f"soc_7am_pred_{old_date}" not in pruned
     assert "solar_degradation_alerted_week" not in pruned
     assert f"predicted_kwh_{datetime.now().strftime('%Y-%m-%d')}" in pruned
 
@@ -2205,6 +2207,86 @@ def test_predict_live_anchor_never_goes_negative(tmp_path):
 
     forecast = predict(db, horizon_hours=1, current_load_kw=0.0)
     assert forecast.hours[0].predicted_load_kw >= 0.0
+
+
+def test_eod_digest_stores_7am_prediction_for_tomorrow(monkeypatch):
+    """The no-EV baseline prediction gets stashed for tomorrow's morning
+    preview to check itself against — keyed to the fixed 7am checkpoint
+    _predict_overnight_soc always targets now."""
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime.now().replace(hour=21, minute=30, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    readings = [(f"{today}T{h:02d}:00:00", 0.5, 1.0, 0.0) for h in range(0, 20, 2)]
+    store = _AttrStore(attr=(8.2, 5.1, 0.9), readings=readings)
+
+    hours = [HourPrediction(dt=now + timedelta(hours=h), predicted_load_kw=1.0,
+                             predicted_solar_kw=0.0, net_kw=-0.5, confidence="high")
+             for h in range(1, 10)]
+    usage_forecast = UsageForecast(hours=hours, total_load_kwh=9.0, total_solar_kwh=0.0,
+                                   net_kwh=-4.5, peak_load_kw=1.0, confidence="high", data_days=30)
+
+    state = {}
+    alerts._alert_eod_digest(state, today, now, _digest_stats(soc=55.0), Config(),
+                             None, usage_forecast, store)
+
+    key = f"soc_7am_pred_{tomorrow}"
+    assert key in state
+    saved_dt = datetime.fromisoformat(state[key]["dt"])
+    assert saved_dt.hour == 7 and saved_dt.minute == 0
+    assert saved_dt.date() == (now + timedelta(days=1)).date()
+    assert isinstance(state[key]["pct"], float)
+
+
+def test_morning_preview_reports_7am_prediction_accuracy_from_store():
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    pred_dt = now.replace(hour=7, minute=0)
+    state = {f"soc_7am_pred_{today}": {"pct": 20.0, "dt": pred_dt.isoformat()}}
+
+    store = _AttrStore(attr=(8.2, 5.1, 0.9))
+    store.soc_near = lambda ts: 32.0  # actual reading near 7am
+
+    c = types.SimpleNamespace(battery_soc_pct=35.0, solar_production_kw=0.5)
+    msg = alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert msg is not None
+    assert "7am SoC accuracy: predicted 20%, actual 32% (+12 pt)" in msg
+    # Popped, not peeked — a late/duplicate run can't compare it twice.
+    assert f"soc_7am_pred_{today}" not in state
+
+
+def test_morning_preview_7am_accuracy_falls_back_without_nearby_reading():
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    pred_dt = now.replace(hour=7, minute=0)
+    state = {f"soc_7am_pred_{today}": {"pct": 20.0, "dt": pred_dt.isoformat()}}
+
+    store = _AttrStore(attr=(8.2, 5.1, 0.9))  # soc_near defaults to None — no nearby reading
+
+    c = types.SimpleNamespace(battery_soc_pct=35.0, solar_production_kw=0.5)
+    msg = alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert msg is not None
+    assert "not directly comparable" in msg
+    assert "using now's 35%" in msg
+
+
+def test_morning_preview_omits_7am_accuracy_when_nothing_stored():
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    c = types.SimpleNamespace(battery_soc_pct=35.0, solar_production_kw=0.5)
+
+    msg = alerts._alert_morning_preview({}, today, now, c, None, None, None, Config())
+    assert msg is not None
+    assert "7am SoC accuracy" not in msg
 
 
 def test_eod_digest_shows_without_then_with_ev_charge_to_floor(monkeypatch):

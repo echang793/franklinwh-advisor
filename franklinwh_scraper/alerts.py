@@ -264,7 +264,7 @@ _DATE_KEYED_PREFIXES = (
     # and previously matched none of the prune rules — the state file grew
     # by one key per day per prefix, forever, for the life of the install.
     "predicted_kwh_", "predicted_avg_ghi_", "daily_import_cost_",
-    "outages_", "sundown_pred_", "savings_daily_",
+    "outages_", "sundown_pred_", "savings_daily_", "soc_7am_pred_",
 )
 
 
@@ -510,6 +510,33 @@ def _alert_morning_preview(
     soc      = c.battery_soc_pct
     solar_kw = c.solar_production_kw
 
+    # 7am SoC prediction accuracy — pop (not peek) so a missed/late morning
+    # preview can't compare the same night's prediction twice.
+    soc_7am_acc_str = ""
+    soc_7am_pred = state.pop(f"soc_7am_pred_{today}", None)
+    if soc_7am_pred:
+        pred_pct = soc_7am_pred["pct"]
+        pred_dt  = datetime.fromisoformat(soc_7am_pred["dt"])
+        actual_pct = store.soc_near(soc_7am_pred["dt"]) if store is not None else None
+        if actual_pct is None:
+            # No reading landed within soc_near's +/-30min window around 7am
+            # — fall back to right-now's reading rather than silently
+            # dropping the comparison, but label it as not directly
+            # comparable (mirrors the /sundown fallback).
+            actual_pct = soc
+            delta = actual_pct - pred_pct
+            soc_7am_acc_str = (
+                f"\n🔋 7am SoC accuracy: predicted {pred_pct:.0f}% — "
+                f"no reading near {pred_dt.strftime('%-I:%M %p')}, using now's "
+                f"{actual_pct:.0f}% instead ({delta:+.0f} pt, not directly comparable)."
+            )
+        else:
+            delta = actual_pct - pred_pct
+            soc_7am_acc_str = (
+                f"\n🔋 7am SoC accuracy: predicted {pred_pct:.0f}%, "
+                f"actual {actual_pct:.0f}% ({delta:+.0f} pt)"
+            )
+
     if outlook:
         cal_samples = state.get("solar_cal_samples", [])
         system_peak_kw = _get_system_peak_kw(state)  # P75 — consistent with EOD digest
@@ -580,7 +607,7 @@ def _alert_morning_preview(
     return (
         f"☀️ <b>FranklinWH: Good morning!</b>\n"
         f"🔋 {_soc_bar(soc)}  ·  Solar: <b>{solar_kw:.2f} kW</b>\n"
-        f"{solar_est}{peak_window_str}"
+        f"{solar_est}{peak_window_str}{soc_7am_acc_str}"
     )
 
 
@@ -918,6 +945,15 @@ def _alert_eod_digest(
         has_ev = getattr(cfg, "ev_charging", False)
         label  = "Without EV charging" if has_ev else "Predicted SoC"
         soc_6am_str = f"\n🌅 {label} @ {hour_label}: ~{pred_soc_6am:.0f}%"
+
+        # Stash tonight's no-EV baseline prediction so tomorrow's morning
+        # preview can report how it actually did — same accuracy-tracking
+        # shape as /sundown, but automatic (no command needed) and keyed to
+        # the fixed 7am checkpoint _predict_overnight_soc always targets.
+        checkpoint_dt = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
+        state[f"soc_7am_pred_{checkpoint_dt.strftime('%Y-%m-%d')}"] = {
+            "pct": pred_soc_6am, "dt": checkpoint_dt.isoformat(),
+        }
 
         if has_ev:
             # Charge-to-floor, not fixed-kW-all-night: most people watching
