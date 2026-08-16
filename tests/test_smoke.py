@@ -104,15 +104,15 @@ def test_eod_digest_includes_tomorrow_solar(tmp_path):
 def test_eod_digest_format_locked(tmp_path):
     """Regression lock for the daily-summary format: no backup-hours line,
     predicted/actual/delta right-aligned to a fixed width, and the SoC
-    checkpoint labeled with the forecasted sunrise hour (not a hardcoded
-    6/7 am) — see conversation 2026-07-17."""
+    checkpoint fixed at 7 AM (was tied to the forecasted sunrise hour until
+    the user asked for a fixed checkpoint on 2026-08-15) — see conversation
+    2026-07-17."""
     now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
-    # Sunrise forecast hour: first hour after `now` where solar > 0.1 kW.
-    sunrise = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+    checkpoint = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
     hours = [
         HourPrediction(dt=now + timedelta(hours=h), predicted_load_kw=0.8,
-                       predicted_solar_kw=(3.0 if now + timedelta(hours=h) >= sunrise else 0.0),
-                       net_kw=(2.2 if now + timedelta(hours=h) >= sunrise else -0.8),
+                       predicted_solar_kw=(3.0 if now + timedelta(hours=h) >= checkpoint else 0.0),
+                       net_kw=(2.2 if now + timedelta(hours=h) >= checkpoint else -0.8),
                        confidence="high")
         for h in range(1, 13)
     ]
@@ -124,7 +124,7 @@ def test_eod_digest_format_locked(tmp_path):
     msg = alerts._alert_eod_digest(state, now.strftime("%Y-%m-%d"), now, stats, cfg, None, forecast)
     assert msg is not None
     assert "Backup:" not in msg
-    assert "Predicted SoC @ 6 AM:" in msg
+    assert "Predicted SoC @ 7 AM:" in msg
     assert "  Predicted: 100.0 kWh" in msg
     assert "  Actual:     30.0 kWh" in msg  # right-aligned to width 5 — extra space vs "100.0"
     assert "  Delta:     -70.0 kWh" in msg  # "-70.0" is already 5 chars, no extra pad

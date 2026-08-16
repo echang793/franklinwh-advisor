@@ -769,33 +769,25 @@ def _alert_export_arbitrage(
 def _predict_overnight_soc(
     usage_forecast, now: datetime, soc: float, bat_cap: float,
 ) -> tuple[float, str] | None:
-    """Predicted SoC at tomorrow's solar start, or None below min confidence.
+    """Predicted SoC at a fixed 7 am checkpoint, or None below min confidence.
 
     Returns (predicted_pct, hour_label). Shared by the normal 7am prediction
     and the manual EV-charging counterfactual so both use identical window
     selection and confidence gating.
+
+    Was dynamically tied to the forecast's first hour where predicted_solar_kw
+    > 0.1 ("solar meaningfully starts"), to track sunrise shifting across the
+    year rather than a fixed clock time. That's a production-start estimate,
+    not literal sunrise though, and could land later than expected (panel
+    orientation, forecast resolution) — checked in at 8 AM on 2026-08-15
+    when the user wanted a fixed 7 AM checkpoint instead. Changed per their
+    direct request that day.
     """
     if not (usage_forecast and usage_forecast.hours):
         return None
-    # Find the first forecasted hour tomorrow where solar meaningfully starts,
-    # rather than a fixed clock time — sunrise (and thus the useful "how low
-    # did the battery get overnight" checkpoint) shifts several hours across
-    # the year, so a fixed 6 am either checks too early in winter or misses
-    # the tail of the draw-down in summer.
-    sunrise_dt = next(
-        (p.dt for p in usage_forecast.hours if p.dt > now and p.predicted_solar_kw > 0.1),
-        None,
-    )
-    # Round to the nearest whole hour for the label — forecast hours are
-    # offset from "now"'s minute, not aligned to :00.
-    if sunrise_dt is not None:
-        sunrise_hour = sunrise_dt.replace(minute=0, second=0, microsecond=0)
-        if sunrise_dt.minute >= 30:
-            sunrise_hour += timedelta(hours=1)
-    else:
-        sunrise_hour = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+    checkpoint = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
 
-    night_hours = [p for p in usage_forecast.hours if now <= p.dt < sunrise_hour]
+    night_hours = [p for p in usage_forecast.hours if now <= p.dt < checkpoint]
     # Gate on the night window's own confidence, not the worst hour across
     # the whole 24h forecast — a sparse hour later in the day (e.g. 3 pm
     # tomorrow) shouldn't suppress a prediction that only uses tonight's data.
@@ -809,7 +801,7 @@ def _predict_overnight_soc(
 
     night_net_kwh = sum(p.net_kw for p in night_hours)
     pred_pct      = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
-    return pred_pct, sunrise_hour.strftime("%-I %p")
+    return pred_pct, checkpoint.strftime("%-I %p")
 
 
 def _alert_eod_digest(
