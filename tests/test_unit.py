@@ -2305,6 +2305,85 @@ def test_low_soc_1pm_omits_sundown_line_without_store():
     assert "Projected @ sundown" not in msg
 
 
+# ── Sundown projection on every low-battery-flavored alert ─────────────
+
+def _sundown_forecast(now):
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+    hours = [HourPrediction(dt=now + timedelta(hours=h), predicted_load_kw=1.0,
+                            predicted_solar_kw=3.0 if h < 4 else 0.0,
+                            net_kw=1.0, confidence="high")
+             for h in range(1, 8)]
+    return UsageForecast(hours=hours, total_load_kwh=7.0, total_solar_kwh=12.0,
+                         net_kwh=7.0, peak_load_kw=1.0, confidence="high", data_days=30)
+
+
+def test_low_noon_soc_includes_sundown_projection(monkeypatch):
+    import types
+
+    now = datetime(2026, 7, 2, 11, 30, 0)
+    c = types.SimpleNamespace(battery_soc_pct=25.0, solar_production_kw=1.0,
+                              home_load_kw=1.5, battery_use_kw=0.3)
+    forecast = _sundown_forecast(now)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **kw: forecast)
+
+    msg = alerts._alert_low_noon_soc({}, "2026-07-02", now, c, Config(),
+                                     outlook=None, usage_forecast=forecast, store=object())
+    assert msg is not None
+    assert "🌇 Projected @ sundown" in msg
+
+
+def test_low_noon_soc_omits_sundown_line_without_store():
+    import types
+
+    now = datetime(2026, 7, 2, 11, 30, 0)
+    c = types.SimpleNamespace(battery_soc_pct=25.0, solar_production_kw=1.0,
+                              home_load_kw=1.5, battery_use_kw=0.3)
+    msg = alerts._alert_low_noon_soc({}, "2026-07-02", now, c, Config())
+    assert msg is not None
+    assert "Projected @ sundown" not in msg
+
+
+def test_fast_drain_critical_alert_includes_sundown_projection(monkeypatch):
+    import types
+
+    now = datetime(2026, 7, 15, 12, 0, 0)
+    c = types.SimpleNamespace(battery_soc_pct=30.0, home_load_kw=2.0,
+                              solar_production_kw=0.0, battery_use_kw=1.0)
+    state = {"last_soc": 32.0, "last_soc_time": (now - timedelta(minutes=10)).isoformat()}
+    forecast = _sundown_forecast(now)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **kw: forecast)
+
+    msg = alerts._alert_fast_drain(state, "2026-07-15", now, c, Config(),
+                                   outlook=None, usage_forecast=forecast, store=object())
+    assert msg is not None
+    assert "draining fast" in msg
+    assert "🌇 Projected @ sundown" in msg
+
+
+def test_unusual_drain_alert_includes_sundown_projection(monkeypatch):
+    """The lower-urgency 'unusual drain' tier (>=35% SoC) gets the
+    projection too — needs 2 consecutive over-threshold polls to fire."""
+    import types
+
+    now1 = datetime(2026, 7, 15, 12, 0, 0)
+    now2 = now1 + timedelta(minutes=10)
+    c1 = types.SimpleNamespace(battery_soc_pct=50.0, home_load_kw=2.0,
+                               solar_production_kw=0.0, battery_use_kw=1.0)
+    c2 = types.SimpleNamespace(battery_soc_pct=48.0, home_load_kw=2.0,
+                               solar_production_kw=0.0, battery_use_kw=1.0)
+    forecast = _sundown_forecast(now2)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **kw: forecast)
+
+    state = {"last_soc": 60.0, "last_soc_time": (now1 - timedelta(minutes=10)).isoformat()}
+    alerts._alert_fast_drain(state, "2026-07-15", now1, c1, Config(),
+                             outlook=None, usage_forecast=forecast, store=object())  # 1st poll: builds streak
+    msg = alerts._alert_fast_drain(state, "2026-07-15", now2, c2, Config(),
+                                   outlook=None, usage_forecast=forecast, store=object())
+    assert msg is not None
+    assert "Unusual drain rate" in msg
+    assert "🌇 Projected @ sundown" in msg
+
+
 # ── system_peak_kw EWMA (closes the P75-lag lead left after the hourly_bias fix) ──
 
 def test_system_peak_kw_none_below_3_samples():

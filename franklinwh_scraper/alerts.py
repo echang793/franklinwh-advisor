@@ -665,34 +665,9 @@ def _alert_low_soc_1pm(
     cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
     tte = _time_to_pct(c.battery_soc_pct, 0.0, cap, c.battery_use_kw)
     tte_str = f"⏱ ~{_fmt_hours(tte)} to empty · " if tte is not None else ""
-
-    # Same live-anchor + learned-bias projection /sundown uses (chatbot.py)
-    # — shown automatically here since "am I low at 1pm" is exactly the
-    # moment "will I make it to sundown" matters most. Display-only:
-    # doesn't write sundown_pred_, which stays opt-in to an explicit
-    # /sundown ask so this can't collide with (or double-grade against)
-    # one the user makes later the same day.
-    sundown_str = ""
-    live_forecast = usage_forecast
-    if store is not None and usage_forecast is not None:
-        try:
-            cloudy = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD if outlook else False
-            live_forecast = predict(
-                store, 24, outlook=outlook,
-                system_peak_kw=_get_system_peak_kw(state),
-                perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
-                hourly_bias=_get_hourly_bias(state),
-                current_load_kw=c.home_load_kw,
-            )
-        except Exception:
-            logger.exception("Low-SoC-1pm: live-anchored forecast failed")
-            live_forecast = usage_forecast
-    if live_forecast is not None:
-        projection = _predict_sundown_soc(live_forecast, now, c.battery_soc_pct, cap)
-        if projection is not None:
-            raw_pct, sundown_dt = projection
-            pred_pct = max(0.0, min(100.0, raw_pct + _get_sundown_bias(state)))
-            sundown_str = f"\n🌇 Projected @ sundown (~{sundown_dt.strftime('%-I:%M %p')}): ~{pred_pct:.0f}%"
+    # "Am I low at 1pm" is exactly the moment "will I make it to sundown"
+    # matters most.
+    sundown_str = _sundown_projection_line(state, now, c, cap, outlook, usage_forecast, store)
 
     return (
         f"🟡 <b>FranklinWH: Battery low at {now.strftime('%-I:%M %p')}</b>\n"
@@ -771,7 +746,10 @@ def _alert_solar_stopped(state: dict, today: str, now: datetime, c) -> str | Non
     )
 
 
-def _alert_low_noon_soc(state: dict, today: str, now: datetime, c) -> str | None:
+def _alert_low_noon_soc(
+    state: dict, today: str, now: datetime, c, cfg: Config,
+    outlook=None, usage_forecast=None, store=None,
+) -> str | None:
     in_window = now.hour in (11, 12)
     if not in_window or c.battery_soc_pct >= 30.0 or c.solar_production_kw <= 0.5:
         return None
@@ -779,11 +757,14 @@ def _alert_low_noon_soc(state: dict, today: str, now: datetime, c) -> str | None
         return None
     state["low_noon_soc_date"] = today
     logger.info("Low noon SoC alert sent for %s (%.0f%%)", today, c.battery_soc_pct)
+    cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
+    sundown_str = _sundown_projection_line(state, now, c, cap, outlook, usage_forecast, store)
     return (
         f"🟡 <b>FranklinWH: Battery still low at noon — only {c.battery_soc_pct:.0f}% SoC</b>\n"
         f"Solar {c.solar_production_kw:.2f} kW available but battery hasn't recovered\n"
         f"Time: {now.strftime('%-I:%M %p')}  ·  Load {c.home_load_kw:.2f} kW\n"
         f"Check battery mode — may need manual intervention."
+        f"{sundown_str}"
     )
 
 
@@ -922,6 +903,43 @@ def _predict_sundown_soc(
         kwh = max(0.0, min(bat_cap, kwh + h.predicted_solar_kw - h.predicted_load_kw))
 
     return kwh / bat_cap * 100.0, sundown_dt
+
+
+def _sundown_projection_line(
+    state: dict, now: datetime, c, cap: float,
+    outlook=None, usage_forecast=None, store=None,
+) -> str:
+    """Live-anchored, bias-corrected sundown SoC projection as a formatted
+    alert-body line ('' if no forecast data is available). Shared by every
+    low-battery-flavored alert (1pm, noon, fast/unusual drain) so they all
+    show the same number via the same math, instead of three
+    implementations quietly drifting apart. Display-only — never persists
+    sundown_pred_, which stays opt-in to an explicit /sundown ask so this
+    can't collide with (or get double-graded against) one made later the
+    same day.
+    """
+    live_forecast = usage_forecast
+    if store is not None and usage_forecast is not None:
+        try:
+            cloudy = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD if outlook else False
+            live_forecast = predict(
+                store, 24, outlook=outlook,
+                system_peak_kw=_get_system_peak_kw(state),
+                perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
+                hourly_bias=_get_hourly_bias(state),
+                current_load_kw=c.home_load_kw,
+            )
+        except Exception:
+            logger.exception("Sundown projection: live-anchored forecast failed")
+            live_forecast = usage_forecast
+    if live_forecast is None:
+        return ""
+    projection = _predict_sundown_soc(live_forecast, now, c.battery_soc_pct, cap)
+    if projection is None:
+        return ""
+    raw_pct, sundown_dt = projection
+    pred_pct = max(0.0, min(100.0, raw_pct + _get_sundown_bias(state)))
+    return f"\n🌇 Projected @ sundown (~{sundown_dt.strftime('%-I:%M %p')}): ~{pred_pct:.0f}%"
 
 
 def _alert_eod_digest(
@@ -1546,7 +1564,10 @@ def _track_battery_cycles(state: dict, c) -> None:
             logger.debug("Battery cycle completed (%.2f depth), total=%.2f", depth, state["batt_cycle_count"])
 
 
-def _alert_fast_drain(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
+def _alert_fast_drain(
+    state: dict, today: str, now: datetime, c, cfg: Config,
+    outlook=None, usage_forecast=None, store=None,
+) -> str | None:
     """Always updates last_soc/last_soc_time for rate tracking.
 
     Two tiers: a critical alert below 35% SoC (unchanged), and a lower-urgency
@@ -1566,18 +1587,20 @@ def _alert_fast_drain(state: dict, today: str, now: datetime, c, cfg: Config) ->
             # always-on alert, so a false positive here can't be muted.
             if elapsed_h >= (2.0 / 60.0):
                 drain_rate = (prev_soc - c.battery_soc_pct) / elapsed_h
+                cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
                 if drain_rate >= 8.0 and c.battery_soc_pct < 35.0 and state.get("fast_drain_alerted_date") != today:
                     state["fast_drain_alerted_date"] = today
                     state.pop("unusual_drain_streak", None)
                     logger.info("Fast drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
-                    _cap_fd = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
-                    _tte_fd = _time_to_pct(c.battery_soc_pct, 0.0, _cap_fd, c.battery_use_kw)
+                    _tte_fd = _time_to_pct(c.battery_soc_pct, 0.0, cap, c.battery_use_kw)
                     _tte_fd_s = f"\n⏱ ~{_fmt_hours(_tte_fd)} to empty" if _tte_fd is not None else ""
+                    sundown_str = _sundown_projection_line(state, now, c, cap, outlook, usage_forecast, store)
                     body = (
                         f"⚡ <b>FranklinWH: Battery draining fast — {drain_rate:.0f}%/hr</b>\n"
                         f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Load <b>{c.home_load_kw:.2f} kW</b>  ·  "
                         f"Solar {c.solar_production_kw:.2f} kW\n"
                         f"Time: {now.strftime('%-I:%M %p')}{_tte_fd_s}"
+                        f"{sundown_str}"
                     )
                 elif drain_rate >= 6.0 and c.battery_soc_pct >= 35.0:
                     # Require 2 consecutive polls over threshold to avoid noise
@@ -1587,11 +1610,13 @@ def _alert_fast_drain(state: dict, today: str, now: datetime, c, cfg: Config) ->
                     if streak >= 2 and state.get("unusual_drain_alerted_date") != today:
                         state["unusual_drain_alerted_date"] = today
                         logger.info("Unusual drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
+                        sundown_str = _sundown_projection_line(state, now, c, cap, outlook, usage_forecast, store)
                         body = (
                             f"🟡 <b>FranklinWH: Unusual drain rate — {drain_rate:.0f}%/hr</b>\n"
                             f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Load <b>{c.home_load_kw:.2f} kW</b>  ·  "
                             f"Solar {c.solar_production_kw:.2f} kW\n"
                             f"Time: {now.strftime('%-I:%M %p')} — check for EV charging or AC left on."
+                            f"{sundown_str}"
                         )
                 else:
                     state["unusual_drain_streak"] = 0
@@ -2388,14 +2413,14 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("low_soc_1pm",       lambda: _alert_low_soc_1pm(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("low_morning_solar", lambda: _alert_low_morning_solar(state, today, now, c)),
             ("solar_stopped",     lambda: _alert_solar_stopped(state, today, now, c)),
-            ("low_noon_soc",      lambda: _alert_low_noon_soc(state, today, now, c)),
+            ("low_noon_soc",      lambda: _alert_low_noon_soc(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("export_arbitrage",  lambda: _alert_export_arbitrage(state, today, now, c, cfg, usage_forecast)),
             ("eod_digest",        lambda: _alert_eod_digest(state, today, now, stats, cfg, outlook, usage_forecast, store)),
             ("weekly_summary",    lambda: _alert_weekly_summary(state, today, now, store, cfg)),
             ("monthly_summary",   lambda: _alert_monthly_summary(state, today, now, store, cfg)),
             ("grid_down",         lambda: _alert_grid_down(state, today, now, c, cfg)),
             ("grid_restored",     lambda: _alert_grid_restored(state, now, c, cfg)),
-            ("fast_drain",        lambda: _alert_fast_drain(state, today, now, c, cfg)),
+            ("fast_drain",        lambda: _alert_fast_drain(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("not_charging",      lambda: _alert_not_charging(state, today, now, c)),
             ("solar_degradation",    lambda: _alert_solar_degradation(state, today, now)),
             ("prediction_drift",     lambda: _alert_prediction_drift(state, today, now)),
