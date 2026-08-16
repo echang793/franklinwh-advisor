@@ -147,6 +147,35 @@ def test_predict_blends_recent_load_over_baseline(tmp_path):
     assert hour_pred.predicted_load_kw > 5.0
 
 
+def test_load_profile_uses_median_not_mean(tmp_path):
+    """Regression for the 2026-08-16 -31pt overnight SoC miss: home_load_kw
+    includes EV charging draw, and EV sessions are irregular/self-limited
+    rather than every night — a right-skewed minority of high-draw
+    readings pulled the mean 2-3x above the typical no-EV night (measured
+    live: dow=6 hour=2 was 0.31 kW median vs 0.67 kW mean, max 4.07 kW).
+    Median must be robust to that tail; mean isn't."""
+    db = HistoryStore(tmp_path / "h.db")
+
+    def _insert(load_kw: float, i: int):
+        ts = (datetime(2026, 8, 2, 2, 0) + timedelta(days=i)).isoformat()  # all Sundays
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts, 6, 2, load_kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+        )
+
+    # 8 typical no-EV nights (~0.3 kW), 2 EV-charging nights (~4 kW spike).
+    for i in range(8):
+        _insert(0.3, i)
+    for i in range(8, 10):
+        _insert(4.0, i)
+    db._conn.commit()
+
+    profile = db.load_profile()
+    assert profile[(6, 2)] == pytest.approx(0.3)  # median: the typical night, not dragged up
+
+
 def test_day_range_query_boundaries(tmp_path):
     """Regression guard for the substr(timestamp) -> timestamp range rewrite:
     a reading exactly at midnight of the day *after* end_date must be excluded,

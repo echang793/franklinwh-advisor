@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -188,16 +189,30 @@ class HistoryStore:
         ).fetchall()
         return {(int(r[0]), int(r[1])): int(r[2]) for r in rows}
 
+    @staticmethod
+    def _median_load_by_slot(rows) -> LoadProfile:
+        """Median home_load_kw per (day_of_week, hour_of_day) from raw rows.
+
+        Median, not mean: home_load_kw includes EV charging draw, and EV
+        sessions are irregular/self-limited rather than every night — a
+        right-skewed minority of high-draw nights pulls the mean 2-3x above
+        what a typical no-EV night actually looks like (e.g. dow=6 hour=2
+        measured 0.31 kW median vs 0.67 kW mean, max 4.07 kW). That mean
+        inflation fed a -31pt overnight SoC-prediction miss on 2026-08-16.
+        Median is robust to that tail without needing to classify which
+        nights had EV charging.
+        """
+        buckets: dict[tuple[int, int], list[float]] = {}
+        for dow, hr, load in rows:
+            buckets.setdefault((int(dow), int(hr)), []).append(float(load))
+        return {slot: statistics.median(vals) for slot, vals in buckets.items()}
+
     def load_profile(self) -> LoadProfile:
-        """Return average home load kW keyed by (day_of_week, hour_of_day)."""
+        """Return median home load kW keyed by (day_of_week, hour_of_day)."""
         rows = self._conn.execute(
-            """
-            SELECT day_of_week, hour_of_day, AVG(home_load_kw)
-            FROM readings
-            GROUP BY day_of_week, hour_of_day
-            """
+            "SELECT day_of_week, hour_of_day, home_load_kw FROM readings"
         ).fetchall()
-        return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
+        return self._median_load_by_slot(rows)
 
     def solar_profile(self) -> LoadProfile:
         """Return average solar production kW keyed by (day_of_week, hour_of_day)."""
@@ -430,19 +445,21 @@ class HistoryStore:
         return {(int(r[0]), int(r[1])): int(r[2]) for r in rows}
 
     def seasonal_load_profile(self, season: str) -> LoadProfile:
-        """Average home load kW keyed by (day_of_week, hour_of_day) for one season."""
+        """Return median home load kW keyed by (day_of_week, hour_of_day) for one season.
+
+        Median for the same reason as `load_profile` — see `_median_load_by_slot`.
+        """
         months = self._season_months(season)
         placeholders = ",".join("?" * len(months))
         rows = self._conn.execute(
             f"""
-            SELECT day_of_week, hour_of_day, AVG(home_load_kw)
+            SELECT day_of_week, hour_of_day, home_load_kw
             FROM readings
             WHERE CAST(substr(timestamp,6,2) AS INTEGER) IN ({placeholders})
-            GROUP BY day_of_week, hour_of_day
             """,
             months,
         ).fetchall()
-        return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
+        return self._median_load_by_slot(rows)
 
     def seasonal_solar_profile(self, season: str) -> LoadProfile:
         """Average solar production kW keyed by (day_of_week, hour_of_day) for one season."""
@@ -460,23 +477,19 @@ class HistoryStore:
         return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
 
     def recent_load_profile(self, days: int) -> LoadProfile:
-        """Average home load kW keyed by (day_of_week, hour_of_day) over the trailing N days.
+        """Return median home load kW keyed by (day_of_week, hour_of_day) over the trailing N days.
 
         Weights a sustained recent change (new EV, HVAC swap) far more heavily
         than an all-time or seasonal average would, at the cost of more noise
         per slot — callers should blend with a longer baseline, not use alone.
+        Median for the same reason as `load_profile` — see `_median_load_by_slot`.
         """
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         rows = self._conn.execute(
-            """
-            SELECT day_of_week, hour_of_day, AVG(home_load_kw)
-            FROM readings
-            WHERE timestamp >= ?
-            GROUP BY day_of_week, hour_of_day
-            """,
+            "SELECT day_of_week, hour_of_day, home_load_kw FROM readings WHERE timestamp >= ?",
             (cutoff,),
         ).fetchall()
-        return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
+        return self._median_load_by_slot(rows)
 
     def recent_solar_profile(self, days: int) -> LoadProfile:
         """Average solar production kW keyed by (day_of_week, hour_of_day) over the trailing N days."""
