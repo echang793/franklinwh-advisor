@@ -2204,6 +2204,107 @@ def test_sundown_bias_uses_ewma():
     assert _get_sundown_bias(state) == _ewma(samples)
 
 
+def _low_soc_current(**over):
+    import types
+    cur = types.SimpleNamespace(
+        battery_soc_pct=35.0, solar_production_kw=1.0, home_load_kw=1.5, battery_use_kw=0.3,
+    )
+    for k, v in over.items():
+        setattr(cur, k, v)
+    return cur
+
+
+def test_low_soc_1pm_includes_live_anchored_sundown_projection(monkeypatch):
+    """The 1pm low-battery alert should show the same live-anchored sundown
+    projection /sundown does — this is exactly the moment 'will I make it
+    to sundown' matters most."""
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 2, 13, 0, 0)
+    c = _low_soc_current(home_load_kw=2.1)
+
+    def _forecast(net_kw):
+        hours = [HourPrediction(dt=now + timedelta(hours=h), predicted_load_kw=1.0,
+                                predicted_solar_kw=3.0 if h < 4 else 0.0,
+                                net_kw=net_kw, confidence="high")
+                 for h in range(1, 8)]
+        return UsageForecast(hours=hours, total_load_kwh=7.0, total_solar_kwh=12.0,
+                             net_kwh=net_kw * 7, peak_load_kw=1.0, confidence="high", data_days=30)
+
+    calls = []
+
+    def fake_predict(store_, horizon, **kw):
+        calls.append(kw.get("current_load_kw"))
+        return _forecast(1.0)
+
+    monkeypatch.setattr(alerts, "predict", fake_predict)
+
+    usage_forecast = _forecast(-9.0)  # shared forecast — must not leak into the live-anchored result
+    msg = alerts._alert_low_soc_1pm({}, "2026-07-02", now, c, Config(),
+                                    outlook=None, usage_forecast=usage_forecast, store=object())
+
+    assert msg is not None
+    assert "🌇 Projected @ sundown" in msg
+    assert calls == [2.1]  # live-anchored to the current home_load_kw reading
+
+
+def test_low_soc_1pm_sundown_projection_applies_learned_bias(monkeypatch):
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 2, 13, 0, 0)
+    c = _low_soc_current()
+
+    hours = [HourPrediction(dt=now + timedelta(hours=h), predicted_load_kw=1.0,
+                            predicted_solar_kw=3.0 if h < 4 else 0.0,
+                            net_kw=1.0, confidence="high")
+             for h in range(1, 8)]
+    forecast = UsageForecast(hours=hours, total_load_kwh=7.0, total_solar_kwh=12.0,
+                             net_kwh=7.0, peak_load_kw=1.0, confidence="high", data_days=30)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **kw: forecast)
+
+    state_no_bias = {}
+    state_biased   = {"sundown_bias_samples": [-10.0, -10.0, -10.0]}
+
+    msg_no_bias = alerts._alert_low_soc_1pm(state_no_bias, "2026-07-02", now, c, Config(),
+                                            outlook=None, usage_forecast=forecast, store=object())
+    msg_biased  = alerts._alert_low_soc_1pm(state_biased, "2026-07-02", now, c, Config(),
+                                            outlook=None, usage_forecast=forecast, store=object())
+    assert msg_no_bias != msg_biased  # the learned correction must actually shift the shown number
+
+
+def test_low_soc_1pm_does_not_persist_sundown_pred(monkeypatch):
+    """The sundown projection here is display-only — writing sundown_pred_
+    would collide with (or get double-graded against) an explicit /sundown
+    ask made later the same day, which is meant to stay opt-in."""
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 2, 13, 0, 0)
+    c = _low_soc_current()
+    hours = [HourPrediction(dt=now + timedelta(hours=h), predicted_load_kw=1.0,
+                            predicted_solar_kw=3.0 if h < 4 else 0.0,
+                            net_kw=1.0, confidence="high")
+             for h in range(1, 8)]
+    forecast = UsageForecast(hours=hours, total_load_kwh=7.0, total_solar_kwh=12.0,
+                             net_kwh=7.0, peak_load_kw=1.0, confidence="high", data_days=30)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **kw: forecast)
+
+    state = {}
+    msg = alerts._alert_low_soc_1pm(state, "2026-07-02", now, c, Config(),
+                                    outlook=None, usage_forecast=forecast, store=object())
+    assert msg is not None
+    assert not any(k.startswith("sundown_pred_") for k in state)
+
+
+def test_low_soc_1pm_omits_sundown_line_without_store():
+    """Backward compatible: no store/forecast passed -> same behavior as
+    before this feature (no crash, no sundown line)."""
+    c = _low_soc_current()
+    now = datetime(2026, 7, 2, 13, 0, 0)
+    msg = alerts._alert_low_soc_1pm({}, "2026-07-02", now, c, Config())
+    assert msg is not None
+    assert "Projected @ sundown" not in msg
+
+
 # ── system_peak_kw EWMA (closes the P75-lag lead left after the hourly_bias fix) ──
 
 def test_system_peak_kw_none_below_3_samples():

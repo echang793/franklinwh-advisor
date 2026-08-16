@@ -906,7 +906,6 @@ class TelegramChatBot:
             cap = getattr(self._cfg, "battery_capacity_kwh", 13.6)
             c   = stats.current
             soc = c.battery_soc_pct
-            kwh = soc / 100.0 * cap
             now = datetime.now()
 
             from pathlib import Path
@@ -914,7 +913,8 @@ class TelegramChatBot:
             from .alerts import (_GHI_CLOUDY_THRESHOLD, _get_hourly_bias,
                                  _get_performance_ratio, _get_sundown_bias,
                                  _get_system_peak_kw, _load_peak_state,
-                                 _save_peak_state, _state_lock)
+                                 _predict_sundown_soc, _save_peak_state,
+                                 _state_lock)
             from .predictor import predict
 
             out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
@@ -943,24 +943,11 @@ class TelegramChatBot:
                     logger.exception("/sundown: live-anchored forecast failed")
                     live_forecast = forecast
 
-            # Last forecast hour today still expecting real solar — mirrors the
-            # sunrise-detection approach in alerts._alert_eod_digest, just for
-            # the trailing edge of the day instead of the leading edge.
-            today_sun_hours = [
-                h for h in live_forecast.hours
-                if h.dt > now and h.dt.date() == now.date() and h.predicted_solar_kw > 0.1
-            ]
-            if not today_sun_hours:
+            projection = _predict_sundown_soc(live_forecast, now, soc, cap)
+            if projection is None:
                 self._send(chat_id, "☀️ Looks like solar generation for today is already done (or not enough forecast data left today).")
                 return
-            sundown_dt = today_sun_hours[-1].dt
-
-            for h in live_forecast.hours:
-                if h.dt <= now or h.dt > sundown_dt:
-                    continue
-                kwh = max(0.0, min(cap, kwh + h.predicted_solar_kw - h.predicted_load_kw))
-
-            raw_pct = kwh / cap * 100.0
+            raw_pct, sundown_dt = projection
             # Learned additive correction from how past /sundown calls
             # actually did (state["sundown_bias_samples"], recorded by the
             # EOD digest's accuracy check) — 0.0 until >=3 graded samples

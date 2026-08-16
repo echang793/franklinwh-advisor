@@ -648,7 +648,10 @@ def _alert_grid_import(state: dict, today: str, now: datetime, c) -> str | None:
     )
 
 
-def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
+def _alert_low_soc_1pm(
+    state: dict, today: str, now: datetime, c, cfg: Config,
+    outlook=None, usage_forecast=None, store=None,
+) -> str | None:
     in_window = now.hour == 13
     if not in_window or c.battery_soc_pct >= 40.0:
         return None
@@ -662,12 +665,42 @@ def _alert_low_soc_1pm(state: dict, today: str, now: datetime, c, cfg: Config) -
     cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
     tte = _time_to_pct(c.battery_soc_pct, 0.0, cap, c.battery_use_kw)
     tte_str = f"⏱ ~{_fmt_hours(tte)} to empty · " if tte is not None else ""
+
+    # Same live-anchor + learned-bias projection /sundown uses (chatbot.py)
+    # — shown automatically here since "am I low at 1pm" is exactly the
+    # moment "will I make it to sundown" matters most. Display-only:
+    # doesn't write sundown_pred_, which stays opt-in to an explicit
+    # /sundown ask so this can't collide with (or double-grade against)
+    # one the user makes later the same day.
+    sundown_str = ""
+    live_forecast = usage_forecast
+    if store is not None and usage_forecast is not None:
+        try:
+            cloudy = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD if outlook else False
+            live_forecast = predict(
+                store, 24, outlook=outlook,
+                system_peak_kw=_get_system_peak_kw(state),
+                perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
+                hourly_bias=_get_hourly_bias(state),
+                current_load_kw=c.home_load_kw,
+            )
+        except Exception:
+            logger.exception("Low-SoC-1pm: live-anchored forecast failed")
+            live_forecast = usage_forecast
+    if live_forecast is not None:
+        projection = _predict_sundown_soc(live_forecast, now, c.battery_soc_pct, cap)
+        if projection is not None:
+            raw_pct, sundown_dt = projection
+            pred_pct = max(0.0, min(100.0, raw_pct + _get_sundown_bias(state)))
+            sundown_str = f"\n🌇 Projected @ sundown (~{sundown_dt.strftime('%-I:%M %p')}): ~{pred_pct:.0f}%"
+
     return (
         f"🟡 <b>FranklinWH: Battery low at {now.strftime('%-I:%M %p')}</b>\n"
         f"🔋 {_soc_bar(c.battery_soc_pct)} — grid import risk during 4–9 pm peak\n"
         f"Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW\n"
         + tte_str
         + "Consider switching to Emergency Backup to charge before peak."
+        + sundown_str
     )
 
 
@@ -851,6 +884,44 @@ def _predict_overnight_soc(
     night_net_kwh = sum(p.net_kw for p in night_hours)
     pred_pct      = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
     return pred_pct, checkpoint.strftime("%-I %p")
+
+
+def _predict_sundown_soc(
+    usage_forecast, now: datetime, soc: float, bat_cap: float,
+) -> tuple[float, datetime] | None:
+    """Raw predicted SoC at today's sundown (the forecast's last hour still
+    expecting meaningful solar), or None if there's no solar hour left
+    today. Returns (predicted_pct, sundown_dt) — a raw datetime, not a
+    pre-formatted label, since callers need it both for display
+    (`.strftime(...)`) and for persisting the prediction (`.isoformat()`).
+
+    Mirrors `_predict_overnight_soc`'s shape for the trailing edge of the
+    day instead of the leading edge — shared by the /sundown chatbot
+    command and the low-battery-at-1pm alert so both use identical
+    projection math instead of two implementations quietly drifting apart.
+    Intentionally just the raw walk-forward: callers are responsible for
+    live-anchoring the forecast they pass in and applying
+    `_get_sundown_bias`'s learned correction on top, same separation
+    `_predict_overnight_soc` keeps from its callers' EV charge-to-floor
+    logic.
+    """
+    if not (usage_forecast and usage_forecast.hours):
+        return None
+    today_sun_hours = [
+        h for h in usage_forecast.hours
+        if h.dt > now and h.dt.date() == now.date() and h.predicted_solar_kw > 0.1
+    ]
+    if not today_sun_hours:
+        return None
+    sundown_dt = today_sun_hours[-1].dt
+
+    kwh = soc / 100.0 * bat_cap
+    for h in usage_forecast.hours:
+        if h.dt <= now or h.dt > sundown_dt:
+            continue
+        kwh = max(0.0, min(bat_cap, kwh + h.predicted_solar_kw - h.predicted_load_kw))
+
+    return kwh / bat_cap * 100.0, sundown_dt
 
 
 def _alert_eod_digest(
@@ -2314,7 +2385,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("morning_preview",   lambda: _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store, cfg)),
             ("grid_import",       lambda: _alert_grid_import(state, today, now, c)),
             ("eb_ready",          lambda: _alert_eb_ready(state, today, now, c)),
-            ("low_soc_1pm",       lambda: _alert_low_soc_1pm(state, today, now, c, cfg)),
+            ("low_soc_1pm",       lambda: _alert_low_soc_1pm(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("low_morning_solar", lambda: _alert_low_morning_solar(state, today, now, c)),
             ("solar_stopped",     lambda: _alert_solar_stopped(state, today, now, c)),
             ("low_noon_soc",      lambda: _alert_low_noon_soc(state, today, now, c)),
