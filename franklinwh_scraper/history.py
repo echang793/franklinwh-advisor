@@ -250,6 +250,21 @@ class HistoryStore:
         ).fetchall()
         return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
 
+    def readings_between(
+        self, start_iso: str, end_iso: str
+    ) -> list[tuple[str, float, float, float]]:
+        """Return (timestamp, grid_use_kw, home_load_kw, solar_kw) for an
+        arbitrary ISO datetime range (not calendar-day-bound like
+        weekly_readings) — used to classify an overnight window (e.g.
+        digest time to next morning) that spans midnight.
+        """
+        rows = self._conn.execute(
+            "SELECT timestamp, grid_use_kw, home_load_kw, solar_kw FROM readings "
+            "WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+            (start_iso, end_iso),
+        ).fetchall()
+        return [(r[0], float(r[1]), float(r[2]), float(r[3])) for r in rows]
+
     def daily_solar_kwh(self, date_str: str) -> float:
         """Integrate actual solar production for a calendar date (trapezoidal).
 

@@ -2263,6 +2263,123 @@ def test_sundown_bias_uses_ewma():
     assert _get_sundown_bias(state) == _ewma(samples)
 
 
+# ── No-EV night classification (ground truth beats percentile guessing) ──
+
+class _NightStore:
+    """Minimal store for _classify_and_record_no_ev_night: just
+    readings_between, returning (timestamp, grid_use_kw, home_load_kw,
+    solar_kw) tuples."""
+    def __init__(self, rows):
+        self._rows = rows
+    def readings_between(self, start_iso, end_iso):
+        return [r for r in self._rows if start_iso <= r[0] < end_iso]
+
+
+def _night_current(soc):
+    import types
+    return types.SimpleNamespace(battery_soc_pct=soc)
+
+
+def test_no_ev_night_records_confirmed_no_ev_load(monkeypatch):
+    """SoC clearly above the floor -> confirmed no-EV night, real overnight
+    load recorded per hour."""
+    now = datetime(2026, 8, 20, 7, 45, 0)
+    rows = [
+        ((now - timedelta(hours=8)).isoformat(), 0.0, 0.35, 0.0),
+        ((now - timedelta(hours=7)).isoformat(), 0.0, 0.30, 0.0),
+        ((now - timedelta(hours=6)).isoformat(), 0.0, 0.40, 0.0),
+    ]
+    store = _NightStore(rows)
+    c = _night_current(soc=45.0)  # well above the 10% floor
+    state = {}
+    alerts._classify_and_record_no_ev_night(state, now, c, Config(ev_charge_floor_soc=10.0), store)
+
+    recorded_hours = [k for k in state if k.startswith("no_ev_load_h")]
+    assert recorded_hours  # at least one hour recorded
+    for k in recorded_hours:
+        assert len(state[k]) == 1
+
+
+def test_ev_night_at_floor_not_recorded():
+    """SoC at/near the floor -> skip, whether or not grid imported —
+    never recorded as a no-EV sample."""
+    now = datetime(2026, 8, 20, 7, 45, 0)
+    rows = [((now - timedelta(hours=6)).isoformat(), 1.5, 2.0, 0.0)] * 3  # grid imported
+    store = _NightStore(rows)
+    c = _night_current(soc=10.2)  # at the floor
+    state = {}
+    alerts._classify_and_record_no_ev_night(state, now, c, Config(ev_charge_floor_soc=10.0), store)
+    assert not any(k.startswith("no_ev_load_h") for k in state)
+
+
+def test_ambiguous_at_floor_without_grid_import_not_recorded():
+    """At the floor but no confirmed grid import — still skipped, not
+    guessed as no-EV just because we can't confirm it was an EV night."""
+    now = datetime(2026, 8, 20, 7, 45, 0)
+    rows = [((now - timedelta(hours=6)).isoformat(), 0.0, 0.35, 0.0)]
+    store = _NightStore(rows)
+    c = _night_current(soc=10.5)  # at the floor, within tolerance
+    state = {}
+    alerts._classify_and_record_no_ev_night(state, now, c, Config(ev_charge_floor_soc=10.0), store)
+    assert not any(k.startswith("no_ev_load_h") for k in state)
+
+
+def test_no_ev_night_skips_gracefully_without_store():
+    state = {}
+    alerts._classify_and_record_no_ev_night(
+        state, datetime(2026, 8, 20, 7, 45), _night_current(soc=50.0), Config(), None)
+    assert state == {}
+
+
+def test_get_no_ev_hourly_load_needs_min_samples():
+    state = {"no_ev_load_h3": [0.3, 0.32, 0.31, 0.29]}  # only 4, needs 5
+    assert 3 not in alerts._get_no_ev_hourly_load(state)
+
+    state["no_ev_load_h3"].append(0.30)
+    assert 3 in alerts._get_no_ev_hourly_load(state)
+
+
+def test_get_no_ev_hourly_load_uses_ewma():
+    samples = [0.30, 0.32, 0.28, 0.31, 0.29]
+    state = {"no_ev_load_h4": samples}
+    assert alerts._get_no_ev_hourly_load(state)[4] == alerts._ewma(samples)
+
+
+def test_apply_no_ev_overrides_replaces_matching_hours_only():
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 8, 20, 22, 0, 0)
+    hours = [
+        HourPrediction(dt=now + timedelta(hours=1), predicted_load_kw=2.0,
+                       predicted_solar_kw=0.0, net_kw=-2.0, confidence="high"),
+        HourPrediction(dt=now + timedelta(hours=2), predicted_load_kw=1.8,
+                       predicted_solar_kw=0.0, net_kw=-1.8, confidence="high"),
+    ]
+    fc = UsageForecast(hours=hours, total_load_kwh=3.8, total_solar_kwh=0.0,
+                       net_kwh=-3.8, peak_load_kw=2.0, confidence="high", data_days=30)
+
+    overridden_hour = (now + timedelta(hours=1)).hour
+    result = alerts._apply_no_ev_overrides(fc, {overridden_hour: 0.35})
+
+    changed = next(h for h in result.hours if h.dt.hour == overridden_hour)
+    unchanged = next(h for h in result.hours if h.dt.hour != overridden_hour)
+    assert changed.predicted_load_kw == 0.35
+    assert changed.net_kw == -0.35
+    assert unchanged.predicted_load_kw == 1.8  # not touched
+
+
+def test_apply_no_ev_overrides_noop_when_empty():
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 8, 20, 22, 0, 0)
+    hours = [HourPrediction(dt=now + timedelta(hours=1), predicted_load_kw=2.0,
+                            predicted_solar_kw=0.0, net_kw=-2.0, confidence="high")]
+    fc = UsageForecast(hours=hours, total_load_kwh=2.0, total_solar_kwh=0.0,
+                       net_kwh=-2.0, peak_load_kw=2.0, confidence="high", data_days=30)
+    result = alerts._apply_no_ev_overrides(fc, {})
+    assert result.hours[0].predicted_load_kw == 2.0
+
+
 def _low_soc_current(**over):
     import types
     cur = types.SimpleNamespace(

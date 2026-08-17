@@ -133,6 +133,111 @@ def _get_sundown_bias(state: dict) -> float:
     return _ewma(samples)
 
 
+_NO_EV_LOAD_MIN_SAMPLES = 5   # confirmed no-EV nights before an hour's ground truth is trusted
+_NO_EV_LOAD_CAP = 40          # ~a season of confirmed no-EV nights per hour
+_NO_EV_FLOOR_TOLERANCE = 1.0  # pt — how close to cfg.ev_charge_floor_soc counts as "at the floor"
+
+
+def _classify_and_record_no_ev_night(
+    state: dict, now: datetime, c, cfg: Config | None, store,
+) -> None:
+    """Classify last night using the user's own rule (confirmed 2026-08-16):
+    SoC at/near the EV-charge floor -> charged the EV, skip; SoC clearly
+    above the floor -> confirmed no-EV night, record real overnight load.
+
+    Ground truth beats guessing: _NO_EV_LOAD_PERCENTILE (P25) is a
+    statistical approximation that still fails when EV nights are a slim
+    majority of a small recent sample (see history.py's
+    _percentile_load_by_slot). A confirmed no-EV night is unambiguous —
+    once enough of them exist per hour, use the real number instead.
+
+    Records into state[f"no_ev_load_h{hour}"], bucketed by hour only (not
+    weekday) — the physical no-EV baseline (fridge, standby, etc.) isn't
+    weekday-dependent the way EV-charging habits are, so pooling across
+    all confirmed no-EV nights converges faster than splitting by weekday
+    would. Called once/morning from _alert_morning_preview.
+    """
+    if store is None:
+        return
+    floor = getattr(cfg, "ev_charge_floor_soc", 10.0)
+    soc = c.battery_soc_pct
+    if soc <= floor + _NO_EV_FLOOR_TOLERANCE:
+        # At/near the floor — either a confirmed EV night (if grid also
+        # imported) or ambiguous (hit the floor without importing, e.g.
+        # from unusually high non-EV load). Either way: not a clean no-EV
+        # sample, don't record it as one. The grid-import check only
+        # matters for this log line, not the skip decision itself.
+        try:
+            start = (now - timedelta(hours=12)).isoformat()
+            grid_imported = sum(
+                1 for _ts, grid_kw, _h, _s in store.readings_between(start, now.isoformat())
+                if grid_kw > 0.3
+            ) >= 2
+        except Exception:
+            grid_imported = None
+        logger.info(
+            "No-EV night classification: SoC %.0f%% at/near floor %.0f%% — %s, not recorded",
+            soc, floor,
+            "EV night (grid imported)" if grid_imported else "ambiguous (no confirmed grid import)",
+        )
+        return
+
+    try:
+        start = (now - timedelta(hours=12)).isoformat()
+        rows = store.readings_between(start, now.isoformat())
+    except Exception:
+        logger.exception("No-EV night classification: readings query failed")
+        return
+    if not rows:
+        return
+
+    by_hour: dict[int, list[float]] = {}
+    for ts, _grid_kw, home_kw, _solar_kw in rows:
+        try:
+            hr = datetime.fromisoformat(ts).hour
+        except ValueError:
+            continue
+        by_hour.setdefault(hr, []).append(home_kw)
+
+    for hr, vals in by_hour.items():
+        avg = sum(vals) / len(vals)
+        key = f"no_ev_load_h{hr}"
+        samples = state.get(key, [])
+        samples.append(round(avg, 3))
+        state[key] = samples[-_NO_EV_LOAD_CAP:]
+    logger.info("No-EV night confirmed (SoC %.0f%%) — recorded %d hour(s)", soc, len(by_hour))
+
+
+def _get_no_ev_hourly_load(state: dict) -> dict[int, float]:
+    """Return confirmed-no-EV-night learned load kW per hour (EWMA of
+    state[f"no_ev_load_h{h}"]), for hours with >=_NO_EV_LOAD_MIN_SAMPLES
+    confirmed samples. Empty until enough nights have been classified —
+    callers fall back to the percentile-based estimate until then.
+    """
+    out: dict[int, float] = {}
+    for h in range(24):
+        samples = state.get(f"no_ev_load_h{h}", [])
+        if len(samples) >= _NO_EV_LOAD_MIN_SAMPLES:
+            out[h] = _ewma(samples)
+    return out
+
+
+def _apply_no_ev_overrides(forecast, no_ev_hourly: dict[int, float]):
+    """Replace the percentile-based load estimate with the confirmed-no-EV
+    ground truth for any hour that has enough classified samples —
+    strictly better than a statistical guess once real data exists.
+    Mutates and returns the same forecast object (freshly built per call
+    by predict(), never cached/shared, so mutating in place is safe).
+    """
+    if not no_ev_hourly:
+        return forecast
+    for h in forecast.hours:
+        if h.dt.hour in no_ev_hourly:
+            h.predicted_load_kw = no_ev_hourly[h.dt.hour]
+            h.net_kw = round(h.predicted_solar_kw - h.predicted_load_kw, 2)
+    return forecast
+
+
 # ── Multi-channel alert dispatcher ───────────────────────────────────
 
 _MUTE_KEYBOARD = {"inline_keyboard": [[
@@ -569,6 +674,11 @@ def _alert_morning_preview(
                 f"\n🔋 7am SoC accuracy: predicted {pred_pct:.0f}%, "
                 f"actual {actual_pct:.0f}% ({delta:+.0f} pt)"
             )
+
+    # Classify last night as EV/no-EV using the user's own confirmed rule
+    # (2026-08-16) and, if confirmed no-EV, record real overnight load as
+    # ground truth for future "Without EV charging" predictions.
+    _classify_and_record_no_ev_night(state, now, c, cfg, store)
 
     if outlook:
         cal_samples = state.get("solar_cal_samples", [])
@@ -1063,6 +1173,9 @@ def _alert_eod_digest(
                 # line below — see _NO_EV_LOAD_PERCENTILE.
                 load_percentile=_NO_EV_LOAD_PERCENTILE,
             )
+            # Ground truth beats the percentile guess for any hour with
+            # enough confirmed no-EV nights — see _classify_and_record_no_ev_night.
+            digest_forecast = _apply_no_ev_overrides(digest_forecast, _get_no_ev_hourly_load(state))
         except Exception:
             # Never let the digest's live-anchor recompute take the whole
             # alert down — fall back to whatever forecast was passed in.

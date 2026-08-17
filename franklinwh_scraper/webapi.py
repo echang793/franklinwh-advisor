@@ -24,7 +24,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 
 from .alerts import (
+    _apply_no_ev_overrides,
     _get_hourly_bias,
+    _get_no_ev_hourly_load,
     _get_performance_ratio,
     _get_system_peak_kw,
     _GHI_CLOUDY_THRESHOLD,
@@ -400,6 +402,7 @@ def api_ev():
                                          system_peak_kw=sp, perf_ratio=pr,
                                          hourly_bias=hb, current_load_kw=r["home_load_kw"],
                                          load_percentile=_NO_EV_LOAD_PERCENTILE)
+                    without_fc = _apply_no_ev_overrides(without_fc, _get_no_ev_hourly_load(peak_state))
                     without_ov = _predict_overnight_soc(without_fc, now, soc, _BAT_CAP)
                     # Charge-to-floor, not fixed-kW-all-night — same model
                     # and rationale as alerts.py's _alert_eod_digest.
