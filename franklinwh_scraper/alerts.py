@@ -2201,20 +2201,17 @@ def _alert_heat_wave_prep(state: dict, today: str, now: datetime, c, outlook) ->
     )
 
 
-_EV_SOLAR_SURPLUS_KWH = 5.0  # tomorrow's forecast surplus above this = "free" EV charging window
-
-
 def _alert_ev_charge_window(
     state: dict, today: str, now: datetime, c, cfg: Config, outlook=None,
 ) -> str | None:
     """Evening: recommend the cheapest window to charge an EV.
 
-    Normally that's the fixed super-off-peak overnight window — but on a day
-    with a big predicted solar surplus tomorrow (the same signal
-    _alert_solar_surplus_overflow uses to flag solar going to waste), midday
-    charging from free solar beats even the cheapest grid rate.
+    Fixed super-off-peak overnight window. Only fires when cfg.ev_charging
+    is set. Advisory only.
 
-    Only fires when cfg.ev_charging is set. Advisory only.
+    (A "charge from solar tomorrow" surplus-day variant used to live here
+    too — dropped by request, the user already knows to do that on a big
+    solar day without a nightly reminder.)
     """
     if not getattr(cfg, "ev_charging", False):
         return None
@@ -2223,24 +2220,6 @@ def _alert_ev_charge_window(
     state["ev_charge_window_date"] = today
     kwh = getattr(cfg, "ev_kwh_per_session", 0.0) or 0.0
 
-    # Solar-surplus path: tomorrow's forecast exceeds a typical session's
-    # worth of charging — free beats cheap.
-    if outlook is not None:
-        sp = _get_system_peak_kw(state)
-        if sp is not None:
-            cloudy   = outlook.tomorrow_avg_ghi() < _GHI_CLOUDY_THRESHOLD
-            pr       = _get_performance_ratio(state, cloudy=cloudy)
-            tmrw_kwh = outlook.tomorrow_generation_kwh(sp, pr, _get_hourly_bias(state))
-            if not cloudy and tmrw_kwh >= _EV_SOLAR_SURPLUS_KWH:
-                logger.info("EV charge window alert (solar path) sent for %s", today)
-                return (
-                    f"☀️ <b>FranklinWH: Charge your EV from solar tomorrow</b>\n"
-                    f"Tomorrow's forecast: ~{tmrw_kwh:.1f} kWh solar — plenty of surplus expected. "
-                    f"Plug in mid-morning through early afternoon instead of overnight grid "
-                    f"charging; it's free instead of even the super-off-peak rate."
-                )
-
-    # Default path: cheapest grid window (super-off-peak overnight).
     sop = rate_at(now.replace(hour=1, minute=0, second=0, microsecond=0))
     onp = rate_at(now.replace(hour=17, minute=0, second=0, microsecond=0))
     cost_line = ""
