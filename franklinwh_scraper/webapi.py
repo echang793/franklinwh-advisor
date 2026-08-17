@@ -29,6 +29,7 @@ from .alerts import (
     _get_system_peak_kw,
     _GHI_CLOUDY_THRESHOLD,
     _load_peak_state,
+    _NO_EV_LOAD_PERCENTILE,
     _predict_overnight_soc,
 )
 from .advisor import _tou_eb_plan
@@ -397,7 +398,8 @@ def api_ev():
                     soc = r["battery_soc"]
                     without_fc = predict(history, 24, outlook=outlook,
                                          system_peak_kw=sp, perf_ratio=pr,
-                                         hourly_bias=hb, current_load_kw=r["home_load_kw"])
+                                         hourly_bias=hb, current_load_kw=r["home_load_kw"],
+                                         load_percentile=_NO_EV_LOAD_PERCENTILE)
                     without_ov = _predict_overnight_soc(without_fc, now, soc, _BAT_CAP)
                     # Charge-to-floor, not fixed-kW-all-night — same model
                     # and rationale as alerts.py's _alert_eod_digest.

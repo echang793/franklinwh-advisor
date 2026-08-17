@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -190,29 +189,55 @@ class HistoryStore:
         return {(int(r[0]), int(r[1])): int(r[2]) for r in rows}
 
     @staticmethod
-    def _median_load_by_slot(rows) -> LoadProfile:
-        """Median home_load_kw per (day_of_week, hour_of_day) from raw rows.
+    def _percentile(sorted_vals: list[float], pct: float) -> float:
+        """Linear-interpolated percentile (0.0-1.0), matching statistics.median
+        exactly at pct=0.5 (verified: averages the two middle values for even
+        n, same as statistics.median does)."""
+        n = len(sorted_vals)
+        if n == 1:
+            return sorted_vals[0]
+        idx = pct * (n - 1)
+        lo = int(idx)
+        hi = min(lo + 1, n - 1)
+        frac = idx - lo
+        return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
 
-        Median, not mean: home_load_kw includes EV charging draw, and EV
-        sessions are irregular/self-limited rather than every night — a
-        right-skewed minority of high-draw nights pulls the mean 2-3x above
-        what a typical no-EV night actually looks like (e.g. dow=6 hour=2
-        measured 0.31 kW median vs 0.67 kW mean, max 4.07 kW). That mean
-        inflation fed a -31pt overnight SoC-prediction miss on 2026-08-16.
-        Median is robust to that tail without needing to classify which
-        nights had EV charging.
+    @classmethod
+    def _percentile_load_by_slot(cls, rows, percentile: float = 0.5) -> LoadProfile:
+        """home_load_kw per (day_of_week, hour_of_day) from raw rows, at the
+        given percentile (default 0.5 = median).
+
+        Median, not mean, by default: home_load_kw includes EV charging
+        draw, and EV sessions are irregular/self-limited rather than every
+        night — a right-skewed minority of high-draw nights pulls the mean
+        2-3x above what a typical no-EV night actually looks like (e.g.
+        dow=6 hour=2 measured 0.31 kW median vs 0.67 kW mean, max 4.07 kW).
+        That mean inflation fed a -31pt overnight SoC-prediction miss on
+        2026-08-16.
+
+        But median alone isn't enough when EV nights are a *slim majority*
+        of a small recent sample: 2026-08-16/17 found a specific
+        (weekday, hour) slot where 2 of the only 3 recent occurrences of
+        that exact weekday were EV-charging nights — median sided with the
+        majority and read ~2 kW instead of the user's confirmed real
+        no-EV baseline of 0.2-0.4 kW/hr. Callers building a "without EV"
+        prediction specifically (not the general forecast used for
+        Emergency-Backup decisions, where realistic mixed expectations are
+        the whole point) pass a lower percentile — e.g. 0.25 — to reject
+        that kind of minority-but-real-recent contamination.
         """
         buckets: dict[tuple[int, int], list[float]] = {}
         for dow, hr, load in rows:
             buckets.setdefault((int(dow), int(hr)), []).append(float(load))
-        return {slot: statistics.median(vals) for slot, vals in buckets.items()}
+        return {slot: cls._percentile(sorted(vals), percentile) for slot, vals in buckets.items()}
 
-    def load_profile(self) -> LoadProfile:
-        """Return median home load kW keyed by (day_of_week, hour_of_day)."""
+    def load_profile(self, percentile: float = 0.5) -> LoadProfile:
+        """Return home load kW keyed by (day_of_week, hour_of_day) at the
+        given percentile (default 0.5 = median)."""
         rows = self._conn.execute(
             "SELECT day_of_week, hour_of_day, home_load_kw FROM readings"
         ).fetchall()
-        return self._median_load_by_slot(rows)
+        return self._percentile_load_by_slot(rows, percentile)
 
     def solar_profile(self) -> LoadProfile:
         """Return average solar production kW keyed by (day_of_week, hour_of_day)."""
@@ -444,10 +469,9 @@ class HistoryStore:
         ).fetchall()
         return {(int(r[0]), int(r[1])): int(r[2]) for r in rows}
 
-    def seasonal_load_profile(self, season: str) -> LoadProfile:
-        """Return median home load kW keyed by (day_of_week, hour_of_day) for one season.
-
-        Median for the same reason as `load_profile` — see `_median_load_by_slot`.
+    def seasonal_load_profile(self, season: str, percentile: float = 0.5) -> LoadProfile:
+        """Return home load kW keyed by (day_of_week, hour_of_day) for one
+        season, at the given percentile — see `_percentile_load_by_slot`.
         """
         months = self._season_months(season)
         placeholders = ",".join("?" * len(months))
@@ -459,7 +483,7 @@ class HistoryStore:
             """,
             months,
         ).fetchall()
-        return self._median_load_by_slot(rows)
+        return self._percentile_load_by_slot(rows, percentile)
 
     def seasonal_solar_profile(self, season: str) -> LoadProfile:
         """Average solar production kW keyed by (day_of_week, hour_of_day) for one season."""
@@ -476,20 +500,22 @@ class HistoryStore:
         ).fetchall()
         return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
 
-    def recent_load_profile(self, days: int) -> LoadProfile:
-        """Return median home load kW keyed by (day_of_week, hour_of_day) over the trailing N days.
+    def recent_load_profile(self, days: int, percentile: float = 0.5) -> LoadProfile:
+        """Return home load kW keyed by (day_of_week, hour_of_day) over the
+        trailing N days, at the given percentile.
 
         Weights a sustained recent change (new EV, HVAC swap) far more heavily
         than an all-time or seasonal average would, at the cost of more noise
         per slot — callers should blend with a longer baseline, not use alone.
-        Median for the same reason as `load_profile` — see `_median_load_by_slot`.
+        See `_percentile_load_by_slot` for why callers building a "without
+        EV" prediction should pass a percentile below 0.5.
         """
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         rows = self._conn.execute(
             "SELECT day_of_week, hour_of_day, home_load_kw FROM readings WHERE timestamp >= ?",
             (cutoff,),
         ).fetchall()
-        return self._median_load_by_slot(rows)
+        return self._percentile_load_by_slot(rows, percentile)
 
     def recent_solar_profile(self, days: int) -> LoadProfile:
         """Average solar production kW keyed by (day_of_week, hour_of_day) over the trailing N days."""

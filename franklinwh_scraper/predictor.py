@@ -63,6 +63,7 @@ def predict(
     avg_temp_c: float = 22.0,
     hourly_bias: dict[int, float] | None = None,
     current_load_kw: float | None = None,
+    load_percentile: float = 0.5,
 ) -> UsageForecast:
     """
     Predict home load and solar production for the next `horizon_hours` hours.
@@ -79,6 +80,14 @@ def predict(
     over _LOAD_NOWCAST_HALFLIFE_H so it fades out well before the
     overnight tail — it nudges the next couple hours, it doesn't assume
     tonight's unusual load holds until morning.
+    load_percentile: which percentile of the home_load_kw distribution to
+    use per (day_of_week, hour_of_day) slot — default 0.5 (median). Callers
+    building a "without EV" prediction pass something lower (e.g. 0.25):
+    median alone can still side with EV-charging nights when they're a
+    slim majority of a small recent sample (see
+    HistoryStore._percentile_load_by_slot). Leave at the default for the
+    general forecast (Emergency-Backup decisions, /sundown, general
+    dashboard) where realistic mixed expectations are the point.
     Confidence degrades with fewer data points per slot.
     """
     now        = datetime.now()
@@ -89,17 +98,17 @@ def predict(
     # fall back to all-time profiles to avoid sparse-bucket gaps.
     using_seasonal = store.days_in_season(season) >= _SEASON_MIN_DAYS
     if using_seasonal:
-        load_profile  = store.seasonal_load_profile(season)
+        load_profile  = store.seasonal_load_profile(season, load_percentile)
         solar_profile = store.seasonal_solar_profile(season)
     else:
-        load_profile  = store.load_profile()
+        load_profile  = store.load_profile(load_percentile)
         solar_profile = store.solar_profile()
 
     # Blend in a recency-weighted profile per slot so a sustained recent change
     # (new EV, HVAC swap) shows up in days rather than being diluted by months
     # of older seasonal/all-time data — same idea as the solar-forecast EWMA fix.
     recent_counts = store.recent_slot_counts(_RECENT_WINDOW_DAYS)
-    recent_load   = store.recent_load_profile(_RECENT_WINDOW_DAYS)
+    recent_load   = store.recent_load_profile(_RECENT_WINDOW_DAYS, load_percentile)
     recent_solar  = store.recent_solar_profile(_RECENT_WINDOW_DAYS)
     for slot, n in recent_counts.items():
         if n < _RECENT_MIN_SLOT_SAMPLES:

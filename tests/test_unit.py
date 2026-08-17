@@ -176,6 +176,65 @@ def test_load_profile_uses_median_not_mean(tmp_path):
     assert profile[(6, 2)] == pytest.approx(0.3)  # median: the typical night, not dragged up
 
 
+def test_load_profile_percentile_survives_a_minority_ev_majority(tmp_path):
+    """Regression for the 2026-08-16/17 follow-up: median alone still fails
+    when EV nights are a *slim majority* of a small recent sample — real
+    case was 2 of only 3 recent occurrences of one weekday being EV
+    nights, which pulled the median itself up to ~2kW instead of the
+    user's confirmed 0.2-0.4kW no-EV baseline. A lower percentile (0.25)
+    must side with the minority-but-real no-EV nights instead."""
+    db = HistoryStore(tmp_path / "h.db")
+
+    def _insert(load_kw: float, day: int, n: int):
+        base = datetime(2026, 8, 2, 0, 0) + timedelta(days=day)
+        for i in range(n):
+            ts = base + timedelta(minutes=5 * i)
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (ts.isoformat(), 0, 0, load_kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+            )
+
+    # 1 real no-EV Monday (~0.35 kW), 2 EV-charging Mondays (~2.1-2.5 kW) —
+    # matches the actual Jul27/Aug3/Aug10 data exactly.
+    _insert(0.35, 0, 12)
+    _insert(2.5, 7, 12)
+    _insert(2.1, 14, 9)
+    db._conn.commit()
+
+    default_profile = db.load_profile()          # median (0.5) — sides with the 2-of-3 majority
+    no_ev_profile    = db.load_profile(0.25)      # low percentile — sides with the real no-EV night
+    assert default_profile[(0, 0)] > 1.5
+    assert no_ev_profile[(0, 0)] == pytest.approx(0.35, abs=0.01)
+
+
+def test_predict_load_percentile_produces_lower_no_ev_forecast(tmp_path):
+    """predict()'s load_percentile param must actually reach the load
+    profile lookups (both the base and the recent-window blend)."""
+    db = HistoryStore(tmp_path / "h.db")
+    future = datetime.now() + timedelta(hours=1)
+    slot_dow, slot_hour = future.weekday(), future.hour
+
+    def _insert(ts: datetime, load_kw: float):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts.isoformat(), slot_dow, slot_hour, load_kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0),
+        )
+
+    for i in range(10):
+        _insert(datetime.now() - timedelta(days=1 + i), 3.0 if i < 6 else 0.3)  # 6-of-10 EV nights (majority)
+    db._conn.commit()
+
+    median_forecast = predict(db, horizon_hours=2)
+    no_ev_forecast   = predict(db, horizon_hours=2, load_percentile=0.25)
+    median_pred = next(p for p in median_forecast.hours if p.dt.hour == slot_hour).predicted_load_kw
+    no_ev_pred  = next(p for p in no_ev_forecast.hours if p.dt.hour == slot_hour).predicted_load_kw
+    assert no_ev_pred < median_pred
+
+
 def test_day_range_query_boundaries(tmp_path):
     """Regression guard for the substr(timestamp) -> timestamp range rewrite:
     a reading exactly at midnight of the day *after* end_date must be excluded,

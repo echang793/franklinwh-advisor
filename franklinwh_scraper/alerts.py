@@ -56,6 +56,17 @@ def _get_system_peak_kw(state: dict) -> float | None:
 
 _GHI_CLOUDY_THRESHOLD = 300  # W/m² avg over 12h — below this = dim/cloudy day
 
+# Load percentile for "without EV" predictions (EOD digest, /api/ev's
+# without_ev_pct tile) — see predict()'s load_percentile docstring and
+# HistoryStore._percentile_load_by_slot for why 0.5 (median) alone isn't
+# enough: it can still side with EV-charging nights when they're a slim
+# majority of a small recent sample (2026-08-16/17: 2 of 3 recent
+# occurrences of one weekday were EV nights, median read ~2kW instead of
+# the user's confirmed 0.2-0.4kW no-EV baseline). NOT used for the general
+# forecast (Emergency-Backup decisions, /sundown) — those want realistic
+# mixed expectations, not the no-EV floor.
+_NO_EV_LOAD_PERCENTILE = 0.25
+
 
 _soc_bar     = soc_bar
 _time_to_pct = time_to_pct
@@ -1048,6 +1059,9 @@ def _alert_eod_digest(
                 avg_temp_c=outlook.avg_temp_c(24) if outlook else 22.0,
                 hourly_bias=_get_hourly_bias(state),
                 current_load_kw=c.home_load_kw,
+                # This forecast only feeds the "Without EV charging" 7am
+                # line below — see _NO_EV_LOAD_PERCENTILE.
+                load_percentile=_NO_EV_LOAD_PERCENTILE,
             )
         except Exception:
             # Never let the digest's live-anchor recompute take the whole
