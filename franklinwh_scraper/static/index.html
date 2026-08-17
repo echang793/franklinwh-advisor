@@ -30,6 +30,9 @@ body{min-height:100vh;background:radial-gradient(1200px 600px at 70% -10%, #0d1a
 .focusbtn{position:absolute;top:6px;right:36px;font-size:12px;color:#3f5244;cursor:pointer;z-index:6;padding:2px 6px;user-select:none;}
 .focusbtn:hover{color:#57e389;}
 .focusbtn.on{color:#57e389;}
+.widebtn{position:absolute;top:6px;right:60px;font-size:12px;color:#3f5244;cursor:pointer;z-index:6;padding:2px 6px;user-select:none;}
+.widebtn:hover{color:#57e389;}
+.widebtn.on{color:#57e389;}
 .chip{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;padding:5px 11px;border-radius:999px;border:1px solid #1c2a1e;background:transparent;color:#5f7263;cursor:pointer;transition:all .25s;}
 .chip.on{background:rgba(87,227,137,.12);border-color:#2e5c3a;color:#57e389;}
 .simchip{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.08em;color:#f5b942;background:rgba(245,185,66,.06);border:1px solid #4a3a12;border-radius:999px;padding:7px 14px;cursor:pointer;}
@@ -42,8 +45,14 @@ body{min-height:100vh;background:radial-gradient(1200px 600px at 70% -10%, #0d1a
 .tabbtn.on{background:rgba(87,227,137,.12);border-color:#2e5c3a;color:#57e389;}
 .tile{background:#0c130d;border:1px solid #18261b;border-radius:10px;padding:14px;}
 pre.digest{font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.7;color:#9db8a2;background:#0c130d;border:1px solid #18261b;border-radius:10px;padding:14px;margin:12px 0 0 0;overflow-x:auto;}
-@media (max-width:919px){.grip{font-size:17px}.hidebtn,.focusbtn{font-size:15px}}
+@media (max-width:919px){.grip{font-size:17px}.hidebtn,.focusbtn,.widebtn{font-size:15px}}
 input[type=range]{accent-color:#57e389;height:14px;cursor:pointer;}
+@media print{
+body{background:#fff;}
+.grip,.hidebtn,.focusbtn,.widebtn,#toolbar,#sticky,#hints,#dragpill,#minimap,#dropind,#hd-unread,#managebd,#managemodal{display:none !important;}
+[data-panel]{display:block !important;grid-column:auto !important;break-inside:avoid;margin-bottom:16px;outline:none !important;}
+*{animation:none !important;box-shadow:none !important;}
+}
 </style>
 </head>
 <body>
@@ -99,6 +108,15 @@ input[type=range]{accent-color:#57e389;height:14px;cursor:pointer;}
 </div>
 <div id="dropind" style="display:none;position:fixed;height:4px;border-radius:999px;background:#57e389;box-shadow:0 0 14px rgba(87,227,137,.8);z-index:60;pointer-events:none;transition:top .18s ease, left .18s ease, width .18s ease;"></div>
 
+<div id="managebd" style="display:none;position:fixed;inset:0;z-index:80;background:rgba(4,7,5,.72);backdrop-filter:blur(2px);"></div>
+<div id="managemodal" style="display:none;position:fixed;z-index:81;top:50%;left:50%;transform:translate(-50%,-50%);width:min(480px,92vw);max-height:80vh;overflow-y:auto;background:#101711;border:1px solid #1c2a1e;border-radius:16px;padding:22px;box-shadow:0 24px 60px rgba(0,0,0,.6);animation:rise .3s ease-out;">
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <div class="plabel" style="color:#57e389;">MANAGE PANELS</div>
+    <span id="manage-close" style="cursor:pointer;color:#5f7263;font-size:14px;" title="Close">✕</span>
+  </div>
+  <div id="manage-list" style="display:flex;flex-direction:column;gap:8px;margin-top:16px;"></div>
+</div>
+
 <div id="banner-outage" style="display:none;max-width:1240px;margin:18px auto 0 auto;padding:0 24px;">
   <div style="background:linear-gradient(90deg,#2a0d0a,#1c0b08);border:1px solid #6e2019;border-radius:16px;padding:18px 24px;display:flex;flex-wrap:wrap;align-items:center;gap:18px;animation:rise .5s cubic-bezier(.2,.9,.3,1.2);">
     <span style="font-size:26px;">🔴</span>
@@ -145,7 +163,7 @@ const S = {
   forecast: [], cc: 0, scrubIdx: -1,
   eb: null, rec: null, acc: [], tou: null, bill: null,
   tab: 0, focusId: null, flashId: null, narrow: window.innerWidth < 920,
-  spans: {}, dragId: null, pending: null,
+  spans: {}, dragId: null, pending: null, presetSel: null,
   // demo
   simTime: new Date(), speed: 1, jumped: false, outage: false, modeApplied: false, applying: false,
 };
@@ -169,10 +187,11 @@ function mkPanel(id, inner){
   const s = document.createElement('section');
   s.dataset.panel = id;
   s.className = 'card';
-  s.innerHTML = `<span class="grip" title="Drag to rearrange">⠿</span><span class="hidebtn" title="Hide panel">✕</span><span class="focusbtn" title="Expand / collapse panel">⤢</span>` + inner;
+  s.innerHTML = `<span class="grip" title="Drag to rearrange">⠿</span><span class="hidebtn" title="Hide panel">✕</span><span class="focusbtn" title="Expand / collapse panel">⤢</span><span class="widebtn" title="Widen to span both columns">⤡</span>` + inner;
   s.querySelector('.grip').addEventListener('pointerdown', e => startDrag(id, e));
   s.querySelector('.hidebtn').addEventListener('click', e => { e.stopPropagation(); hidePanel(id, true); });
   s.querySelector('.focusbtn').addEventListener('click', e => { e.stopPropagation(); flip(() => { S.focusId = S.focusId === id ? null : id; }); });
+  s.querySelector('.widebtn').addEventListener('click', e => { e.stopPropagation(); toggleWide(id); });
   grid.appendChild(s);
   return s;
 }
@@ -408,11 +427,17 @@ function buildToolbar(){
       [['⏸',0],['1×',1],['60×',60]].forEach(([l,v]) => { const b = document.createElement('button'); b.className = 'chip' + (S.speed===v?' on':''); b.textContent = l; b.addEventListener('click', () => { S.speed = v; buildToolbar(); }); sp.appendChild(b); });
       const ob = addBtn('mono', S.outage ? '🟢 RESTORE GRID' : '🔌 SIMULATE GRID OUTAGE', toggleOutage);
       ob.style.cssText = 'font-size:11px;letter-spacing:.08em;color:' + (S.outage?'#57e389':'#ff8a7a') + ';background:rgba(240,90,80,.05);border:1px solid #4a1c18;border-radius:999px;padding:7px 14px;cursor:pointer;';
+      addBtn('toolbtn', '⚙ MANAGE', openManage);
+      addPresetSelect(tb);
       addBtn('toolbtn', '⟲ RESET LAYOUT', resetLayout);
+      addBtn('toolbtn', '🖨 PRINT', () => window.print());
       addBtn('snapbtn', snapMsg || '📸 SNAPSHOT', snapshot);
     }
   } else {
+    addBtn('toolbtn', '⚙ MANAGE', openManage);
+    addPresetSelect(tb);
     addBtn('toolbtn', '⟲ RESET LAYOUT', resetLayout);
+    addBtn('toolbtn', '🖨 PRINT', () => window.print());
     addBtn('snapbtn', snapMsg || '📸 SNAPSHOT', snapshot);
   }
   const hidden = getHidden();
@@ -420,6 +445,34 @@ function buildToolbar(){
     const sp = document.createElement('span'); sp.className = 'mono'; sp.style.cssText = 'font-size:10px;letter-spacing:.14em;color:#5f7263;margin-left:6px;'; sp.textContent = 'HIDDEN:'; tb.appendChild(sp);
     hidden.forEach(id => { const b = document.createElement('button'); b.style.cssText = "font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;padding:4px 10px;border-radius:999px;border:1px dashed #2e5c3a;background:transparent;color:#7d937f;cursor:pointer;"; b.textContent = PANEL_LABELS[id] + ' +'; b.title = 'Show panel'; b.addEventListener('click', () => hidePanel(id, false)); tb.appendChild(b); });
   }
+}
+// View presets — curated hidden-panel sets. Any manual show/hide (via
+// hidePanel) clears S.presetSel back to null (CUSTOM); these two are the
+// only preset options besides the built-in "show everything".
+const PRESETS = {
+  storm:   { label: '⚡ STORM WATCH',   visible: ['battery','flow','alerts','touclock','ebplan'] },
+  billing: { label: '💵 BILLING FOCUS', visible: ['bill','digests','accuracy','mode','history'] },
+};
+function applyPreset(key){
+  if (key === 'all') { localStorage.setItem('fwh-dash-hidden', '[]'); S.presetSel = 'all'; }
+  else if (PRESETS[key]) {
+    const vis = new Set(PRESETS[key].visible);
+    localStorage.setItem('fwh-dash-hidden', JSON.stringify(PANEL_IDS.filter(id => !vis.has(id))));
+    S.presetSel = key;
+  }
+  applyPanelStyles(); buildToolbar();
+}
+function addPresetSelect(tb){
+  const sel = document.createElement('select');
+  sel.className = 'mono';
+  sel.style.cssText = "font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.1em;color:#7d937f;background:#0c130d;border:1px solid #1c2a1e;border-radius:999px;padding:7px 12px;cursor:pointer;";
+  sel.innerHTML = `<option value="custom">VIEW: CUSTOM</option>
+    <option value="storm">${PRESETS.storm.label}</option>
+    <option value="billing">${PRESETS.billing.label}</option>
+    <option value="all">◎ ALL PANELS</option>`;
+  sel.value = S.presetSel || 'custom';
+  sel.addEventListener('change', e => { if (e.target.value === 'custom') { e.target.value = S.presetSel || 'custom'; return; } applyPreset(e.target.value); });
+  tb.appendChild(sel);
 }
 let snapMsg = null;
 function snapshot(){
@@ -452,23 +505,27 @@ function migrateLayout(saved){
 }
 let layout = (() => { try { return migrateLayout(JSON.parse(localStorage.getItem('fwh-dash-cols'))); } catch(e){} return defaultLayout(); })();
 function getHidden(){ try { const h = JSON.parse(localStorage.getItem('fwh-dash-hidden')); if (Array.isArray(h)) return h.filter(id => PANEL_IDS.includes(id)); } catch(e){} return []; }
-function hidePanel(id, on){ const h = getHidden().filter(x => x !== id); if (on) h.push(id); localStorage.setItem('fwh-dash-hidden', JSON.stringify(h)); applyPanelStyles(); buildToolbar(); }
+function hidePanel(id, on){ const h = getHidden().filter(x => x !== id); if (on) h.push(id); localStorage.setItem('fwh-dash-hidden', JSON.stringify(h)); S.presetSel = null; applyPanelStyles(); buildToolbar(); }
+function getWide(){ try { const w = JSON.parse(localStorage.getItem('fwh-dash-wide')); if (Array.isArray(w)) return w.filter(id => PANEL_IDS.includes(id)); } catch(e){} return []; }
+function toggleWide(id){ const w = getWide(); const i = w.indexOf(id); if (i >= 0) w.splice(i, 1); else w.push(id); localStorage.setItem('fwh-dash-wide', JSON.stringify(w)); applyPanelStyles(); }
 function applyLayout(l){ layout = l; localStorage.setItem('fwh-dash-cols', JSON.stringify(l)); }
 function applyPanelStyles(){
-  const hidden = getHidden();
+  const hidden = getHidden(), wide = getWide();
   PANEL_IDS.forEach(id => {
     const el = grid.querySelector(`[data-panel="${id}"]`);
     const li = layout.left.indexOf(id);
     const c = li >= 0 ? 1 : 2;
     const idx = li >= 0 ? li : layout.right.indexOf(id);
     const foc = S.focusId === id;
+    const wid = !foc && wide.includes(id);
     el.style.display = hidden.includes(id) ? 'none' : 'block';
     el.style.order = foc ? -1 : idx * 2 + (c === 2 ? 1 : 0);
-    el.style.gridColumn = foc ? '1 / -1' : (S.narrow ? 'auto' : String(c));
+    el.style.gridColumn = (foc || (wid && !S.narrow)) ? '1 / -1' : (S.narrow ? 'auto' : String(c));
     el.style.gridRowEnd = 'span ' + (S.spans[id] || 50);
     el.style.outline = S.flashId === id ? '3px solid #57e389' : S.dragId === id ? '2px dashed #57e389' : (foc ? '1px solid #2e5c3a' : '0 solid transparent');
     el.style.outlineOffset = '2px';
     el.querySelector('.focusbtn').classList.toggle('on', foc);
+    el.querySelector('.widebtn').classList.toggle('on', wid);
   });
 }
 function flip(mutate){
@@ -489,7 +546,53 @@ function flip(mutate){
     });
   });
 }
-function resetLayout(){ localStorage.setItem('fwh-dash-hidden','[]'); flip(() => applyLayout(defaultLayout())); buildToolbar(); }
+function resetLayout(){ localStorage.setItem('fwh-dash-hidden','[]'); S.presetSel = null; flip(() => applyLayout(defaultLayout())); buildToolbar(); }
+
+// ── Manage-panels modal — keyboard/screen-reader alternative to drag ──
+function openManage(){ renderManage(); $('managebd').style.display = 'block'; $('managemodal').style.display = 'block'; }
+function closeManage(){ $('managebd').style.display = 'none'; $('managemodal').style.display = 'none'; }
+function isManageOpen(){ return $('managemodal').style.display === 'block'; }
+$('managebd').addEventListener('click', closeManage);
+$('manage-close').addEventListener('click', closeManage);
+function renderManage(){
+  const hidden = getHidden();
+  const rows = [];
+  ['left','right'].forEach(col => layout[col].forEach((id, idx) => rows.push({ id, col, idx, count: layout[col].length })));
+  const list = $('manage-list');
+  list.innerHTML = '';
+  rows.forEach(r => {
+    const isHidden = hidden.includes(r.id);
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;background:#0c130d;border:1px solid #18261b;border-radius:10px;padding:8px 12px;';
+    row.innerHTML = `
+      <span class="mono" style="flex:1;font-size:11px;letter-spacing:.08em;color:${isHidden?'#4c5f50':'#cfe8d4'};">${PANEL_LABELS[r.id]}</span>
+      <span class="mono" style="font-size:9px;letter-spacing:.08em;color:#5f7263;">COL ${r.col==='left'?'1':'2'}</span>
+      <button data-act="up" class="chip" style="padding:4px 8px;" title="Move up" ${r.idx===0?'disabled':''}>↑</button>
+      <button data-act="down" class="chip" style="padding:4px 8px;" title="Move down" ${r.idx===r.count-1?'disabled':''}>↓</button>
+      <button data-act="swap" class="chip" style="padding:4px 8px;" title="Move to other column">⇄</button>
+      <button data-act="hide" class="chip${isHidden?' on':''}" style="padding:4px 8px;">${isHidden?'SHOW':'HIDE'}</button>`;
+    row.querySelector('[data-act="up"]').addEventListener('click', () => moveInCol(r.id, r.col, -1));
+    row.querySelector('[data-act="down"]').addEventListener('click', () => moveInCol(r.id, r.col, 1));
+    row.querySelector('[data-act="swap"]').addEventListener('click', () => swapCol(r.id, r.col));
+    row.querySelector('[data-act="hide"]').addEventListener('click', () => { hidePanel(r.id, !isHidden); renderManage(); });
+    list.appendChild(row);
+  });
+}
+function moveInCol(id, col, dir){
+  const arr = layout[col].slice();
+  const i = arr.indexOf(id), j = i + dir;
+  if (i < 0 || j < 0 || j >= arr.length) return;
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+  flip(() => applyLayout(Object.assign({}, layout, { [col]: arr })));
+  renderManage();
+}
+function swapCol(id, col){
+  const to = col === 'left' ? 'right' : 'left';
+  const fromArr = layout[col].filter(x => x !== id);
+  const toArr = layout[to].concat([id]);
+  flip(() => applyLayout(Object.assign({}, layout, { [col]: fromArr, [to]: toArr })));
+  renderManage();
+}
 
 const spanRO = new ResizeObserver(entries => {
   let changed = false;
@@ -576,7 +679,7 @@ function jumpToPanel(cat){
 window.addEventListener('resize', () => { const n = window.innerWidth < 920; if (n !== S.narrow) { S.narrow = n; applyPanelStyles(); } });
 window.addEventListener('keydown', e => {
   if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
-  if (e.key === 'Escape') { if (S.dragId) cancelDrag(); else if (S.focusId) flip(() => { S.focusId = null; }); }
+  if (e.key === 'Escape') { if (isManageOpen()) closeManage(); else if (S.dragId) cancelDrag(); else if (S.focusId) flip(() => { S.focusId = null; }); }
   // Scoped to the hovered panel — arrow keys used to hijack page scroll
   // globally even when no chart-scrubbable panel was in view at all.
   else if (e.key === 'ArrowRight' && hoverId === 'forecast') { e.preventDefault(); S.scrubIdx = Math.min(11, (S.scrubIdx < 0 ? -1 : S.scrubIdx) + 1); renderForecast(); }
@@ -816,9 +919,10 @@ function renderAccuracy(){
   const mx = Math.max(...days.map(d => Math.max(d.predicted, d.actual)), 1);
   $('acc-bars').innerHTML = days.map(d => {
     const dl = d.predicted > 0 ? (d.actual - d.predicted)/d.predicted*100 : 0;
-    const col = Math.abs(dl) > errTh ? '#f5b942' : '#57e389';
+    const beyond = Math.abs(dl) > errTh;
+    const col = beyond ? '#f5b942' : '#57e389';
     return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:5px;height:100%;">
-      <div class="mono" style="font-size:9px;color:${col};">${dl>=0?'+':''}${dl.toFixed(0)}%</div>
+      <div class="mono" style="font-size:9px;color:${col};">${beyond?'⚠ ':''}${dl>=0?'+':''}${dl.toFixed(0)}%</div>
       <div style="display:flex;align-items:flex-end;gap:3px;width:100%;justify-content:center;flex:1;">
         <div style="width:38%;height:${Math.round(d.predicted/mx*64)}px;border:1px solid #2e5c3a;border-radius:3px 3px 0 0;background:transparent;"></div>
         <div style="width:38%;height:${Math.round(d.actual/mx*64)}px;border-radius:3px 3px 0 0;background:linear-gradient(180deg,#57e389,#1f7a44);"></div>
