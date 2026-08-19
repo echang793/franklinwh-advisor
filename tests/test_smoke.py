@@ -104,9 +104,10 @@ def test_eod_digest_includes_tomorrow_solar(tmp_path):
 def test_eod_digest_format_locked(tmp_path):
     """Regression lock for the daily-summary format: no backup-hours line,
     predicted/actual/delta right-aligned to a fixed width, and the SoC
-    checkpoint fixed at 7 AM (was tied to the forecasted sunrise hour until
-    the user asked for a fixed checkpoint on 2026-08-15) — see conversation
-    2026-07-17."""
+    checkpoint anchored to real sunrise (falls back to a fixed 7:00 AM
+    here since no outlook is passed — see _next_sunrise_after). Was a
+    fixed 7 AM checkpoint from 2026-08-15 until the user asked to tie it
+    back to real sunrise on 2026-08-17 ahead of the DST change."""
     now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
     checkpoint = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
     hours = [
@@ -124,7 +125,7 @@ def test_eod_digest_format_locked(tmp_path):
     msg = alerts._alert_eod_digest(state, now.strftime("%Y-%m-%d"), now, stats, cfg, None, forecast)
     assert msg is not None
     assert "Backup:" not in msg
-    assert "Predicted SoC @ 7 AM:" in msg
+    assert "Predicted SoC @ 7:00 AM:" in msg
     assert "  Predicted: 100.0 kWh" in msg
     assert "  Actual:     30.0 kWh" in msg  # right-aligned to width 5 — extra space vs "100.0"
     assert "  Delta:     -70.0 kWh" in msg  # "-70.0" is already 5 chars, no extra pad

@@ -3,7 +3,7 @@
 import logging
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import requests
 
@@ -83,6 +83,20 @@ class HourlyForecast:
 class SolarOutlook:
     hours: list[HourlyForecast]
     utc_offset_seconds: int = 0  # panel location's UTC offset, from Open-Meteo
+    # One per forecast day (~2 days), local to the panel's timezone (same
+    # timezone=auto convention as `hours`). Used to target the "Without EV"
+    # prediction / morning-preview window at real sunrise instead of a
+    # fixed clock hour — DST-proof by construction (2026-08-17).
+    sunrise_times: list[datetime] = field(default_factory=list)
+
+    def sunrise_on(self, d) -> datetime | None:
+        """Sunrise datetime for date `d` (a date or datetime), or None if
+        outside the ~2-day forecast window this outlook covers."""
+        target = d.date() if isinstance(d, datetime) else d
+        for t in self.sunrise_times:
+            if t.date() == target:
+                return t
+        return None
 
     def _local_now(self) -> datetime:
         """'Now' in the panel location's timezone, not the machine's.
@@ -252,6 +266,7 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
                 "latitude": lat,
                 "longitude": lon,
                 "hourly": "direct_radiation,diffuse_radiation,cloud_cover,temperature_2m,wind_speed_10m",
+                "daily": "sunrise",
                 "forecast_days": 2,
                 "timezone": "auto",
             }, timeout=timeout)
@@ -280,8 +295,15 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
             wind_speed_ms=winds[i] if i < len(winds) and winds[i] is not None else 0.0,
         ))
 
+    sunrise_times = [
+        datetime.fromisoformat(s) for s in js.get("daily", {}).get("sunrise", []) if s
+    ]
+
     logger.debug("Fetched %d hourly forecasts for %.4f, %.4f", len(hours), lat, lon)
-    return SolarOutlook(hours=hours, utc_offset_seconds=js.get("utc_offset_seconds", 0))
+    return SolarOutlook(
+        hours=hours, utc_offset_seconds=js.get("utc_offset_seconds", 0),
+        sunrise_times=sunrise_times,
+    )
 
 
 # ── Cached fetch (shared by every caller — alerts, cli, webapi, chatbot) ────

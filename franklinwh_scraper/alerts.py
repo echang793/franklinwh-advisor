@@ -639,7 +639,12 @@ def _alert_morning_preview(
     state: dict, today: str, now: datetime, c,
     outlook, usage_forecast, store, cfg: Config | None = None,
 ) -> str | None:
-    in_window = (now.hour == 7 and now.minute >= 30) or now.hour == 8
+    # Anchored to real sunrise, not a fixed clock hour — DST-proof by
+    # construction (2026-08-17, per direct request ahead of the fall time
+    # change). Same ~90min window width as the old fixed 7:30-8:59am slot,
+    # just anchored at sunrise instead of 30min after a hardcoded 7am.
+    sunrise = _sunrise_on(now.date(), now, outlook)
+    in_window = sunrise <= now < sunrise + timedelta(minutes=90)
     if not in_window or state.get("morning_preview_date") == today:
         return None
 
@@ -676,8 +681,11 @@ def _alert_morning_preview(
     soc      = c.battery_soc_pct
     solar_kw = c.solar_production_kw
 
-    # 7am SoC prediction accuracy — pop (not peek) so a missed/late morning
-    # preview can't compare the same night's prediction twice.
+    # Sunrise SoC prediction accuracy — pop (not peek) so a missed/late
+    # morning preview can't compare the same night's prediction twice.
+    # Key is still "soc_7am_pred_" for backward compat with state written
+    # before the fixed-7am -> sunrise switch (2026-08-17); the stored `dt`
+    # itself is the real sunrise time regardless of the key's name.
     soc_7am_acc_str = ""
     soc_7am_pred = state.pop(f"soc_7am_pred_{today}", None)
     if soc_7am_pred:
@@ -685,21 +693,21 @@ def _alert_morning_preview(
         pred_dt  = datetime.fromisoformat(soc_7am_pred["dt"])
         actual_pct = store.soc_near(soc_7am_pred["dt"]) if store is not None else None
         if actual_pct is None:
-            # No reading landed within soc_near's +/-30min window around 7am
-            # — fall back to right-now's reading rather than silently
-            # dropping the comparison, but label it as not directly
-            # comparable (mirrors the /sundown fallback).
+            # No reading landed within soc_near's +/-30min window around
+            # sunrise — fall back to right-now's reading rather than
+            # silently dropping the comparison, but label it as not
+            # directly comparable (mirrors the /sundown fallback).
             actual_pct = soc
             delta = actual_pct - pred_pct
             soc_7am_acc_str = (
-                f"\n🔋 7am SoC accuracy: predicted {pred_pct:.0f}% — "
+                f"\n🔋 Sunrise SoC accuracy: predicted {pred_pct:.0f}% — "
                 f"no reading near {pred_dt.strftime('%-I:%M %p')}, using now's "
                 f"{actual_pct:.0f}% instead ({delta:+.0f} pt, not directly comparable)."
             )
         else:
             delta = actual_pct - pred_pct
             soc_7am_acc_str = (
-                f"\n🔋 7am SoC accuracy: predicted {pred_pct:.0f}%, "
+                f"\n🔋 Sunrise SoC accuracy: predicted {pred_pct:.0f}%, "
                 f"actual {actual_pct:.0f}% ({delta:+.0f} pt)"
             )
 
@@ -1016,25 +1024,57 @@ def _predict_overnight_soc(
     return pred_pct, checkpoint.strftime("%-I %p")
 
 
-def _predict_overnight_soc_flat(
-    now: datetime, soc: float, bat_cap: float, baseline_kw: float,
-) -> tuple[float, str]:
-    """Predicted SoC at the fixed 7am checkpoint assuming a constant
-    baseline_kw draw the whole way — no forecast, no solar, no percentile
-    or ground-truth machinery. Deliberately dumb by request (2026-08-17):
-    "how much battery will I have at sunrise with an average usage of
-    X kWh throughout the night," not a statistical model. Replaces
-    _predict_overnight_soc for the "Without EV charging" display line —
-    see Config.no_ev_baseline_load_kw.
+_SUNRISE_FALLBACK_HOUR = 7  # used only when outlook/sunrise data is unavailable
 
-    Unlike _predict_overnight_soc this never returns None — a flat-rate
-    walk needs no forecast data or confidence gating, so it's always
-    computable from just current SoC and the clock.
+
+def _sunrise_on(d, now: datetime, outlook) -> datetime:
+    """Sunrise for date `d`, from the outlook if available, else a fixed
+    7am fallback for that date — same graceful-degradation convention as
+    every other outlook-dependent calculation in this file (weather API
+    down/rate-limited shouldn't take the whole alert out).
     """
-    checkpoint = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
+    if outlook is not None:
+        sr = outlook.sunrise_on(d)
+        if sr is not None:
+            return sr
+    d = d.date() if isinstance(d, datetime) else d
+    return datetime(d.year, d.month, d.day, _SUNRISE_FALLBACK_HOUR, 0, 0)
+
+
+def _next_sunrise_after(now: datetime, outlook) -> datetime:
+    """The next sunrise at/after `now` — today's if it hasn't happened yet,
+    otherwise tomorrow's. DST-proof by construction (2026-08-17, replacing
+    a fixed 7am/7:30am clock time per user request ahead of the fall
+    time-change): a real sunrise time shifts with the season and the
+    clock change automatically, since it comes from the weather API's own
+    per-day sunrise field rather than a hardcoded hour.
+    """
+    today_sunrise = _sunrise_on(now.date(), now, outlook)
+    if today_sunrise >= now:
+        return today_sunrise
+    return _sunrise_on((now + timedelta(days=1)).date(), now, outlook)
+
+
+def _predict_overnight_soc_flat(
+    now: datetime, soc: float, bat_cap: float, baseline_kw: float, checkpoint: datetime,
+) -> tuple[float, str]:
+    """Predicted SoC at `checkpoint` (the next sunrise — see
+    _next_sunrise_after) assuming a constant baseline_kw draw the whole
+    way — no forecast, no solar, no percentile or ground-truth machinery.
+    Deliberately dumb by request (2026-08-17): "how much battery will I
+    have at sunrise with an average usage of X kWh throughout the night,"
+    not a statistical model. Replaces _predict_overnight_soc for the
+    "Without EV charging" display line — see Config.no_ev_baseline_load_kw.
+
+    Pure math, no outlook dependency of its own — callers compute
+    `checkpoint` via _next_sunrise_after once and pass it in (also needed
+    separately to stash the prediction for next-morning accuracy grading),
+    rather than this function re-deriving it and risking the two drifting
+    apart within the same call.
+    """
     hours = max(0.0, (checkpoint - now).total_seconds() / 3600.0)
     pred_pct = max(0.0, min(100.0, soc - baseline_kw * hours / bat_cap * 100))
-    return pred_pct, checkpoint.strftime("%-I %p")
+    return pred_pct, checkpoint.strftime("%-I:%M %p")
 
 
 def _predict_sundown_soc(
@@ -1200,17 +1240,20 @@ def _alert_eod_digest(
             state["sundown_bias_samples"] = bias_samples[-_SUNDOWN_BIAS_CAP:]
 
     soc_6am_str = ""
-    # "Without EV" is a flat assumed-baseline walk to the fixed 7am
-    # checkpoint (no forecast/solar/percentile model, by request 2026-08-17
-    # — see Config.no_ev_baseline_load_kw) rather than EV charging. "With
-    # EV" models charging down to a target floor (see below), so both
-    # numbers are available up front to decide whether to charge — no
-    # separate toggle needed. The percentile/ground-truth machinery
+    # "Without EV" is a flat assumed-baseline walk to the next sunrise (no
+    # forecast/solar/percentile model, by request 2026-08-17 — see
+    # Config.no_ev_baseline_load_kw) rather than EV charging. Sunrise (not
+    # a fixed clock hour) so this stays correct across the DST change
+    # instead of silently drifting relative to actual sunrise. "With EV"
+    # models charging down to a target floor (see below), so both numbers
+    # are available up front to decide whether to charge — no separate
+    # toggle needed. The percentile/ground-truth machinery
     # (_NO_EV_LOAD_PERCENTILE, _apply_no_ev_overrides) still runs via
     # _classify_and_record_no_ev_night below, collecting data in the
     # background in case this gets reintroduced — just not consulted here.
+    checkpoint_dt = _next_sunrise_after(now, outlook)
     overnight = _predict_overnight_soc_flat(
-        now, soc, bat_cap, getattr(cfg, "no_ev_baseline_load_kw", 0.4),
+        now, soc, bat_cap, getattr(cfg, "no_ev_baseline_load_kw", 0.4), checkpoint_dt,
     )
     if overnight is not None:
         pred_soc_6am, hour_label = overnight
@@ -1221,8 +1264,7 @@ def _alert_eod_digest(
         # Stash tonight's no-EV baseline prediction so tomorrow's morning
         # preview can report how it actually did — same accuracy-tracking
         # shape as /sundown, but automatic (no command needed) and keyed to
-        # the fixed 7am checkpoint _predict_overnight_soc always targets.
-        checkpoint_dt = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
+        # the same sunrise checkpoint the prediction above targeted.
         state[f"soc_7am_pred_{checkpoint_dt.strftime('%Y-%m-%d')}"] = {
             "pct": pred_soc_6am, "dt": checkpoint_dt.isoformat(),
         }

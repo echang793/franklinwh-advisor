@@ -2914,7 +2914,7 @@ def test_morning_preview_reports_7am_prediction_accuracy_from_store():
     msg = alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
 
     assert msg is not None
-    assert "7am SoC accuracy: predicted 20%, actual 32% (+12 pt)" in msg
+    assert "Sunrise SoC accuracy: predicted 20%, actual 32% (+12 pt)" in msg
     # Popped, not peeked — a late/duplicate run can't compare it twice.
     assert f"soc_7am_pred_{today}" not in state
 
@@ -2946,7 +2946,7 @@ def test_morning_preview_omits_7am_accuracy_when_nothing_stored():
 
     msg = alerts._alert_morning_preview({}, today, now, c, None, None, None, Config())
     assert msg is not None
-    assert "7am SoC accuracy" not in msg
+    assert "Sunrise SoC accuracy" not in msg
 
 
 def test_eod_digest_shows_without_then_with_ev_charge_to_floor():

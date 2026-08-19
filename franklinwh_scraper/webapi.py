@@ -29,6 +29,7 @@ from .alerts import (
     _get_system_peak_kw,
     _GHI_CLOUDY_THRESHOLD,
     _load_peak_state,
+    _next_sunrise_after,
     _predict_overnight_soc_flat,
 )
 from .advisor import _tou_eb_plan
@@ -391,11 +392,14 @@ def api_ev():
                 if history.has_enough_data():
                     now = datetime.now()
                     soc = r["battery_soc"]
-                    # Flat assumed-baseline walk to the fixed 7am checkpoint,
-                    # not the percentile/ground-truth forecast — mirrors
-                    # alerts.py's _alert_eod_digest (see Config.no_ev_baseline_load_kw).
+                    # Flat assumed-baseline walk to the next sunrise (DST-
+                    # proof, not a fixed clock hour), not the percentile/
+                    # ground-truth forecast — mirrors alerts.py's
+                    # _alert_eod_digest (see Config.no_ev_baseline_load_kw).
+                    checkpoint = _next_sunrise_after(now, outlook)
                     without_ov = _predict_overnight_soc_flat(
                         now, soc, _BAT_CAP, getattr(_cfg, "no_ev_baseline_load_kw", 0.4),
+                        checkpoint,
                     )
                     # Charge-to-floor, not fixed-kW-all-night — same model
                     # and rationale as alerts.py's _alert_eod_digest.
