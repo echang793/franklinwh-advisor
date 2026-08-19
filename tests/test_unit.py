@@ -2324,6 +2324,25 @@ def test_ambiguous_at_floor_without_grid_import_not_recorded():
     assert not any(k.startswith("no_ev_load_h") for k in state)
 
 
+def test_partial_ev_charge_above_floor_not_recorded():
+    """User's self-limited-charge pattern (confirmed 2026-08-17): a little
+    EV charging overnight, never draws from the grid, tops off before the
+    commute — SoC ends up clearly above the floor (never driven down to
+    it), so the floor/grid-import check alone would misclassify this as a
+    confirmed no-EV night. The load-spike guard must catch it instead."""
+    now = datetime(2026, 8, 20, 7, 45, 0)
+    rows = [
+        ((now - timedelta(hours=8)).isoformat(), 0.0, 0.35, 0.0),   # normal baseline
+        ((now - timedelta(hours=3)).isoformat(), 0.0, 1.4, 0.0),    # brief throttled EV charge
+        ((now - timedelta(hours=1)).isoformat(), 0.0, 0.40, 0.0),   # back to baseline
+    ]
+    store = _NightStore(rows)
+    c = _night_current(soc=62.0)  # clearly above the 10% floor, no grid import
+    state = {}
+    alerts._classify_and_record_no_ev_night(state, now, c, Config(ev_charge_floor_soc=10.0), store)
+    assert not any(k.startswith("no_ev_load_h") for k in state)
+
+
 def test_no_ev_night_skips_gracefully_without_store():
     state = {}
     alerts._classify_and_record_no_ev_night(

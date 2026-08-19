@@ -136,6 +136,15 @@ def _get_sundown_bias(state: dict) -> float:
 _NO_EV_LOAD_MIN_SAMPLES = 5   # confirmed no-EV nights before an hour's ground truth is trusted
 _NO_EV_LOAD_CAP = 40          # ~a season of confirmed no-EV nights per hour
 _NO_EV_FLOOR_TOLERANCE = 1.0  # pt — how close to cfg.ev_charge_floor_soc counts as "at the floor"
+# kW — any single reading at/above this in the overnight window is treated as
+# "an EV charging session happened," independent of where SoC ended up or
+# whether the grid was ever touched. Catches a self-limited partial charge
+# (never hits the floor, no grid import, tops off in the morning before the
+# commute) that the floor/grid-import check alone can't see. Household
+# baseline load (fridge, standby, wifi) sits well under 1 kW; even the
+# slowest common EV charging (120V/12A "trickle") draws ~1.2-1.4 kW, so this
+# cleanly separates "any EV charging, however light" from normal load.
+_NO_EV_LOAD_SPIKE_KW = 1.2
 
 
 def _classify_and_record_no_ev_night(
@@ -144,6 +153,17 @@ def _classify_and_record_no_ev_night(
     """Classify last night using the user's own rule (confirmed 2026-08-16):
     SoC at/near the EV-charge floor -> charged the EV, skip; SoC clearly
     above the floor -> confirmed no-EV night, record real overnight load.
+
+    That rule alone misses a self-limited partial charge: plug in for a
+    couple hours overnight, never draw from the grid, top off in the
+    morning before the commute — SoC still ends up clearly above the floor
+    since it was never driven down to it, so the floor check alone would
+    call it "no EV" and record the contaminated load as ground truth
+    (confirmed 2026-08-17, the user does exactly this). Guarded against by
+    also requiring no reading in the window hit _NO_EV_LOAD_SPIKE_KW —
+    any EV charging, however brief or throttled, shows up as a load spike
+    well above household baseline regardless of what SoC/grid ended up
+    doing.
 
     Ground truth beats guessing: _NO_EV_LOAD_PERCENTILE (P25) is a
     statistical approximation that still fails when EV nights are a slim
@@ -189,6 +209,14 @@ def _classify_and_record_no_ev_night(
         logger.exception("No-EV night classification: readings query failed")
         return
     if not rows:
+        return
+
+    spike = max((home_kw for _ts, _grid_kw, home_kw, _solar_kw in rows), default=0.0)
+    if spike >= _NO_EV_LOAD_SPIKE_KW:
+        logger.info(
+            "No-EV night classification: SoC %.0f%% above floor but peak load %.2f kW "
+            "looks like an EV charging session — not recorded", soc, spike,
+        )
         return
 
     by_hour: dict[int, list[float]] = {}
