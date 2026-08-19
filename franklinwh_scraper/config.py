@@ -75,6 +75,17 @@ class Config:
     # home load alone would already drain below it, EV charging isn't the
     # variable, so "with EV" just matches the no-EV baseline.
     ev_charge_floor_soc: float = 10.0
+    # "Without EV charging" 7am SoC prediction: flat assumed household draw
+    # (kW) from now to the fixed 7am checkpoint, no forecast/solar/percentile
+    # model — by request (2026-08-17), replacing the P25-percentile +
+    # ground-truth-classifier prediction with "how much battery will I have
+    # at sunrise assuming this average overnight usage." 0.4 kW matches the
+    # user's stated real baseline (fridge, standby). The percentile/
+    # ground-truth machinery (_classify_and_record_no_ev_night,
+    # _get_no_ev_hourly_load, _apply_no_ev_overrides) keeps running and
+    # collecting data in the background in case it's reintroduced later —
+    # this value just supersedes its output for the displayed prediction.
+    no_ev_baseline_load_kw: float = 0.4
 
     # Closed-loop EV charging control (Tesla Fleet API). See docs/TESLA_SETUP.md.
     # Tokens live in ~/.franklinwh_tesla.json (they rotate; keeping them out of

@@ -1016,6 +1016,27 @@ def _predict_overnight_soc(
     return pred_pct, checkpoint.strftime("%-I %p")
 
 
+def _predict_overnight_soc_flat(
+    now: datetime, soc: float, bat_cap: float, baseline_kw: float,
+) -> tuple[float, str]:
+    """Predicted SoC at the fixed 7am checkpoint assuming a constant
+    baseline_kw draw the whole way — no forecast, no solar, no percentile
+    or ground-truth machinery. Deliberately dumb by request (2026-08-17):
+    "how much battery will I have at sunrise with an average usage of
+    X kWh throughout the night," not a statistical model. Replaces
+    _predict_overnight_soc for the "Without EV charging" display line —
+    see Config.no_ev_baseline_load_kw.
+
+    Unlike _predict_overnight_soc this never returns None — a flat-rate
+    walk needs no forecast data or confidence gating, so it's always
+    computable from just current SoC and the clock.
+    """
+    checkpoint = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
+    hours = max(0.0, (checkpoint - now).total_seconds() / 3600.0)
+    pred_pct = max(0.0, min(100.0, soc - baseline_kw * hours / bat_cap * 100))
+    return pred_pct, checkpoint.strftime("%-I %p")
+
+
 def _predict_sundown_soc(
     usage_forecast, now: datetime, soc: float, bat_cap: float,
 ) -> tuple[float, datetime] | None:
@@ -1179,43 +1200,19 @@ def _alert_eod_digest(
             state["sundown_bias_samples"] = bias_samples[-_SUNDOWN_BIAS_CAP:]
 
     soc_6am_str = ""
-    # The digest builds its own live-anchored forecast rather than trusting
-    # the shared `usage_forecast` param to already be anchored — that param
-    # also drives advisor.recommend()'s Emergency-Backup decision, and a
-    # single noisy poll (a kettle running for 5 min) shouldn't ripple into
-    # "switch to Emergency Backup" just because it also happens to touch the
-    # digest's 7am estimate. Falls back to the passed-in forecast when no
-    # store is available (matches pre-nowcast behavior for those callers).
-    digest_forecast = usage_forecast
-    cloudy_now = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD if outlook else False
-    if store is not None:
-        try:
-            digest_forecast = predict(
-                store, 24, outlook=outlook,
-                system_peak_kw=_get_system_peak_kw(state),
-                perf_ratio=_get_performance_ratio(state, cloudy=cloudy_now),
-                avg_temp_c=outlook.avg_temp_c(24) if outlook else 22.0,
-                hourly_bias=_get_hourly_bias(state),
-                current_load_kw=c.home_load_kw,
-                # This forecast only feeds the "Without EV charging" 7am
-                # line below — see _NO_EV_LOAD_PERCENTILE.
-                load_percentile=_NO_EV_LOAD_PERCENTILE,
-            )
-            # Ground truth beats the percentile guess for any hour with
-            # enough confirmed no-EV nights — see _classify_and_record_no_ev_night.
-            digest_forecast = _apply_no_ev_overrides(digest_forecast, _get_no_ev_hourly_load(state))
-        except Exception:
-            # Never let the digest's live-anchor recompute take the whole
-            # alert down — fall back to whatever forecast was passed in.
-            logger.exception("EOD digest: live-anchored forecast failed")
-            digest_forecast = usage_forecast
-    overnight = _predict_overnight_soc(digest_forecast, now, soc, bat_cap)
+    # "Without EV" is a flat assumed-baseline walk to the fixed 7am
+    # checkpoint (no forecast/solar/percentile model, by request 2026-08-17
+    # — see Config.no_ev_baseline_load_kw) rather than EV charging. "With
+    # EV" models charging down to a target floor (see below), so both
+    # numbers are available up front to decide whether to charge — no
+    # separate toggle needed. The percentile/ground-truth machinery
+    # (_NO_EV_LOAD_PERCENTILE, _apply_no_ev_overrides) still runs via
+    # _classify_and_record_no_ev_night below, collecting data in the
+    # background in case this gets reintroduced — just not consulted here.
+    overnight = _predict_overnight_soc_flat(
+        now, soc, bat_cap, getattr(cfg, "no_ev_baseline_load_kw", 0.4),
+    )
     if overnight is not None:
-        # "Without EV" is the live-anchored baseline above, which on a
-        # typical night doesn't include EV charging. "With EV" models
-        # charging down to a target floor (see below), so both numbers are
-        # available up front to decide whether to charge — no separate
-        # toggle needed.
         pred_soc_6am, hour_label = overnight
         has_ev = getattr(cfg, "ev_charging", False)
         label  = "Without EV charging" if has_ev else "Predicted SoC"

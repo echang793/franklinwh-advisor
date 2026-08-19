@@ -24,15 +24,12 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 
 from .alerts import (
-    _apply_no_ev_overrides,
     _get_hourly_bias,
-    _get_no_ev_hourly_load,
     _get_performance_ratio,
     _get_system_peak_kw,
     _GHI_CLOUDY_THRESHOLD,
     _load_peak_state,
-    _NO_EV_LOAD_PERCENTILE,
-    _predict_overnight_soc,
+    _predict_overnight_soc_flat,
 )
 from .advisor import _tou_eb_plan
 from .config import load as load_config
@@ -392,18 +389,14 @@ def api_ev():
             with HistoryStore(_OUT / "history.db") as history:
                 outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
                 if history.has_enough_data():
-                    sp = _get_system_peak_kw(peak_state)
-                    cloudy = bool(outlook and outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD)
-                    pr = _get_performance_ratio(peak_state, cloudy=cloudy)
-                    hb = _get_hourly_bias(peak_state)
                     now = datetime.now()
                     soc = r["battery_soc"]
-                    without_fc = predict(history, 24, outlook=outlook,
-                                         system_peak_kw=sp, perf_ratio=pr,
-                                         hourly_bias=hb, current_load_kw=r["home_load_kw"],
-                                         load_percentile=_NO_EV_LOAD_PERCENTILE)
-                    without_fc = _apply_no_ev_overrides(without_fc, _get_no_ev_hourly_load(peak_state))
-                    without_ov = _predict_overnight_soc(without_fc, now, soc, _BAT_CAP)
+                    # Flat assumed-baseline walk to the fixed 7am checkpoint,
+                    # not the percentile/ground-truth forecast — mirrors
+                    # alerts.py's _alert_eod_digest (see Config.no_ev_baseline_load_kw).
+                    without_ov = _predict_overnight_soc_flat(
+                        now, soc, _BAT_CAP, getattr(_cfg, "no_ev_baseline_load_kw", 0.4),
+                    )
                     # Charge-to-floor, not fixed-kW-all-night — same model
                     # and rationale as alerts.py's _alert_eod_digest.
                     floor = getattr(_cfg, "ev_charge_floor_soc", 10.0)
