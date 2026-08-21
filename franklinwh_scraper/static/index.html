@@ -149,8 +149,8 @@ const DEMO = new URLSearchParams(location.search).get('demo') === '1';
 const CAP0 = 13.6;
 const $ = id => document.getElementById(id);
 const M = "'JetBrains Mono',monospace";
-const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','batteryhealth','alerts','digests','ev'];
-const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING'};
+const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','batteryhealth','attribution','savings','alerts','digests','ev'];
+const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',attribution:'ATTRIBUTION',savings:'SAVINGS',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING'};
 
 // ── Live state ───────────────────────────────────────────────────────
 const S = {
@@ -366,6 +366,47 @@ mkPanel('batteryhealth', `
   <div id="bh-bars" style="display:flex;align-items:flex-end;gap:8px;margin-top:18px;height:96px;"></div>
   <div id="bh-foot" class="mono" style="font-size:10.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
 
+mkPanel('attribution', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div class="plabel">SELF-SUFFICIENCY · WHERE POWER CAME FROM</div>
+    <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#3f5244;">▮ BATTERY · ▮ SOLAR · ▮ GRID</div>
+  </div>
+  <div id="attr-bars" style="display:flex;align-items:flex-end;gap:8px;margin-top:18px;height:110px;"></div>
+  <div id="attr-foot" class="mono" style="font-size:10.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+
+mkPanel('savings', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div class="plabel">SAVINGS · BATTERY + SOLAR</div>
+    <div class="mono" id="sav-window" style="font-size:10px;letter-spacing:.1em;color:#3f5244;"></div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px;">
+    <div><div id="sav-window-total" style="font-size:30px;font-weight:700;color:#57e389;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">saved this window</div></div>
+    <div><div id="sav-lifetime" style="font-size:30px;font-weight:700;color:#f5d18a;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">lifetime tracked</div></div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:10px;margin-top:18px;">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#f5b942;width:96px;">ON-PEAK</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="sav-onpeak-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#8a6a1e,#f5b942);"></div></div>
+      <span id="sav-onpeak-val" class="mono" style="font-size:10px;color:#f5d18a;width:52px;text-align:right;"></span>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#9db8a2;width:96px;">OFF-PEAK</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="sav-offpeak-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#2e5c3a,#57e389);"></div></div>
+      <span id="sav-offpeak-val" class="mono" style="font-size:10px;color:#9db8a2;width:52px;text-align:right;"></span>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#7d937f;width:96px;">SUPER OFF-PEAK</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="sav-sop-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#17351f,#2e5c3a);"></div></div>
+      <span id="sav-sop-val" class="mono" style="font-size:10px;color:#7d937f;width:52px;text-align:right;"></span>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#8fb4ff;width:96px;">EXPORT CREDIT</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="sav-export-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#1e2c4a,#8fb4ff);"></div></div>
+      <span id="sav-export-val" class="mono" style="font-size:10px;color:#8fb4ff;width:52px;text-align:right;"></span>
+    </div>
+  </div>
+  <div id="sav-foot" class="mono" style="font-size:10.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+
 mkPanel('alerts', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel">ALERTS · LIVE</div>
@@ -451,7 +492,7 @@ function buildToolbar(){
 // only preset options besides the built-in "show everything".
 const PRESETS = {
   storm:   { label: '⚡ STORM WATCH',   visible: ['battery','flow','alerts','touclock','ebplan'] },
-  billing: { label: '💵 BILLING FOCUS', visible: ['bill','digests','accuracy','mode','history'] },
+  billing: { label: '💵 BILLING FOCUS', visible: ['bill','savings','attribution','digests','accuracy','mode','history'] },
 };
 function applyPreset(key){
   if (key === 'all') { localStorage.setItem('fwh-dash-hidden', '[]'); S.presetSel = 'all'; }
@@ -486,7 +527,7 @@ function snapshot(){
 }
 
 // ── Layout system ────────────────────────────────────────────────────
-function defaultLayout(){ return { left:['battery','flow','forecast','ebplan','accuracy','alerts'], right:['history','bill','mode','touclock','batteryhealth','digests','ev'] }; }
+function defaultLayout(){ return { left:['battery','flow','forecast','ebplan','accuracy','attribution','alerts'], right:['history','bill','savings','mode','touclock','batteryhealth','digests','ev'] }; }
 // Merge a saved layout against the current PANEL_IDS instead of requiring
 // an exact set match — previously, adding (or renaming) even one panel
 // silently discarded every user's custom drag arrangement back to default,
@@ -947,6 +988,45 @@ function renderBatteryHealth(){
   const drift = last.pct_of_nameplate - first.pct_of_nameplate;
   $('bh-foot').textContent = `🔋 ${last.capacity_kwh.toFixed(1)} kWh effective (${last.pct_of_nameplate.toFixed(0)}% of ${S.batteryHealthNameplate.toFixed(1)} kWh nameplate) · ${drift>=0?'+':''}${drift.toFixed(1)}pt vs ${first.label}.`;
 }
+function renderAttribution(){
+  const days = S.attribution || [];
+  if (!days.length) { $('attr-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#4c5f50;align-self:center;width:100%;text-align:center;">no attribution data yet</div>'; $('attr-foot').textContent=''; return; }
+  const mx = Math.max(...days.map(d => d.total_kwh), 1);
+  const segH = kwh => Math.max(0, Math.round(kwh / mx * 84));
+  $('attr-bars').innerHTML = days.map(d => {
+    const col = d.self_sufficiency_pct >= 95 ? '#57e389' : d.self_sufficiency_pct >= 80 ? '#f5d18a' : '#f5b942';
+    return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:5px;height:100%;">
+      <div class="mono" style="font-size:9px;color:${col};">${d.self_sufficiency_pct.toFixed(0)}%</div>
+      <div style="width:70%;display:flex;flex-direction:column;border-radius:3px 3px 0 0;overflow:hidden;">
+        <div style="height:${segH(d.grid_kwh)}px;background:#6b5216;"></div>
+        <div style="height:${segH(d.solar_kwh)}px;background:linear-gradient(180deg,#8df0b0,#57e389);"></div>
+        <div style="height:${segH(d.battery_kwh)}px;background:linear-gradient(180deg,#57e389,#1f7a44);"></div>
+      </div>
+      <div class="mono" style="font-size:9px;color:#4c5f50;">${d.label}</div></div>`;
+  }).join('');
+  const avgSelf = days.reduce((a,d) => a + d.self_sufficiency_pct, 0) / days.length;
+  const totalGrid = days.reduce((a,d) => a + d.grid_kwh, 0);
+  $('attr-foot').textContent = `⚡ ${avgSelf.toFixed(0)}% average self-sufficiency over ${days.length} days · ${totalGrid.toFixed(1)} kWh from grid total.`;
+}
+function renderSavings(){
+  const s = S.savings;
+  if (!s) { $('sav-window-total').textContent = '—'; $('sav-lifetime').textContent = '—'; $('sav-foot').textContent = 'collecting data — savings activate once readings accumulate'; return; }
+  $('sav-window').textContent = `${s.days}D WINDOW`;
+  $('sav-window-total').textContent = '$' + s.saved_vs_grid_only.toFixed(2);
+  const cum = s.cumulative;
+  $('sav-lifetime').textContent = cum ? '$' + cum.vs_grid.toFixed(2) : '—';
+  const parts = [
+    ['sav-onpeak', s.saved_on_peak], ['sav-offpeak', s.saved_off_peak],
+    ['sav-sop', s.saved_super_off_peak], ['sav-export', s.actual_export_credit],
+  ];
+  const mx = Math.max(...parts.map(p => p[1]), 0.01);
+  parts.forEach(([id, val]) => {
+    $(id + '-bar').style.width = Math.max(2, val / mx * 100).toFixed(0) + '%';
+    $(id + '-val').textContent = '$' + val.toFixed(2);
+  });
+  $('sav-foot').textContent = `Rates as of ${s.priced_at} · ${s.self_use_kwh.toFixed(0)} of ${s.home_kwh.toFixed(0)} kWh home load self-served`
+    + (cum ? ` · lifetime tracked ${cum.days}d ($${cum.vs_solar.toFixed(0)} vs solar-only).` : '.');
+}
 function renderEv(){
   const ev = S.ev;
   if (!ev || !ev.ev_charging) {
@@ -1349,10 +1429,10 @@ async function pollSlow(){
   // update instead of blanking all 7 slow-refresh panels for the cycle —
   // each panel keeps showing its last-known-good data until that specific
   // endpoint recovers.
-  const [h, f, acc, tou, bill, rec, health, bh, ev] = await Promise.allSettled([
+  const [h, f, acc, tou, bill, rec, health, bh, ev, attr, sav] = await Promise.allSettled([
     J('/api/history?hours=48'), J('/api/forecast'), J('/api/accuracy'),
     J('/api/tou'), J('/api/bill'), J('/api/recommendation'), J('/api/health'),
-    J('/api/battery-health'), J('/api/ev'),
+    J('/api/battery-health'), J('/api/ev'), J('/api/attribution?days=14'), J('/api/savings?days=30'),
   ]);
   const ok = r => r.status === 'fulfilled' ? r.value : null;
   const now = Date.now();
@@ -1386,6 +1466,12 @@ async function pollSlow(){
 
   const evv = ok(ev);
   if (evv) { S.ev = evv; renderEv(); }
+
+  const attrv = ok(attr);
+  if (attrv) { S.attribution = attrv.days || []; renderAttribution(); }
+
+  const savv = ok(sav);
+  if (savv && !savv.error) { S.savings = savv; renderSavings(); }
 
   const healthv = ok(health);
   S.apiHealth = healthv || S.apiHealth;
@@ -1478,11 +1564,21 @@ function demoData(){
   }));
   S.tou = { period:'OFF PEAK', rate:0.473, ring: Array.from({length:24},(_,h) => ({ hour:h, period: h<6?'SUPER OFF PEAK':h<10?'OFF PEAK':h<14?'SUPER OFF PEAK':h<16?'OFF PEAK':h<21?'ON PEAK':'OFF PEAK', rate: h>=16&&h<21?0.529:(h<6||(h>=10&&h<14))?0.117:0.473 })) };
   S.bill = { cycle_start:'2026-06-19', cycle_end:'2026-07-18', day:29, days:30, net_mtd:49.97, projected:52.89, prior_net:61.20, saved_mtd:118.40 };
+  S.attribution = [16.5,26.0,33.7,23.2,27.4,20.8,15.1].map((total,i) => {
+    const grid = [0.1,0.1,9.6,0.3,5.5,0.1,0.0][i], solar = total*0.5, batt = total-solar-grid;
+    return { label: new Date(Date.now()-(6-i)*86400000).toLocaleDateString('en-US',{month:'short',day:'numeric'}),
+      battery_kwh: batt, solar_kwh: solar, grid_kwh: grid, total_kwh: total,
+      self_sufficiency_pct: (batt+solar)/total*100 };
+  });
+  S.savings = { days:30, saved_vs_grid_only:258.34, saved_vs_solar_only:97.57, saved_on_peak:84.41,
+    saved_off_peak:137.85, saved_super_off_peak:30.19, actual_export_credit:6.01,
+    self_use_kwh:622.91, home_kwh:700.88, priced_at:'2026-01-01',
+    cumulative:{ through:'2026-08-18', vs_grid:145.46, vs_solar:41.25, days:20 } };
   ingestAlerts([
     { ts: new Date(Date.now()-120000).toISOString(), body: '⚡ Switch to <b>Time-of-Use</b> mode. Battery at 78% with 14 kWh of solar still expected — hold charge for the 4–9 PM peak window and export at <b>$0.529/kWh</b>.' },
     { ts: new Date(Date.now()-120000).toISOString(), body: 'Heads up: grid peak pricing starts in 1h 28m. Current plan saves an estimated <b>$4.80</b> today vs Self-Use.' },
   ], true);
-  renderHistory(); renderForecast(); renderAccuracy(); renderBatteryHealth(); renderTou(); renderBill(); renderMode(); renderEv();
+  renderHistory(); renderForecast(); renderAccuracy(); renderBatteryHealth(); renderTou(); renderBill(); renderMode(); renderEv(); renderAttribution(); renderSavings();
   $('m-apply').addEventListener('click', () => {
     if (S.applying || S.modeApplied) return;
     S.applying = true; $('m-apply').textContent = '◈ SWITCHING…';
