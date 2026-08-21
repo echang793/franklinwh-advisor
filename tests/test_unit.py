@@ -1,7 +1,6 @@
 """Unit tests for FranklinWH pure logic — no network."""
 
 import pathlib
-import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -2949,55 +2948,34 @@ def test_morning_preview_omits_7am_accuracy_when_nothing_stored():
     assert "Sunrise SoC accuracy" not in msg
 
 
-def test_eod_digest_shows_without_then_with_ev_charge_to_floor():
-    """No toggle needed: with an EV configured, the digest always shows the
-    no-EV baseline first, then a 'with EV' charge-to-floor estimate — so
-    both are visible before deciding whether to charge. 'Without EV' is a
-    flat assumed-baseline walk to 7am (Config.no_ev_baseline_load_kw), not
-    a forecast; 'with EV' models self-limited overnight charging (down to
-    a target floor SoC), not a constant ev_charging_kw draw all night."""
+def test_eod_digest_omits_ev_soc_lines_but_still_stashes_for_accuracy():
+    """The 'Without EV charging' / 'With EV charging (to floor)' lines were
+    removed from the digest text by request 2026-08-19 — but the
+    prediction is still computed and stashed in state so tomorrow's
+    morning-preview 'Sunrise SoC accuracy' line (a separate alert) keeps
+    working. (The floor-capping 'with EV' logic itself still lives in
+    webapi.py's /api/ev, untouched — this test only covers the digest.)"""
     now = datetime.now().replace(hour=21, minute=30, second=0, microsecond=0)
     today = now.strftime("%Y-%m-%d")
     readings = [(f"{today}T{h:02d}:00:00", 0.5, 1.0, 0.0) for h in range(0, 20, 2)]
     store = _AttrStore(attr=(8.2, 5.1, 0.9), readings=readings)
 
     # soc=55, default 0.4 kW baseline, 9.5h to the fixed 7am checkpoint,
-    # 13.6 kWh default capacity -> ~27% without EV, comfortably above the
-    # 10% floor.
+    # 13.6 kWh default capacity -> ~27% expected stashed pct.
     cfg = Config(ev_charging=True, ev_charge_floor_soc=10.0)
     stats = _digest_stats(soc=55.0, home_load_kw=1.5)
+    state = {}
 
-    msg = alerts._alert_eod_digest({}, today, now, stats, cfg, None, None, store)
+    msg = alerts._alert_eod_digest(state, today, now, stats, cfg, None, None, store)
     assert msg is not None
-    assert "Without EV charging" in msg
-    assert "With EV charging (to ~10% floor)" in msg
-    # Order matters — without first, then with.
-    assert msg.index("Without EV charging") < msg.index("With EV charging")
-    without_pct = float(re.search(r"Without EV charging.*?: ~(\d+)%", msg).group(1))
-    assert 25 <= without_pct <= 30
-    with_pct = float(re.search(r"With EV charging.*?\): ~(\d+)%", msg).group(1))
-    assert with_pct == 10  # capped at the floor, since baseline > floor
+    assert "Without EV charging" not in msg
+    assert "With EV charging" not in msg
+    assert "Predicted SoC @" not in msg
 
-
-def test_eod_digest_with_ev_matches_baseline_when_already_below_floor():
-    """If the flat baseline walk alone already drains below the floor by
-    7am, EV charging isn't the variable driving the drain — 'with EV'
-    must not claim a rosier number than the baseline actually predicts."""
-    now = datetime.now().replace(hour=21, minute=30, second=0, microsecond=0)
-    today = now.strftime("%Y-%m-%d")
-    readings = [(f"{today}T{h:02d}:00:00", 0.5, 1.0, 0.0) for h in range(0, 20, 2)]
-    store = _AttrStore(attr=(8.2, 5.1, 0.9), readings=readings)
-
-    # soc=30 with the same 0.4 kW/9.5h/13.6kWh math drains to ~2%, below
-    # the 10% floor.
-    cfg = Config(ev_charging=True, ev_charge_floor_soc=10.0)
-    stats = _digest_stats(soc=30.0, home_load_kw=1.5)
-
-    msg = alerts._alert_eod_digest({}, today, now, stats, cfg, None, None, store)
-    without_pct = float(re.search(r"Without EV charging.*?: ~(\d+)%", msg).group(1))
-    with_pct    = float(re.search(r"With EV charging.*?\): ~(\d+)%", msg).group(1))
-    assert without_pct < 10
-    assert with_pct == without_pct
+    stashed = state.get(f"soc_7am_pred_{today}") or next(
+        (v for k, v in state.items() if k.startswith("soc_7am_pred_")), None)
+    assert stashed is not None
+    assert 25 <= stashed["pct"] <= 30
 
 
 def test_eod_digest_omits_with_ev_line_when_no_ev_configured():

@@ -1239,51 +1239,19 @@ def _alert_eod_digest(
             bias_samples.append(actual_pct - raw_pct)
             state["sundown_bias_samples"] = bias_samples[-_SUNDOWN_BIAS_CAP:]
 
-    soc_6am_str = ""
-    # "Without EV" is a flat assumed-baseline walk to the next sunrise (no
-    # forecast/solar/percentile model, by request 2026-08-17 — see
-    # Config.no_ev_baseline_load_kw) rather than EV charging. Sunrise (not
-    # a fixed clock hour) so this stays correct across the DST change
-    # instead of silently drifting relative to actual sunrise. "With EV"
-    # models charging down to a target floor (see below), so both numbers
-    # are available up front to decide whether to charge — no separate
-    # toggle needed. The percentile/ground-truth machinery
-    # (_NO_EV_LOAD_PERCENTILE, _apply_no_ev_overrides) still runs via
-    # _classify_and_record_no_ev_night below, collecting data in the
-    # background in case this gets reintroduced — just not consulted here.
+    # No longer shown in the digest text (removed by request 2026-08-19) —
+    # but the prediction is still computed and stashed here so tomorrow's
+    # morning-preview "Sunrise SoC accuracy" line (a separate alert) keeps
+    # working. See Config.no_ev_baseline_load_kw / _predict_overnight_soc_flat.
     checkpoint_dt = _next_sunrise_after(now, outlook)
     overnight = _predict_overnight_soc_flat(
         now, soc, bat_cap, getattr(cfg, "no_ev_baseline_load_kw", 0.4), checkpoint_dt,
     )
     if overnight is not None:
-        pred_soc_6am, hour_label = overnight
-        has_ev = getattr(cfg, "ev_charging", False)
-        label  = "Without EV charging" if has_ev else "Predicted SoC"
-        soc_6am_str = f"\n🌅 {label} @ {hour_label}: ~{pred_soc_6am:.0f}%"
-
-        # Stash tonight's no-EV baseline prediction so tomorrow's morning
-        # preview can report how it actually did — same accuracy-tracking
-        # shape as /sundown, but automatic (no command needed) and keyed to
-        # the same sunrise checkpoint the prediction above targeted.
+        pred_soc_6am, _hour_label = overnight
         state[f"soc_7am_pred_{checkpoint_dt.strftime('%Y-%m-%d')}"] = {
             "pct": pred_soc_6am, "dt": checkpoint_dt.isoformat(),
         }
-
-        if has_ev:
-            # Charge-to-floor, not fixed-kW-all-night: most people watching
-            # the FranklinWH/Tesla app throttle EV charging to avoid tapping
-            # the grid overnight, landing at roughly a target floor SoC
-            # rather than wherever a constant ev_charging_kw draw for the
-            # whole night would predict (that old model could read near 0%
-            # even on nights the user never touched the grid). Only spends
-            # the headroom above the floor — if home load alone already
-            # drains the no-EV baseline below it, EV charging isn't the
-            # variable, so "with EV" just matches the no-EV baseline.
-            floor = getattr(cfg, "ev_charge_floor_soc", 10.0)
-            with_ev_pct = floor if pred_soc_6am > floor else pred_soc_6am
-            soc_6am_str += (
-                f"\n🔌 With EV charging (to ~{floor:.0f}% floor): ~{with_ev_pct:.0f}%"
-                )
 
     precharge_str  = ""
     tmrw_solar_str = ""
@@ -1418,7 +1386,7 @@ def _alert_eod_digest(
         f"Batt dis: {batt_dis_kwh:.1f} kWh\n"
         f"Home:     {home_kwh:.1f} kWh</code>{attribution_str}{self_suff_str}{peak_cov_str}{tou_str}{outage_str}\n"
         f"<code>─────────────────────</code>\n"
-        f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{precharge_str}"
+        f"🔋 {_soc_bar(soc)}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{precharge_str}"
     )
 
 
