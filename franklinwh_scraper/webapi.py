@@ -227,7 +227,6 @@ def api_history(hours: int = Query(48, ge=1, le=168)):
 
 @app.get("/api/forecast", dependencies=_authed)
 def api_forecast():
-    now = datetime.now()
     state = _load_peak_state(_OUT)
     r = _latest_reading()
     soc = r["battery_soc"] if r else 50.0
@@ -386,7 +385,6 @@ def api_ev():
     out["prediction"] = None
     if r is not None:
         try:
-            peak_state = _load_peak_state(_OUT)
             with HistoryStore(_OUT / "history.db") as history:
                 outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
                 if history.has_enough_data():
@@ -483,7 +481,6 @@ def api_willmake(hours: int = Query(..., ge=1, le=24)):
 @app.get("/api/tou", dependencies=_authed)
 def api_tou():
     now = datetime.now()
-    base = now.replace(minute=0, second=0, microsecond=0)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     ring = []
     for h in range(24):

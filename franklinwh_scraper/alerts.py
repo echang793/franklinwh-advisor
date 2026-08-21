@@ -986,44 +986,6 @@ def _alert_export_arbitrage(
     )
 
 
-def _predict_overnight_soc(
-    usage_forecast, now: datetime, soc: float, bat_cap: float,
-) -> tuple[float, str] | None:
-    """Predicted SoC at a fixed 7 am checkpoint, or None below min confidence.
-
-    Returns (predicted_pct, hour_label). Shared by the normal 7am prediction
-    and the manual EV-charging counterfactual so both use identical window
-    selection and confidence gating.
-
-    Was dynamically tied to the forecast's first hour where predicted_solar_kw
-    > 0.1 ("solar meaningfully starts"), to track sunrise shifting across the
-    year rather than a fixed clock time. That's a production-start estimate,
-    not literal sunrise though, and could land later than expected (panel
-    orientation, forecast resolution) — checked in at 8 AM on 2026-08-15
-    when the user wanted a fixed 7 AM checkpoint instead. Changed per their
-    direct request that day.
-    """
-    if not (usage_forecast and usage_forecast.hours):
-        return None
-    checkpoint = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
-
-    night_hours = [p for p in usage_forecast.hours if now <= p.dt < checkpoint]
-    # Gate on the night window's own confidence, not the worst hour across
-    # the whole 24h forecast — a sparse hour later in the day (e.g. 3 pm
-    # tomorrow) shouldn't suppress a prediction that only uses tonight's data.
-    night_confs = {p.confidence for p in night_hours}
-    night_conf  = next(
-        (c for c in ("none", "low", "medium", "high") if c in night_confs),
-        "none",
-    )
-    if not night_hours or night_conf == "none":
-        return None
-
-    night_net_kwh = sum(p.net_kw for p in night_hours)
-    pred_pct      = max(0.0, min(100.0, soc + night_net_kwh / bat_cap * 100))
-    return pred_pct, checkpoint.strftime("%-I %p")
-
-
 _SUNRISE_FALLBACK_HOUR = 7  # used only when outlook/sunrise data is unavailable
 
 
@@ -1063,8 +1025,9 @@ def _predict_overnight_soc_flat(
     way — no forecast, no solar, no percentile or ground-truth machinery.
     Deliberately dumb by request (2026-08-17): "how much battery will I
     have at sunrise with an average usage of X kWh throughout the night,"
-    not a statistical model. Replaces _predict_overnight_soc for the
-    "Without EV charging" display line — see Config.no_ev_baseline_load_kw.
+    not a statistical model. Feeds the "Without EV charging" prediction —
+    see Config.no_ev_baseline_load_kw. (Replaced the older forecast-based
+    _predict_overnight_soc, which is gone — no callers left after this.)
 
     Pure math, no outlook dependency of its own — callers compute
     `checkpoint` via _next_sunrise_after once and pass it in (also needed
@@ -1086,14 +1049,14 @@ def _predict_sundown_soc(
     pre-formatted label, since callers need it both for display
     (`.strftime(...)`) and for persisting the prediction (`.isoformat()`).
 
-    Mirrors `_predict_overnight_soc`'s shape for the trailing edge of the
-    day instead of the leading edge — shared by the /sundown chatbot
+    Mirrors `_predict_overnight_soc_flat`'s role for the trailing edge of
+    the day instead of the leading edge — shared by the /sundown chatbot
     command and the low-battery-at-1pm alert so both use identical
     projection math instead of two implementations quietly drifting apart.
     Intentionally just the raw walk-forward: callers are responsible for
     live-anchoring the forecast they pass in and applying
     `_get_sundown_bias`'s learned correction on top, same separation
-    `_predict_overnight_soc` keeps from its callers' EV charge-to-floor
+    `_predict_overnight_soc_flat` keeps from its callers' EV charge-to-floor
     logic.
     """
     if not (usage_forecast and usage_forecast.hours):

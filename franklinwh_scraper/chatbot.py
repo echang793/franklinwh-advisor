@@ -674,8 +674,7 @@ class TelegramChatBot:
     def _send_tip(self, chat_id: str) -> None:
         try:
             with self._lock:
-                stats   = self._stats
-                outlook = self._outlook
+                stats = self._stats
             if stats is None:
                 self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
                 return

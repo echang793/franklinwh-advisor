@@ -2870,8 +2870,8 @@ def test_predict_live_anchor_never_goes_negative(tmp_path):
 
 def test_eod_digest_stores_7am_prediction_for_tomorrow(monkeypatch):
     """The no-EV baseline prediction gets stashed for tomorrow's morning
-    preview to check itself against — keyed to the fixed 7am checkpoint
-    _predict_overnight_soc always targets now."""
+    preview to check itself against — keyed to the sunrise checkpoint
+    _predict_overnight_soc_flat targets."""
     from franklinwh_scraper.predictor import HourPrediction, UsageForecast
 
     now = datetime.now().replace(hour=21, minute=30, second=0, microsecond=0)
