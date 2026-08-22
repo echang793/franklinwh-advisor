@@ -988,8 +988,10 @@ class TelegramChatBot:
             export_str = ""
             if export_kwh > 0.1:
                 _, peak_rate = peak_export_hour(now.month)
+                export_pct = export_kwh / cap * 100.0
                 export_str = (
                     f"\n☀️ Surplus solar to export: ~<b>{export_kwh:.1f} kWh</b> "
+                    f"(~{export_pct:.0f}% of battery capacity) "
                     f"(~${export_kwh * peak_rate:.2f} at today's best export rate, ${peak_rate:.3f}/kWh)"
                 )
             self._send(chat_id,

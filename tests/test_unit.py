@@ -981,6 +981,7 @@ def test_send_sundown_estimates_surplus_solar_export():
     text = sent["text"]
     assert "Surplus solar to export" in text
     assert "9.3 kWh" in text  # 9.28 rounds to 9.3
+    assert "68% of battery capacity" in text  # 9.28 / 13.6 * 100 = 68.2%
     rate = tou._NEM3_DEFAULT_EXPORT_RATE
     assert f"${9.28 * rate:.2f}" in text
     assert f"${rate:.3f}/kWh" in text
