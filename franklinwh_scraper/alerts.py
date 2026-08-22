@@ -2125,6 +2125,49 @@ def _alert_peak_streak_good(state: dict, today: str, now: datetime) -> str | Non
     )
 
 
+_SELF_SUFF_STREAK_THRESHOLD = 90.0  # pt -- between the dashboard attribution panel's green (>=95%) and amber (>=80%) cutoffs
+
+
+def _alert_self_sufficiency_streak(state: dict, today: str, now: datetime, store) -> str | None:
+    """Evening check: last 7 consecutive days all >=90% self-sufficient —
+    positive-reinforcement mirror of _alert_peak_streak_good, using
+    store.daily_attribution() (same source as /api/attribution and the
+    dashboard's SELF-SUFFICIENCY panel) instead of a pre-aggregated state
+    key, since attribution isn't cached in state the way peak_cov_ is.
+    """
+    week_key = now.strftime("%G-W%V")
+    if now.hour not in (21, 22) or state.get("self_sufficiency_streak_alerted_week") == week_key:
+        return None
+    if store is None:
+        return None
+
+    check_date = now.date() - timedelta(days=1)
+    for _ in range(7):
+        date_str = check_date.strftime("%Y-%m-%d")
+        try:
+            attr = store.daily_attribution(date_str)
+        except Exception:
+            return None
+        if not attr:
+            return None  # missing data breaks the streak
+        batt, sol, grid = attr
+        total = batt + sol + grid
+        if total <= 0:
+            return None
+        pct = (batt + sol) / total * 100.0
+        if pct < _SELF_SUFF_STREAK_THRESHOLD:
+            return None  # streak broken
+        check_date -= timedelta(days=1)
+
+    state["self_sufficiency_streak_alerted_week"] = week_key
+    logger.info("Self-sufficiency good streak alert: 7 consecutive days >=%.0f%%", _SELF_SUFF_STREAK_THRESHOLD)
+    return (
+        "🟢 <b>FranklinWH: 7 days straight ≥90% self-sufficient</b>\n"
+        "Battery + solar have covered nearly all home load every day this week — "
+        "barely touching the grid. System is running well."
+    )
+
+
 def _alert_bill_projection(
     state: dict, today: str, now: datetime, store, cfg: Config,
 ) -> str | None:
@@ -2242,6 +2285,66 @@ def _alert_ev_charge_window(
         f"🔌 <b>FranklinWH: Best EV charging window tonight</b>\n"
         f"Charge midnight–6 AM (super-off-peak, ${sop:.2f}/kWh) — cheapest of the day. "
         f"Avoid 4–9 PM on-peak (${onp:.2f}/kWh).{cost_line}"
+    )
+
+
+def _alert_ev_still_charging(
+    state: dict, today: str, now: datetime, c, cfg: Config, store,
+) -> str | None:
+    """Catches an EV charging session still drawing from the grid right
+    after the cheap super-off-peak window closes — forgot to unplug,
+    session ran long, etc.
+
+    Fires once, right at the SOP -> non-SOP transition, detected by
+    comparing tou.period_at(now) against 10 minutes ago rather than a
+    hardcoded clock hour — EV-TOU-5's SOP window ends at a different
+    time on weekdays (6am) than weekends/holidays (2pm, see period_at),
+    so a fixed-hour check would either miss the weekday case or
+    false-positive during the weekend's still-cheap 6am-2pm stretch.
+
+    Reuses _NO_EV_LOAD_SPIKE_KW — the same threshold the no-EV
+    ground-truth classifier (_classify_and_record_no_ev_night) uses to
+    detect "an EV charging session happened" — against grid_use_kw
+    specifically (not home_load_kw): solar-covered post-SOP charging
+    isn't costing anything extra, so it isn't alert-worthy here even
+    though it would still register as elevated total load.
+    """
+    if not getattr(cfg, "ev_charging", False) or store is None:
+        return None
+    if state.get("ev_still_charging_date") == today:
+        return None
+    if period_at(now) == TouPeriod.SUPER_OFF_PEAK:
+        return None
+    if period_at(now - timedelta(minutes=10)) != TouPeriod.SUPER_OFF_PEAK:
+        return None  # SOP ended a while ago -- not the transition moment
+    if c.grid_use_kw < _NO_EV_LOAD_SPIKE_KW:
+        return None  # not actively importing at charging-level draw right now
+
+    # Confirm this is a continuation of overnight charging, not a fresh
+    # unrelated load that happens to start right at the boundary.
+    try:
+        start = (now - timedelta(hours=1, minutes=30)).isoformat()
+        rows = store.readings_between(start, now.isoformat())
+    except Exception:
+        logger.exception("EV still-charging alert: readings query failed")
+        return None
+    if not rows:
+        return None
+    elevated = sum(1 for _ts, grid_kw, _home_kw, _solar_kw in rows if grid_kw >= _NO_EV_LOAD_SPIKE_KW)
+    if elevated < len(rows) * 0.5:
+        return None  # not sustained -- probably not an EV charging session
+
+    state["ev_still_charging_date"] = today
+    new_period  = period_at(now)
+    new_rate    = rate_at(now)
+    sop_rate    = rate_at(now - timedelta(minutes=10))
+    period_label = new_period.value.replace("_", " ")
+    logger.info("EV still-charging alert: grid=%.2f kW into %s (was super-off-peak)",
+                c.grid_use_kw, period_label)
+    return (
+        f"🔌 <b>FranklinWH: EV still charging into {period_label}</b>\n"
+        f"Grid import {c.grid_use_kw:.1f} kW — the super-off-peak window closed a few minutes ago.\n"
+        f"Now paying ${new_rate:.3f}/kWh instead of ${sop_rate:.3f}/kWh — check if it's still plugged in."
     )
 
 
@@ -2545,12 +2648,14 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("baseline_load_drift",  lambda: _alert_baseline_load_drift(state, today, now, store, cfg)),
             ("peak_streak",          lambda: _alert_peak_streak(state, today, now)),
             ("peak_streak_good",     lambda: _alert_peak_streak_good(state, today, now)),
+            ("self_sufficiency_streak", lambda: _alert_self_sufficiency_streak(state, today, now, store)),
             ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store, cfg)),
             ("heat_wave_prep",       lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),
             ("multiday_cloudy_precharge", lambda: _alert_multiday_cloudy_precharge(state, today, now, c, outlook, cfg)),
             ("solar_surplus_overflow",    lambda: _alert_solar_surplus_overflow(state, today, now, c)),
             ("storm_prep",           lambda: _alert_storm_prep(state, today, now, c, cfg)),
             ("ev_charge_window",     lambda: _alert_ev_charge_window(state, today, now, c, cfg, outlook)),
+            ("ev_still_charging",    lambda: _alert_ev_still_charging(state, today, now, c, cfg, store)),
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),

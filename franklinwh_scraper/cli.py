@@ -1664,11 +1664,17 @@ def cmd_advise(
                 last_mode = rec.mode.value
                 _save_last_mode(outdir, last_mode)
 
-                if _consec_errors >= _ERROR_THRESHOLD and cfg.telegram_bot_token and cfg.telegram_chat_id:
-                    notify_telegram(
-                        "✅ FranklinWH Advisor: poll errors resolved — alerts resuming.",
-                        cfg.telegram_bot_token, cfg.telegram_chat_id,
-                    )
+                if _consec_errors >= _ERROR_THRESHOLD:
+                    # Channel parity with the license-grace-warning block
+                    # above (~line 1540) — that one already fans out to
+                    # Telegram+email+webhook; this one only had Telegram.
+                    _recovered_msg = "✅ FranklinWH Advisor: poll errors resolved — alerts resuming."
+                    if cfg.telegram_bot_token and cfg.telegram_chat_id:
+                        notify_telegram(_recovered_msg, cfg.telegram_bot_token, cfg.telegram_chat_id)
+                    if cfg.smtp_host and cfg.email_to:
+                        notify_email(_recovered_msg, cfg)
+                    if cfg.webhook_url:
+                        notify_webhook(_recovered_msg, False, cfg)
                 _consec_errors = 0
                 _ping_healthcheck(cfg)  # signal a healthy completed cycle
                 _write_health_marker(outdir, 0, None)
@@ -1690,13 +1696,18 @@ def cmd_advise(
                         )
                     except Exception:
                         pass
-                if _consec_errors == _ERROR_THRESHOLD and cfg.telegram_bot_token and cfg.telegram_chat_id:
-                    notify_telegram(
+                if _consec_errors == _ERROR_THRESHOLD:
+                    _err_msg = (
                         f"⚠️ FranklinWH Advisor: {_ERROR_THRESHOLD} poll errors in a row\n"
                         f"Error: {e}\n"
-                        f"Alerts paused until fixed. Check advisor log for details.",
-                        cfg.telegram_bot_token, cfg.telegram_chat_id,
+                        f"Alerts paused until fixed. Check advisor log for details."
                     )
+                    if cfg.telegram_bot_token and cfg.telegram_chat_id:
+                        notify_telegram(_err_msg, cfg.telegram_bot_token, cfg.telegram_chat_id)
+                    if cfg.smtp_host and cfg.email_to:
+                        notify_email(_err_msg, cfg)
+                    if cfg.webhook_url:
+                        notify_webhook(_err_msg, True, cfg)
 
             if not watch:
                 break

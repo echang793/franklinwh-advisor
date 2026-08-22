@@ -2384,6 +2384,145 @@ def _night_current(soc):
     return types.SimpleNamespace(battery_soc_pct=soc)
 
 
+def test_ev_still_charging_fires_at_sop_transition():
+    """Weekday: fires right at the 6am super-off-peak -> off-peak boundary
+    when there's sustained charging-level grid draw bridging it."""
+    import types
+    now = datetime(2026, 8, 24, 6, 0, 0)  # Monday 6am
+    rows = [
+        ((now - timedelta(minutes=90)).isoformat(), 6.0, 6.5, 0.0),
+        ((now - timedelta(minutes=60)).isoformat(), 6.0, 6.5, 0.0),
+        ((now - timedelta(minutes=30)).isoformat(), 6.0, 6.5, 0.0),
+    ]
+    store = _NightStore(rows)
+    c = types.SimpleNamespace(grid_use_kw=6.0)
+    state = {}
+    msg = alerts._alert_ev_still_charging(state, "2026-08-24", now, c, Config(ev_charging=True), store)
+    assert msg is not None
+    assert "still charging" in msg
+    assert state["ev_still_charging_date"] == "2026-08-24"
+
+
+def test_ev_still_charging_skips_on_weekend_still_in_sop():
+    """Weekend SOP runs until 2pm, not 6am -- 8am Saturday must not
+    false-positive just because it would be off-peak on a weekday."""
+    import types
+    now = datetime(2026, 8, 22, 8, 0, 0)  # Saturday 8am -- still SOP on weekends
+    store = _NightStore([((now - timedelta(minutes=30)).isoformat(), 6.0, 6.5, 0.0)])
+    c = types.SimpleNamespace(grid_use_kw=6.0)
+    msg = alerts._alert_ev_still_charging({}, "2026-08-22", now, c, Config(ev_charging=True), store)
+    assert msg is None
+
+
+def test_ev_still_charging_skips_when_not_actively_importing():
+    """Grid draw below the EV-charging-level threshold -- solar's covering
+    it (or it's not charging), not alert-worthy."""
+    import types
+    now = datetime(2026, 8, 24, 6, 0, 0)
+    store = _NightStore([((now - timedelta(minutes=30)).isoformat(), 6.0, 6.5, 0.0)])
+    c = types.SimpleNamespace(grid_use_kw=0.3)  # below _NO_EV_LOAD_SPIKE_KW
+    msg = alerts._alert_ev_still_charging({}, "2026-08-24", now, c, Config(ev_charging=True), store)
+    assert msg is None
+
+
+def test_ev_still_charging_skips_without_sustained_readings():
+    """A single momentary spike right at the boundary isn't enough --
+    needs sustained draw across the lookback window to rule out an
+    unrelated fresh load starting right as SOP ends."""
+    import types
+    now = datetime(2026, 8, 24, 6, 0, 0)
+    rows = [
+        ((now - timedelta(minutes=90)).isoformat(), 0.1, 0.5, 0.0),
+        ((now - timedelta(minutes=60)).isoformat(), 0.1, 0.5, 0.0),
+        ((now - timedelta(minutes=30)).isoformat(), 0.1, 0.5, 0.0),
+    ]
+    store = _NightStore(rows)
+    c = types.SimpleNamespace(grid_use_kw=6.0)  # only just now, not sustained
+    msg = alerts._alert_ev_still_charging({}, "2026-08-24", now, c, Config(ev_charging=True), store)
+    assert msg is None
+
+
+def test_ev_still_charging_once_per_day():
+    import types
+    now = datetime(2026, 8, 24, 6, 0, 0)
+    store = _NightStore([((now - timedelta(minutes=30)).isoformat(), 6.0, 6.5, 0.0)])
+    c = types.SimpleNamespace(grid_use_kw=6.0)
+    state = {"ev_still_charging_date": "2026-08-24"}
+    msg = alerts._alert_ev_still_charging(state, "2026-08-24", now, c, Config(ev_charging=True), store)
+    assert msg is None
+
+
+def test_ev_still_charging_requires_ev_charging_enabled():
+    import types
+    now = datetime(2026, 8, 24, 6, 0, 0)
+    store = _NightStore([((now - timedelta(minutes=30)).isoformat(), 6.0, 6.5, 0.0)])
+    c = types.SimpleNamespace(grid_use_kw=6.0)
+    msg = alerts._alert_ev_still_charging({}, "2026-08-24", now, c, Config(ev_charging=False), store)
+    assert msg is None
+
+
+class _AttributionStore:
+    """Minimal store for _alert_self_sufficiency_streak: just
+    daily_attribution, returning (battery_kwh, solar_kwh, grid_kwh) or None."""
+    def __init__(self, by_date):
+        self._by_date = by_date
+    def daily_attribution(self, date_str):
+        return self._by_date.get(date_str)
+
+
+def test_self_sufficiency_streak_fires_after_7_good_days():
+    now = datetime(2026, 8, 20, 21, 30, 0)
+    by_date = {}
+    d = now.date() - timedelta(days=1)
+    for _ in range(7):
+        by_date[d.strftime("%Y-%m-%d")] = (7.0, 3.0, 0.5)  # (7+3)/10.5 = 95.2%
+        d -= timedelta(days=1)
+    store = _AttributionStore(by_date)
+    msg = alerts._alert_self_sufficiency_streak({}, "2026-08-20", now, store)
+    assert msg is not None
+    assert "self-sufficient" in msg
+
+
+def test_self_sufficiency_streak_breaks_on_one_bad_day():
+    now = datetime(2026, 8, 20, 21, 30, 0)
+    by_date = {}
+    d = now.date() - timedelta(days=1)
+    for i in range(7):
+        # One day at 50% self-sufficiency breaks the streak
+        by_date[d.strftime("%Y-%m-%d")] = (2.0, 3.0, 5.0) if i == 3 else (7.0, 3.0, 0.5)
+        d -= timedelta(days=1)
+    store = _AttributionStore(by_date)
+    msg = alerts._alert_self_sufficiency_streak({}, "2026-08-20", now, store)
+    assert msg is None
+
+
+def test_self_sufficiency_streak_breaks_on_missing_data():
+    now = datetime(2026, 8, 20, 21, 30, 0)
+    by_date = {}
+    d = now.date() - timedelta(days=1)
+    for i in range(7):
+        if i != 2:  # one day has no attribution data at all
+            by_date[d.strftime("%Y-%m-%d")] = (7.0, 3.0, 0.5)
+        d -= timedelta(days=1)
+    store = _AttributionStore(by_date)
+    msg = alerts._alert_self_sufficiency_streak({}, "2026-08-20", now, store)
+    assert msg is None
+
+
+def test_self_sufficiency_streak_weekly_gate():
+    now = datetime(2026, 8, 20, 21, 30, 0)
+    by_date = {}
+    d = now.date() - timedelta(days=1)
+    for _ in range(7):
+        by_date[d.strftime("%Y-%m-%d")] = (7.0, 3.0, 0.5)
+        d -= timedelta(days=1)
+    store = _AttributionStore(by_date)
+    week_key = now.strftime("%G-W%V")
+    state = {"self_sufficiency_streak_alerted_week": week_key}
+    msg = alerts._alert_self_sufficiency_streak(state, "2026-08-20", now, store)
+    assert msg is None
+
+
 def test_no_ev_night_records_confirmed_no_ev_load(monkeypatch):
     """SoC clearly above the floor -> confirmed no-EV night, real overnight
     load recorded per hour."""
