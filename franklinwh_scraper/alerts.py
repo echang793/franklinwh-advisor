@@ -1042,12 +1042,20 @@ def _predict_overnight_soc_flat(
 
 def _predict_sundown_soc(
     usage_forecast, now: datetime, soc: float, bat_cap: float,
-) -> tuple[float, datetime] | None:
+) -> tuple[float, datetime, float] | None:
     """Raw predicted SoC at today's sundown (the forecast's last hour still
     expecting meaningful solar), or None if there's no solar hour left
-    today. Returns (predicted_pct, sundown_dt) — a raw datetime, not a
-    pre-formatted label, since callers need it both for display
-    (`.strftime(...)`) and for persisting the prediction (`.isoformat()`).
+    today. Returns (predicted_pct, sundown_dt, export_kwh) — a raw
+    datetime, not a pre-formatted label, since callers need it both for
+    display (`.strftime(...)`) and for persisting the prediction
+    (`.isoformat()`).
+
+    export_kwh is the surplus solar the walk clips once the battery hits
+    bat_cap — on this system's assumed always-on Self-Consumption mode
+    (see _alert_solar_surplus_overflow's docstring), a full battery's
+    surplus exports to grid automatically, so "clipped by the min(bat_cap,
+    ...) below" and "exported to the grid" are the same kWh. 0.0 if the
+    battery's never projected to fill before sundown.
 
     Mirrors `_predict_overnight_soc_flat`'s role for the trailing edge of
     the day instead of the leading edge — shared by the /sundown chatbot
@@ -1070,12 +1078,16 @@ def _predict_sundown_soc(
     sundown_dt = today_sun_hours[-1].dt
 
     kwh = soc / 100.0 * bat_cap
+    export_kwh = 0.0
     for h in usage_forecast.hours:
         if h.dt <= now or h.dt > sundown_dt:
             continue
-        kwh = max(0.0, min(bat_cap, kwh + h.predicted_solar_kw - h.predicted_load_kw))
+        new_kwh = kwh + h.predicted_solar_kw - h.predicted_load_kw
+        if new_kwh > bat_cap:
+            export_kwh += new_kwh - bat_cap
+        kwh = max(0.0, min(bat_cap, new_kwh))
 
-    return kwh / bat_cap * 100.0, sundown_dt
+    return kwh / bat_cap * 100.0, sundown_dt, export_kwh
 
 
 def _sundown_projection_line(
@@ -1110,7 +1122,7 @@ def _sundown_projection_line(
     projection = _predict_sundown_soc(live_forecast, now, c.battery_soc_pct, cap)
     if projection is None:
         return ""
-    raw_pct, sundown_dt = projection
+    raw_pct, sundown_dt, _export_kwh = projection
     pred_pct = max(0.0, min(100.0, raw_pct + _get_sundown_bias(state)))
     return f"\n🌇 Projected @ sundown (~{sundown_dt.strftime('%-I:%M %p')}): ~{pred_pct:.0f}%"
 

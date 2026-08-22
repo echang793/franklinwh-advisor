@@ -928,6 +928,109 @@ def test_send_sundown_projects_soc_to_last_solar_hour():
     assert "5:00 PM" in sent["text"]
 
 
+def test_send_sundown_estimates_surplus_solar_export():
+    """/sundown adds a surplus-export estimate: once the walk-forward fills
+    the battery, further solar surplus is clipped by the same
+    min(bat_cap, ...) that models Self-Consumption auto-exporting a full
+    battery's surplus — that clipped total is the export estimate, priced
+    at today's best export rate (same tou.peak_export_hour the existing
+    export-arbitrage alert uses)."""
+    import types
+    from franklinwh_scraper import chatbot as chatbot_mod
+    from franklinwh_scraper import tou
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 15, 8, 0, 0)  # July -> _NEM3_DEFAULT_EXPORT_RATE, deterministic
+    hours = []
+    t = now
+    while t.date() == now.date() and t.hour <= 23:
+        solar = 5.0 if 8 <= t.hour < 12 else 0.0  # sun down at noon today
+        hours.append(HourPrediction(
+            dt=t, predicted_load_kw=1.0, predicted_solar_kw=solar,
+            net_kw=solar - 1.0, confidence="high",
+        ))
+        t += timedelta(hours=1)
+    forecast = UsageForecast(hours=hours, total_load_kwh=24.0, total_solar_kwh=20.0,
+                             net_kwh=8.0, peak_load_kw=1.0, confidence="high", data_days=30)
+
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    # soc=80% -> 10.88 kWh; net +4 kW/hr (5.0 solar - 1.0 load) for hours
+    # 9,10,11 (dt<=now and dt>sundown_dt=11:00 are skipped by the walk) ->
+    # hour9: 10.88+4=14.88 clips 1.28 over cap; hour10/11: full +4 each
+    # clipped -> total export = 1.28+4+4 = 9.28 kWh.
+    bot._stats = types.SimpleNamespace(
+        current=types.SimpleNamespace(battery_soc_pct=80.0),
+    )
+    bot._usage_forecast = forecast
+
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+
+    real_datetime = chatbot_mod.datetime
+    try:
+        class _FakeDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        chatbot_mod.datetime = _FakeDatetime
+        bot._send_sundown("123")
+    finally:
+        chatbot_mod.datetime = real_datetime
+
+    assert "text" in sent
+    text = sent["text"]
+    assert "Surplus solar to export" in text
+    assert "9.3 kWh" in text  # 9.28 rounds to 9.3
+    rate = tou._NEM3_DEFAULT_EXPORT_RATE
+    assert f"${9.28 * rate:.2f}" in text
+    assert f"${rate:.3f}/kWh" in text
+
+
+def test_send_sundown_omits_export_line_when_battery_never_fills():
+    """No export line when the forecast never has the battery hitting cap
+    before sundown — a marginal/negative kWh estimate would be noise, not
+    signal."""
+    import types
+    from franklinwh_scraper import chatbot as chatbot_mod
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 15, 8, 0, 0)
+    hours = []
+    t = now
+    while t.date() == now.date() and t.hour <= 23:
+        solar = 1.5 if 8 <= t.hour < 12 else 0.0
+        hours.append(HourPrediction(
+            dt=t, predicted_load_kw=1.0, predicted_solar_kw=solar,
+            net_kw=solar - 1.0, confidence="high",
+        ))
+        t += timedelta(hours=1)
+    forecast = UsageForecast(hours=hours, total_load_kwh=24.0, total_solar_kwh=6.0,
+                             net_kwh=-18.0, peak_load_kw=1.0, confidence="high", data_days=30)
+
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._stats = types.SimpleNamespace(
+        current=types.SimpleNamespace(battery_soc_pct=20.0),  # 2.72 kWh, never near cap
+    )
+    bot._usage_forecast = forecast
+
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+
+    real_datetime = chatbot_mod.datetime
+    try:
+        class _FakeDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        chatbot_mod.datetime = _FakeDatetime
+        bot._send_sundown("123")
+    finally:
+        chatbot_mod.datetime = real_datetime
+
+    assert "text" in sent
+    assert "Surplus solar to export" not in sent["text"]
+
+
 def test_eod_digest_reports_sundown_prediction_accuracy():
     """If /sundown was used earlier today, the EOD digest should report how
     the prediction compared to the actual SoC near the predicted time."""

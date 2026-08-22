@@ -915,6 +915,7 @@ class TelegramChatBot:
                                  _predict_sundown_soc, _save_peak_state,
                                  _state_lock)
             from .predictor import predict
+            from .tou import peak_export_hour
 
             out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
             state = _load_peak_state(out)
@@ -946,7 +947,7 @@ class TelegramChatBot:
             if projection is None:
                 self._send(chat_id, "☀️ Looks like solar generation for today is already done (or not enough forecast data left today).")
                 return
-            raw_pct, sundown_dt = projection
+            raw_pct, sundown_dt, export_kwh = projection
             # Learned additive correction from how past /sundown calls
             # actually did (state["sundown_bias_samples"], recorded by the
             # EOD digest's accuracy check) — 0.0 until >=3 graded samples
@@ -977,9 +978,24 @@ class TelegramChatBot:
                 if now.hour >= 21 else
                 "\n<i>I'll check how this did in tonight's ~9pm summary.</i>"
             )
+            # Surplus the walk clips once the battery hits cap — on this
+            # system's always-on Self-Consumption mode that surplus exports
+            # to grid automatically (see _alert_solar_surplus_overflow's
+            # docstring). $ framed at today's best export rate (peak_export_hour,
+            # same helper _alert_export_arbitrage uses) — an upper-bound
+            # estimate, not what every kWh will actually earn, since export
+            # timing/rate mix through the day will vary.
+            export_str = ""
+            if export_kwh > 0.1:
+                _, peak_rate = peak_export_hour(now.month)
+                export_str = (
+                    f"\n☀️ Surplus solar to export: ~<b>{export_kwh:.1f} kWh</b> "
+                    f"(~${export_kwh * peak_rate:.2f} at today's best export rate, ${peak_rate:.3f}/kWh)"
+                )
             self._send(chat_id,
                 f"🌇 Projected SoC at sundown (~{sundown_dt.strftime('%-I:%M %p')}, using solar+load forecast)\n"
-                f"Now: <b>{soc:.0f}%</b>  →  Sundown: ~<b>{end_pct:.0f}%</b>\n"
+                f"Now: <b>{soc:.0f}%</b>  →  Sundown: ~<b>{end_pct:.0f}%</b>"
+                f"{export_str}\n"
                 f"<i>{live_forecast.confidence.title()} confidence, {live_forecast.data_days}d data — actual weather/load will vary.</i>"
                 f"{followup}"
             )
