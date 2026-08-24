@@ -695,6 +695,14 @@ def _alert_morning_preview(
     if soc_7am_pred:
         pred_pct = soc_7am_pred["pct"]
         pred_dt  = datetime.fromisoformat(soc_7am_pred["dt"])
+        # low_pct/high_pct are absent on state written before 2026-08-24 —
+        # degrade to the old single-point message rather than KeyError on a
+        # prediction stashed the night before this shipped.
+        low_pct  = soc_7am_pred.get("low_pct")
+        high_pct = soc_7am_pred.get("high_pct")
+        has_range = low_pct is not None and high_pct is not None
+        range_label = f"{low_pct:.0f}-{high_pct:.0f}%" if has_range else f"{pred_pct:.0f}%"
+
         actual_pct = store.soc_near(soc_7am_pred["dt"]) if store is not None else None
         if actual_pct is None:
             # No reading landed within soc_near's +/-30min window around
@@ -704,9 +712,25 @@ def _alert_morning_preview(
             actual_pct = soc
             delta = actual_pct - pred_pct
             soc_7am_acc_str = (
-                f"\n🔋 Sunrise SoC accuracy: predicted {pred_pct:.0f}% — "
+                f"\n🔋 Sunrise SoC accuracy: predicted {range_label} — "
                 f"no reading near {pred_dt.strftime('%-I:%M %p')}, using now's "
-                f"{actual_pct:.0f}% instead ({delta:+.0f} pt, not directly comparable)."
+                f"{actual_pct:.0f}% instead ({delta:+.0f} pt vs {pred_pct:.0f}% point estimate, "
+                f"not directly comparable)."
+            )
+        elif has_range:
+            # Grade against the plausible 0.3-0.5 kWh/hr range, not the
+            # fake-precise 0.4 kW point — landing inside the range is a
+            # good outcome even when it doesn't match the point exactly.
+            if low_pct <= actual_pct <= high_pct:
+                fit = "within range"
+            elif actual_pct > high_pct:
+                fit = f"{actual_pct - high_pct:.0f}pt above range (used less than {_NO_EV_RANGE_LOW_KW:.1f} kWh/hr)"
+            else:
+                fit = f"{low_pct - actual_pct:.0f}pt below range (used more than {_NO_EV_RANGE_HIGH_KW:.1f} kWh/hr)"
+            soc_7am_acc_str = (
+                f"\n🔋 Sunrise SoC accuracy: predicted {range_label} "
+                f"({_NO_EV_RANGE_LOW_KW:.1f}-{_NO_EV_RANGE_HIGH_KW:.1f} kWh/hr), "
+                f"actual {actual_pct:.0f}% — {fit}"
             )
         else:
             delta = actual_pct - pred_pct
@@ -1021,6 +1045,16 @@ def _next_sunrise_after(now: datetime, outlook) -> datetime:
     return _sunrise_on((now + timedelta(days=1)).date(), now, outlook)
 
 
+# Plausible overnight-baseline-load bounds (fridge/standby draw varies
+# somewhat night to night around the 0.4 kW point estimate — see
+# Config.no_ev_baseline_load_kw) used to grade next morning's "Sunrise SoC
+# accuracy" line as a range instead of a single fake-precise point: actual
+# landing inside [low, high] is a good outcome even if it doesn't match the
+# 0.4 kW point exactly, by request 2026-08-24.
+_NO_EV_RANGE_LOW_KW  = 0.3   # less draw -> less discharge -> higher SoC bound
+_NO_EV_RANGE_HIGH_KW = 0.5   # more draw -> more discharge -> lower SoC bound
+
+
 def _predict_overnight_soc_flat(
     now: datetime, soc: float, bat_cap: float, baseline_kw: float, checkpoint: datetime,
 ) -> tuple[float, str]:
@@ -1235,8 +1269,17 @@ def _alert_eod_digest(
         has_ev = getattr(cfg, "ev_charging", False)
         label  = "Without EV charging" if has_ev else "Predicted SoC"
         soc_6am_str = f"\n🌅 {label} @ {hour_label}: ~{pred_soc_6am:.0f}%"
+        # Also stash a plausible low/high SoC range (0.3-0.5 kWh/hr baseline
+        # bounds — see _NO_EV_RANGE_LOW_KW/_HIGH_KW) so tomorrow's "Sunrise
+        # SoC accuracy" line can grade against a range instead of the single
+        # 0.4 kW point, by request 2026-08-24.
+        low_pct, _  = _predict_overnight_soc_flat(
+            now, soc, bat_cap, _NO_EV_RANGE_HIGH_KW, checkpoint_dt)  # more draw -> lower bound
+        high_pct, _ = _predict_overnight_soc_flat(
+            now, soc, bat_cap, _NO_EV_RANGE_LOW_KW, checkpoint_dt)   # less draw -> upper bound
         state[f"soc_7am_pred_{checkpoint_dt.strftime('%Y-%m-%d')}"] = {
-            "pct": pred_soc_6am, "dt": checkpoint_dt.isoformat(),
+            "pct": pred_soc_6am, "low_pct": low_pct, "high_pct": high_pct,
+            "dt": checkpoint_dt.isoformat(),
         }
 
     precharge_str  = ""

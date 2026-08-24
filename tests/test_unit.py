@@ -3477,6 +3477,11 @@ def test_eod_digest_stores_7am_prediction_for_tomorrow(monkeypatch):
     assert saved_dt.hour == 7 and saved_dt.minute == 0
     assert saved_dt.date() == (now + timedelta(days=1)).date()
     assert isinstance(state[key]["pct"], float)
+    # Range bounds (0.3-0.5 kWh/hr) stashed alongside the point estimate so
+    # tomorrow's accuracy line can grade against a range — added 2026-08-24.
+    assert isinstance(state[key]["low_pct"], float)
+    assert isinstance(state[key]["high_pct"], float)
+    assert state[key]["low_pct"] < state[key]["pct"] < state[key]["high_pct"]
 
 
 def test_morning_preview_reports_7am_prediction_accuracy_from_store():
@@ -3513,6 +3518,95 @@ def test_morning_preview_7am_accuracy_falls_back_without_nearby_reading():
     msg = alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
 
     assert msg is not None
+    assert "not directly comparable" in msg
+    assert "using now's 35%" in msg
+
+
+def test_morning_preview_7am_accuracy_within_range():
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    pred_dt = now.replace(hour=7, minute=0)
+    state = {f"soc_7am_pred_{today}": {
+        "pct": 27.0, "low_pct": 21.0, "high_pct": 35.0, "dt": pred_dt.isoformat(),
+    }}
+
+    store = _AttrStore(attr=(8.2, 5.1, 0.9))
+    store.soc_near = lambda ts: 30.0  # inside [21, 35]
+
+    c = types.SimpleNamespace(battery_soc_pct=30.0, solar_production_kw=0.5)
+    msg = alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert msg is not None
+    assert "Sunrise SoC accuracy: predicted 21-35% (0.3-0.5 kWh/hr), actual 30% — within range" in msg
+    assert f"soc_7am_pred_{today}" not in state
+
+
+def test_morning_preview_7am_accuracy_above_range():
+    """Actual SoC higher than the high (0.3 kWh/hr) bound — used less than
+    the plausible minimum, e.g. an unusually quiet night."""
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    pred_dt = now.replace(hour=7, minute=0)
+    state = {f"soc_7am_pred_{today}": {
+        "pct": 27.0, "low_pct": 21.0, "high_pct": 35.0, "dt": pred_dt.isoformat(),
+    }}
+
+    store = _AttrStore(attr=(8.2, 5.1, 0.9))
+    store.soc_near = lambda ts: 40.0  # 5pt above the 35% high bound
+
+    c = types.SimpleNamespace(battery_soc_pct=40.0, solar_production_kw=0.5)
+    msg = alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert msg is not None
+    assert "actual 40% — 5pt above range (used less than 0.3 kWh/hr)" in msg
+
+
+def test_morning_preview_7am_accuracy_below_range():
+    """Actual SoC lower than the low (0.5 kWh/hr) bound — used more than
+    the plausible maximum, e.g. an unaccounted load ran overnight."""
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    pred_dt = now.replace(hour=7, minute=0)
+    state = {f"soc_7am_pred_{today}": {
+        "pct": 27.0, "low_pct": 21.0, "high_pct": 35.0, "dt": pred_dt.isoformat(),
+    }}
+
+    store = _AttrStore(attr=(8.2, 5.1, 0.9))
+    store.soc_near = lambda ts: 15.0  # 6pt below the 21% low bound
+
+    c = types.SimpleNamespace(battery_soc_pct=15.0, solar_production_kw=0.5)
+    msg = alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert msg is not None
+    assert "actual 15% — 6pt below range (used more than 0.5 kWh/hr)" in msg
+
+
+def test_morning_preview_7am_accuracy_range_fallback_without_nearby_reading():
+    """No reading near sunrise -> falls back to now's SoC, still labels
+    the range and the point estimate, still marked not directly
+    comparable."""
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    pred_dt = now.replace(hour=7, minute=0)
+    state = {f"soc_7am_pred_{today}": {
+        "pct": 27.0, "low_pct": 21.0, "high_pct": 35.0, "dt": pred_dt.isoformat(),
+    }}
+
+    store = _AttrStore(attr=(8.2, 5.1, 0.9))  # soc_near defaults to None
+
+    c = types.SimpleNamespace(battery_soc_pct=35.0, solar_production_kw=0.5)
+    msg = alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert msg is not None
+    assert "predicted 21-35% —" in msg
     assert "not directly comparable" in msg
     assert "using now's 35%" in msg
 
