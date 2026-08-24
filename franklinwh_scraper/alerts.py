@@ -25,7 +25,7 @@ from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
                   cycle_bounds, export_rate_at, on_peak_window,
                   peak_export_hour, period_at, rate_at, rates_are_stale)
 from .predictor import predict
-from .savings import compute as savings_compute
+from .savings import compare_rate_plans, compute as savings_compute
 from .weather import (_outlook_cache, fetch_nws_storm_alerts)
 
 logger = logging.getLogger(__name__)
@@ -1686,6 +1686,63 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
     )
 
 
+_RATE_PLAN_CHECK_INTERVAL_DAYS = 90  # quarterly — plan switching isn't a weekly decision
+_RATE_PLAN_MIN_SAVINGS = 8.0         # $/month — below this, switching isn't worth the 12-month lock-in (DR-SES SC5)
+
+
+def _alert_rate_plan_optimality(state: dict, today: str, now: datetime, store) -> str | None:
+    """Quarterly check: would Schedule DR-SES (residential-with-solar) beat
+    the currently-billed EV-TOU-5 on actual usage over the last 60 days?
+
+    Import-side-only comparison (savings.compare_rate_plans) — export credit
+    and the base service charge are identical under either plan, see that
+    module's docstring. No live rate scraping (that's an already-considered/
+    rejected fragile pattern) — both schedules' $/kWh figures are hardcoded
+    in tou.py from SDG&E's published tariff, same staleness caveat as the
+    existing EV-TOU-5 rates the rest of this file already relies on.
+    """
+    if now.hour not in (8, 9) or store is None:
+        return None
+    last_check = state.get("rate_plan_check_date")
+    if last_check:
+        try:
+            days_since = (now.date() - datetime.strptime(last_check, "%Y-%m-%d").date()).days
+            if days_since < _RATE_PLAN_CHECK_INTERVAL_DAYS:
+                return None
+        except ValueError:
+            pass
+
+    window_start = (now.date() - timedelta(days=60)).strftime("%Y-%m-%d")
+    window_end   = now.date().strftime("%Y-%m-%d")
+    rows = store.weekly_readings(window_start, window_end)
+    if len(rows) < 100:
+        return None  # not enough data for a meaningful 60-day comparison yet
+
+    state["rate_plan_check_date"] = today
+    cmp = compare_rate_plans(integrate_intervals(rows))
+    if cmp.days < 30:
+        return None  # sparse data even though rows passed the count gate — skip a noisy verdict
+
+    logger.info(
+        "Rate-plan comparison: EV-TOU-5 $%.2f vs DR-SES $%.2f over %d days (~$%.2f/mo delta)",
+        cmp.evtou5_import_cost, cmp.drses_import_cost, cmp.days, cmp.monthly_savings,
+    )
+    if cmp.monthly_savings < _RATE_PLAN_MIN_SAVINGS:
+        return None  # DR-SES isn't clearly better — no action needed, stay quiet
+
+    return (
+        f"💡 <b>FranklinWH: DR-SES may beat your current EV-TOU-5 plan</b>\n"
+        f"Over the last {cmp.days} days ({cmp.import_kwh:.0f} kWh imported):\n"
+        f"<code>  EV-TOU-5: ${cmp.evtou5_import_cost:.2f}\n"
+        f"  DR-SES:   ${cmp.drses_import_cost:.2f}</code>\n"
+        f"Projected ~${cmp.monthly_savings:.2f}/month cheaper on DR-SES, based on grid-import "
+        f"pattern only (export credit and base service charge are the same under either plan). "
+        f"DR-SES has no EV-specific incentive and a 12-month lock-in before switching back — "
+        f"worth a look if you don't rely on the EV-TOU-5 midday super-off-peak window for charging. "
+        f"Priced at rates effective {cmp.priced_at}."
+    )
+
+
 def _conservation_advice(soc: float, load_kw: float, bat_cap: float) -> str:
     """Backup runtime at current vs essentials-only load, with a conservation nudge.
 
@@ -2149,6 +2206,52 @@ def _alert_capacity_fade(state: dict, today: str, now: datetime, store) -> str |
         f"({fade_pct:.0f}% lower){cost_note}\n"
         f"From {len(recent)} recent / {len(base)} baseline discharge runs. "
         f"Some seasonal variation is normal — watch the trend; if it persists, check warranty."
+    )
+
+
+def _alert_round_trip_efficiency(state: dict, today: str, now: datetime, store) -> str | None:
+    """Morning check: battery round-trip efficiency (discharge/charge) trending
+    down vs baseline suggests inverter/BMS conversion loss — distinct from
+    _alert_capacity_fade, which tracks usable-capacity (kWh held), not
+    conversion loss (kWh lost getting energy in and back out). A pack can
+    hold its rated capacity fine while still bleeding more to heat on every
+    cycle. Weekly throttle, same recent/baseline windows as capacity_fade.
+    """
+    if now.hour not in (8, 9) or store is None:
+        return None
+    week_key = now.strftime("%G-W%V")
+    if state.get("rt_efficiency_alerted_week") == week_key:
+        return None
+
+    today_str    = now.date().strftime("%Y-%m-%d")
+    recent_start = (now.date() - timedelta(days=14)).strftime("%Y-%m-%d")
+    base_start   = (now.date() - timedelta(days=75)).strftime("%Y-%m-%d")
+    base_end     = (now.date() - timedelta(days=21)).strftime("%Y-%m-%d")
+
+    recent = store.round_trip_efficiency_samples(recent_start, today_str)
+    base   = store.round_trip_efficiency_samples(base_start, base_end)
+    if len(recent) < 5 or len(base) < 5:
+        return None  # not enough clean charge/discharge days yet
+
+    recent_eff = statistics.median(recent)
+    base_eff   = statistics.median(base)
+    if base_eff <= 0:
+        return None
+    drop_pts = (base_eff - recent_eff) * 100  # percentage points, not relative %
+    if drop_pts < 8.0:
+        return None
+
+    state["rt_efficiency_alerted_week"] = week_key
+    logger.info("Round-trip efficiency alert: recent %.0f%% vs baseline %.0f%% (-%.0fpt)",
+                recent_eff * 100, base_eff * 100, drop_pts)
+
+    return (
+        f"🔋 <b>FranklinWH: Battery round-trip efficiency drop</b>\n"
+        f"Recent charge/discharge efficiency ~{recent_eff * 100:.0f}% vs ~{base_eff * 100:.0f}% baseline "
+        f"(-{drop_pts:.0f}pt), from {len(recent)} recent / {len(base)} baseline charge days.\n"
+        f"Capacity fade tracks how much the battery can hold; this tracks conversion loss on "
+        f"every cycle — inverter heat, BMS balancing overhead. Some seasonal variation (temperature "
+        f"affects inverter efficiency) is normal — watch the trend."
     )
 
 
@@ -2661,6 +2764,68 @@ def _alert_solar_surplus_overflow(
     )
 
 
+_EXPORT_CLIP_GAP_KW      = 1.0  # kW of surplus unaccounted for by observed export, sustained, before flagging
+_EXPORT_CLIP_RESET_GAP_KW = 0.3  # gap must close below this to re-arm
+_EXPORT_CLIP_STREAK_POLLS = 3    # consecutive polls over the gap threshold — filters a single meter-lag reading
+
+
+def _alert_export_clipping(state: dict, today: str, now: datetime, c) -> str | None:
+    """Battery full, solar clearly exceeds load — but observed grid export is
+    well below the expected surplus → likely inverter export clipping or a
+    NEM export cap, not just a slow day.
+
+    Distinct from _alert_solar_surplus_overflow, which only confirms a
+    surplus *exists* and assumes it exports cleanly once the battery is
+    full (true on this system's always-on Self-Consumption mode — see that
+    alert's docstring). This one checks whether it actually shows up as
+    negative grid_use_kw, catching an inverter continuous-export limit or a
+    curtailed NEM 3.0 export that would otherwise look identical to "solar's
+    just a bit low today" in every other alert.
+
+    Requires _EXPORT_CLIP_STREAK_POLLS consecutive polls with the gap open —
+    same noise-filtering shape as the fast/unusual-drain streak counter —
+    since a single reading can lag the meter by one poll interval. Standing
+    flag re-arms once the gap closes, same convention as
+    battery_full_notified in _alert_solar_surplus_overflow.
+    """
+    soc        = c.battery_soc_pct
+    surplus_kw = c.solar_production_kw - c.home_load_kw
+    export_kw  = max(0.0, -c.grid_use_kw)
+    gap_kw     = surplus_kw - export_kw
+
+    if gap_kw < _EXPORT_CLIP_RESET_GAP_KW:
+        state["export_clip_notified"] = False
+        state["export_clip_streak"] = 0
+
+    if not (10 <= now.hour < 18):
+        return None
+    if soc < 99.0 or surplus_kw < 1.0:
+        state["export_clip_streak"] = 0
+        return None  # no meaningful surplus to check export against
+
+    if gap_kw < _EXPORT_CLIP_GAP_KW:
+        state["export_clip_streak"] = 0
+        return None
+
+    streak = state.get("export_clip_streak", 0) + 1
+    state["export_clip_streak"] = streak
+    if streak < _EXPORT_CLIP_STREAK_POLLS or state.get("export_clip_notified"):
+        return None
+
+    state["export_clip_notified"] = True
+    logger.info("Export clipping alert: surplus=%.2f kW export=%.2f kW gap=%.2f kW (%d polls)",
+                surplus_kw, export_kw, gap_kw, streak)
+    return (
+        f"⚠️ <b>FranklinWH: Solar surplus not reaching the grid</b>\n"
+        f"🔋 {soc:.0f}%  ·  Solar {c.solar_production_kw:.2f} kW  ·  Load {c.home_load_kw:.2f} kW  ·  "
+        f"Export {export_kw:.2f} kW\n"
+        f"Battery's full and solar clearly exceeds load (~{surplus_kw:.2f} kW surplus), but only "
+        f"~{export_kw:.2f} kW is reaching the grid — ~{gap_kw:.2f} kW unaccounted for, sustained "
+        f"over {streak} polls. Could be inverter export clipping or a NEM export cap — worth "
+        f"checking if it keeps happening."
+    )
+
+
 def _alert_solar_back_to_baseline(
     state: dict, today: str, now: datetime
 ) -> str | None:
@@ -2801,15 +2966,18 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("prediction_drift",     lambda: _alert_prediction_drift(state, today, now)),
             ("solar_back_to_baseline", lambda: _alert_solar_back_to_baseline(state, today, now)),
             ("capacity_fade",        lambda: _alert_capacity_fade(state, today, now, store)),
+            ("round_trip_efficiency", lambda: _alert_round_trip_efficiency(state, today, now, store)),
             ("baseline_load_drift",  lambda: _alert_baseline_load_drift(state, today, now, store, cfg)),
             ("peak_streak",          lambda: _alert_peak_streak(state, today, now)),
             ("peak_streak_good",     lambda: _alert_peak_streak_good(state, today, now)),
             ("self_sufficiency_streak", lambda: _alert_self_sufficiency_streak(state, today, now, store)),
             ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store, cfg)),
             ("bill_reconciliation",  lambda: _alert_bill_reconciliation(state, today, now, cfg, store)),
+            ("rate_plan_optimality", lambda: _alert_rate_plan_optimality(state, today, now, store)),
             ("heat_wave_prep",       lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),
             ("multiday_cloudy_precharge", lambda: _alert_multiday_cloudy_precharge(state, today, now, c, outlook, cfg)),
             ("solar_surplus_overflow",    lambda: _alert_solar_surplus_overflow(state, today, now, c)),
+            ("export_clipping",           lambda: _alert_export_clipping(state, today, now, c)),
             ("storm_prep",           lambda: _alert_storm_prep(state, today, now, c, cfg)),
             ("ev_charge_window",     lambda: _alert_ev_charge_window(state, today, now, c, cfg, outlook)),
             ("ev_still_charging",    lambda: _alert_ev_still_charging(state, today, now, c, cfg, store)),

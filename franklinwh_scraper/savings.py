@@ -31,7 +31,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 
 from .tou import (_NEM3_DEFAULT_EXPORT_RATE, _RATES_EFFECTIVE_DATE, TouPeriod,
-                  export_rate_at, period_at, rate_at)
+                  drses_rate_at, export_rate_at, period_at, rate_at)
 
 
 @dataclass
@@ -151,6 +151,55 @@ def compute(intervals, start: str = "", end: str = "") -> SavingsBreakdown:
         saved_super_off_peak=round(saved_super_off_peak, 2),
         priced_at=_RATES_EFFECTIVE_DATE.strftime("%Y-%m-%d"),
         export_days_at_assumed_rate=len(assumed_rate_days),
+    )
+
+
+@dataclass
+class RatePlanComparison:
+    days: int
+    import_kwh: float
+    evtou5_import_cost: float    # current billed plan
+    drses_import_cost: float     # residential-with-solar alternative
+    monthly_savings: float       # positive = DR-SES would be cheaper
+    priced_at: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def compare_rate_plans(intervals) -> RatePlanComparison:
+    """Compare grid-import cost under the currently-billed plan (EV-TOU-5)
+    vs. Schedule DR-SES (residential-with-solar) over the same intervals.
+
+    Import-side only: export credit and the daily Base Services Charge are
+    identical dollar amounts under either plan (same NEM billing, same
+    $0.79343/day UDC line item — see tou.py), so they cancel out of the
+    comparison and are deliberately left out rather than computed twice for
+    no effect on the delta. `intervals` is history.integrate_intervals()
+    output, same contract as compute() above.
+    """
+    import_kwh = 0.0
+    evtou5_cost = drses_cost = 0.0
+    seen_days: set[str] = set()
+
+    for dt0, hours, grid_avg, _home_avg, _solar_avg in intervals:
+        seen_days.add(dt0.strftime("%Y-%m-%d"))
+        imp_kw = max(0.0, grid_avg)
+        import_kwh += imp_kw * hours
+        evtou5_cost += imp_kw * rate_at(dt0) * hours
+        drses_cost  += imp_kw * drses_rate_at(dt0) * hours
+
+    days = len(seen_days)
+    delta = evtou5_cost - drses_cost
+    monthly_savings = (delta / days * 30.44) if days > 0 else 0.0
+
+    return RatePlanComparison(
+        days=days,
+        import_kwh=round(import_kwh, 2),
+        evtou5_import_cost=round(evtou5_cost, 2),
+        drses_import_cost=round(drses_cost, 2),
+        monthly_savings=round(monthly_savings, 2),
+        priced_at=_RATES_EFFECTIVE_DATE.strftime("%Y-%m-%d"),
     )
 
 

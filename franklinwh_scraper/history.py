@@ -428,6 +428,31 @@ class HistoryStore:
                 chg += -avg * dt_h
         return round(chg, 2), round(dis, 2)
 
+    def round_trip_efficiency_samples(
+        self, start_date: str, end_date: str, min_charge_kwh: float = 1.0,
+    ) -> list[float]:
+        """Daily round-trip efficiency (discharge_kwh / charge_kwh) for days with
+        a meaningful charge cycle, via daily_battery_kwh's clamped integration.
+
+        Distinct from capacity_samples: capacity fade tracks how much energy
+        the battery can *hold* (kWh per 100% SoC); this tracks how much of
+        what goes *in* comes back *out* — inverter/BMS conversion loss can
+        degrade independently of cell capacity. Days below min_charge_kwh are
+        skipped — a near-zero charge day makes the ratio noise-dominated
+        (e.g. 0.05 kWh charged, 0.2 kWh discharged from residual self-use
+        would read as 400% "efficiency").
+        """
+        samples: list[float] = []
+        d = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        while d <= end:
+            date_str = d.strftime("%Y-%m-%d")
+            chg, dis = self.daily_battery_kwh(date_str)
+            if chg >= min_charge_kwh:
+                samples.append(min(dis / chg, 1.0))  # clamp: >100% is a metering artifact, not real efficiency
+            d += timedelta(days=1)
+        return samples
+
     def recent_avg_load(self, hours: int = 2) -> float | None:
         """Average home load over the last N hours of recorded data."""
         cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()

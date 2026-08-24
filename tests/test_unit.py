@@ -4289,3 +4289,216 @@ def test_handle_callback_query_ignores_unauthorized_chat():
 
     assert not sent  # never replies to an unauthorized chat
     assert answered == [("cbq2", "")]  # spinner still dismissed
+
+
+# ── Round-trip efficiency (weekly-review 2026-08-24) ──────────────────
+
+def test_round_trip_efficiency_samples(tmp_path):
+    """charge_kwh/discharge_kwh from daily_battery_kwh feed a plain ratio,
+    clamped at 1.0 since >100% is a metering artifact, not real physics."""
+    db = HistoryStore(tmp_path / "h.db")
+    base = datetime(2026, 5, 1, 0, 0)
+    # 4h charging at 2kW (~8 kWh in), then 4h discharging at 1.8kW (~7.2 kWh out)
+    # -> ~90% round-trip efficiency for the day.
+    rows = []
+    for i in range(5):
+        rows.append((base + timedelta(hours=i), -2.0))
+    for i in range(5, 10):
+        rows.append((base + timedelta(hours=i), 1.8))
+    for ts, kw in rows:
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts.isoformat(), 0, ts.hour, 0.0, 0.0, 50.0, 0.0, "normal", 0.0, kw),
+        )
+    db._conn.commit()
+    samples = db.round_trip_efficiency_samples("2026-05-01", "2026-05-01")
+    assert len(samples) == 1
+    assert 0.8 < samples[0] <= 1.0
+
+
+def test_round_trip_efficiency_skips_low_charge_days(tmp_path):
+    """A day with negligible charge (residual self-use noise) is excluded —
+    otherwise a 0.05 kWh charge / 0.2 kWh discharge day reads as a bogus
+    400% 'efficiency' that would swamp the real signal."""
+    db = HistoryStore(tmp_path / "h.db")
+    ts = datetime(2026, 5, 1, 12, 0)
+    for i, kw in enumerate([-0.1, 0.4]):
+        t = (ts + timedelta(minutes=30 * i)).isoformat()
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (t, 0, 12, 0.0, 0.0, 50.0, 0.0, "normal", 0.0, kw),
+        )
+    db._conn.commit()
+    assert db.round_trip_efficiency_samples("2026-05-01", "2026-05-01") == []
+
+
+def test_alert_round_trip_efficiency_fires_on_sustained_drop():
+
+    class FakeStore:
+        def __init__(self, recent, base):
+            self._recent, self._base = recent, base
+
+        def round_trip_efficiency_samples(self, start, end, min_charge_kwh=1.0):
+            # Distinguish the two windows by which is queried first via a
+            # simple call-order flag rather than inspecting dates in detail —
+            # mirrors how test_capacity_samples-style tests key on window size.
+            return self._recent if start > "2026-07-01" else self._base
+
+    now = datetime(2026, 8, 24, 8, 30)
+    store = FakeStore(recent=[0.80] * 6, base=[0.93] * 6)
+    state: dict = {}
+    body = alerts._alert_round_trip_efficiency(state, "2026-08-24", now, store)
+    assert body is not None
+    assert "round-trip efficiency" in body.lower()
+    assert state.get("rt_efficiency_alerted_week") == now.strftime("%G-W%V")
+
+
+def test_alert_round_trip_efficiency_quiet_when_stable():
+    class FakeStore:
+        def round_trip_efficiency_samples(self, start, end, min_charge_kwh=1.0):
+            return [0.90] * 6
+
+    now = datetime(2026, 8, 24, 8, 30)
+    body = alerts._alert_round_trip_efficiency({}, "2026-08-24", now, FakeStore())
+    assert body is None
+
+
+def test_alert_round_trip_efficiency_needs_enough_samples():
+    class FakeStore:
+        def round_trip_efficiency_samples(self, start, end, min_charge_kwh=1.0):
+            return [0.80, 0.81]  # only 2 — below the 5-sample floor
+
+    now = datetime(2026, 8, 24, 8, 30)
+    assert alerts._alert_round_trip_efficiency({}, "2026-08-24", now, FakeStore()) is None
+
+
+# ── DR-SES rate-plan comparison (weekly-review 2026-08-24) ─────────────
+
+def test_drses_period_at_matches_evtou5_on_weekends():
+    """DR-SES and EV-TOU-5 share identical weekend/holiday period windows —
+    per SDG&E's Schedule DR-SES tariff sheet, Sheet 2."""
+    sat_night  = datetime(2026, 8, 22, 1)   # Sat 1am -> super off-peak both
+    sat_midday = datetime(2026, 8, 22, 15)  # Sat 3pm -> off-peak both
+    sat_peak   = datetime(2026, 8, 22, 18)  # Sat 6pm -> on-peak both
+    for dt in (sat_night, sat_midday, sat_peak):
+        assert tou._drses_period_at(dt) == tou.period_at(dt)
+
+
+def test_drses_period_at_no_midday_carveout_outside_march_april():
+    """EV-TOU-5 carves 10am-2pm into super-off-peak year-round (its EV
+    incentive); DR-SES only does that in March/April — an August weekday at
+    11am must land in different periods under the two schedules."""
+    aug_weekday_11am = datetime(2026, 8, 24, 11)  # a Monday
+    assert tou.period_at(aug_weekday_11am) == tou.TouPeriod.SUPER_OFF_PEAK
+    assert tou._drses_period_at(aug_weekday_11am) == tou.TouPeriod.OFF_PEAK
+
+
+def test_drses_period_at_march_carveout():
+    march_weekday_11am = datetime(2026, 3, 9, 11)  # a Monday in March
+    assert tou._drses_period_at(march_weekday_11am) == tou.TouPeriod.SUPER_OFF_PEAK
+
+
+def test_drses_rate_at_on_peak_matches_verified_table():
+    """Pinned against SDG&E's official 1-1-26 DR-SES Total Rates Table —
+    catches an accidental edit to the hardcoded schedule."""
+    assert tou.drses_rate_at(datetime(2026, 7, 8, 17)) == pytest.approx(0.74506)
+    assert tou.drses_rate_at(datetime(2026, 1, 8, 17)) == pytest.approx(0.47444)
+
+
+def test_compare_rate_plans_prefers_cheaper_plan():
+    from franklinwh_scraper.savings import compare_rate_plans
+
+    # All grid import during a weekday summer on-peak hour, where DR-SES
+    # (0.74506) is cheaper than EV-TOU-5 (0.79988) — see tou._RATES.
+    dt = datetime(2026, 7, 8, 17)  # Wed 5pm, on-peak both schedules
+    intervals = [(dt, 1.0, 2.0, 2.0, 0.0)]  # (dt, hours, grid_kw, home_kw, solar_kw)
+    cmp = compare_rate_plans(intervals)
+    assert cmp.drses_import_cost < cmp.evtou5_import_cost
+    assert cmp.monthly_savings > 0
+    assert cmp.import_kwh == pytest.approx(2.0)
+
+
+def test_alert_rate_plan_optimality_quiet_below_savings_floor():
+    class FakeStore:
+        def weekly_readings(self, start, end):
+            # Flat, tiny load -> negligible $ delta either way.
+            base = datetime(2026, 6, 1, 0)
+            return [
+                ((base + timedelta(hours=i)).isoformat(), 0.05, 0.05, 0.0)
+                for i in range(150)
+            ]
+
+    now = datetime(2026, 8, 24, 8, 30)
+    assert alerts._alert_rate_plan_optimality({}, "2026-08-24", now, FakeStore()) is None
+
+
+def test_alert_rate_plan_optimality_respects_quarterly_throttle():
+    class FakeStore:
+        def weekly_readings(self, start, end):
+            base = datetime(2026, 6, 1, 0)
+            return [
+                ((base + timedelta(hours=i)).isoformat(), 3.0, 3.0, 0.0)
+                for i in range(150)
+            ]
+
+    now = datetime(2026, 8, 24, 8, 30)
+    state = {"rate_plan_check_date": "2026-08-01"}  # 23 days ago — inside the 90-day window
+    assert alerts._alert_rate_plan_optimality(state, "2026-08-24", now, FakeStore()) is None
+
+
+# ── Export clipping (weekly-review 2026-08-24) ─────────────────────────
+
+def test_alert_export_clipping_fires_after_sustained_gap():
+    import types
+
+    now = datetime(2026, 8, 24, 13, 0)
+    c = types.SimpleNamespace(
+        battery_soc_pct=99.5, solar_production_kw=6.0, home_load_kw=1.0,
+        grid_use_kw=-1.0,  # only 1kW exporting despite a ~5kW surplus
+    )
+    state: dict = {}
+    for _ in range(2):
+        assert alerts._alert_export_clipping(state, "2026-08-24", now, c) is None
+    body = alerts._alert_export_clipping(state, "2026-08-24", now, c)
+    assert body is not None
+    assert "not reaching the grid" in body
+    assert state.get("export_clip_notified") is True
+
+
+def test_alert_export_clipping_quiet_when_exporting_cleanly():
+    import types
+
+    now = datetime(2026, 8, 24, 13, 0)
+    c = types.SimpleNamespace(
+        battery_soc_pct=100.0, solar_production_kw=6.0, home_load_kw=1.0,
+        grid_use_kw=-4.9,  # export tracks the ~5kW surplus closely
+    )
+    state: dict = {}
+    for _ in range(4):
+        assert alerts._alert_export_clipping(state, "2026-08-24", now, c) is None
+
+
+def test_alert_export_clipping_resets_streak_on_good_poll():
+    """A momentary meter-lag reading shouldn't accumulate toward the streak
+    once the gap closes — regression guard for the noise-filtering counter."""
+    import types
+
+    now = datetime(2026, 8, 24, 13, 0)
+    clipped = types.SimpleNamespace(
+        battery_soc_pct=99.5, solar_production_kw=6.0, home_load_kw=1.0, grid_use_kw=-1.0,
+    )
+    clean = types.SimpleNamespace(
+        battery_soc_pct=99.5, solar_production_kw=6.0, home_load_kw=1.0, grid_use_kw=-4.9,
+    )
+    state: dict = {}
+    alerts._alert_export_clipping(state, "2026-08-24", now, clipped)
+    alerts._alert_export_clipping(state, "2026-08-24", now, clean)  # resets streak
+    assert state.get("export_clip_streak") == 0
+    # Two more clipped polls only reach streak=2, not the 3 needed to fire.
+    alerts._alert_export_clipping(state, "2026-08-24", now, clipped)
+    body = alerts._alert_export_clipping(state, "2026-08-24", now, clipped)
+    assert body is None

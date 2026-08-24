@@ -133,6 +133,71 @@ def rate_at(dt: datetime) -> float:
     return _RATES[season][period_at(dt)]
 
 
+# ── Schedule DR-SES (residential-with-solar alternative to EV-TOU-5) ──────
+# Used only for the rate-plan-comparison alert (savings.compare_rate_plans) —
+# never for billing math above, which is all EV-TOU-5. Rates verified against
+# SDG&E's official "1-1-26 Schedule DR-SES Total Rates Table" (sdge.com/
+# sites/default/files/regulatory/1-1-26%20Schedule%20DR-SES%20Total%20Rates
+# %20Table.pdf), fetched 2026-08-24 — same _RATES_EFFECTIVE_DATE staleness
+# caveat as EV-TOU-5's _RATES applies here too.
+_DRSES_RATES = {
+    "summer": {
+        TouPeriod.SUPER_OFF_PEAK: 0.35588,
+        TouPeriod.OFF_PEAK:       0.44763,
+        TouPeriod.ON_PEAK:        0.74506,
+    },
+    "winter": {
+        TouPeriod.SUPER_OFF_PEAK: 0.34850,
+        TouPeriod.OFF_PEAK:       0.41785,
+        TouPeriod.ON_PEAK:        0.47444,
+    },
+}
+# Base Services Charge is $0.79343/day on DR-SES too (same UDC line item as
+# EV-TOU-5's BASE_SERVICE_DAILY) — identical in the counterfactual, so
+# compare_rate_plans() ignores it rather than duplicating the constant.
+
+
+def _drses_period_at(dt: datetime) -> TouPeriod:
+    """Return the DR-SES period for dt — NOT the same schedule as period_at().
+
+    Weekend/holiday periods match EV-TOU-5's exactly (midnight-2pm super
+    off-peak, 2-4pm off-peak, 4-9pm on-peak, 9pm-midnight off-peak). Weekday
+    periods differ: EV-TOU-5 carves 10am-2pm into super-off-peak year-round
+    to incentivize midday EV charging; DR-SES only does that in March/April
+    (and only reaches the tariff's "Winter" season definition, which runs
+    Nov-May) — the rest of the year, weekday off-peak runs straight 6am-4pm
+    with no midday carve-out. Source: SDG&E Schedule DR-SES tariff, Sheet 2,
+    "Time Periods" table (sdge.com/sites/default/files/elec_elec-scheds_dr-
+    ses.pdf), fetched 2026-08-24 — a tariff *structure* document, distinct
+    from (and more stable than) the twice-yearly-revised rates table above.
+    """
+    h = dt.hour
+    if dt.weekday() >= 5 or _is_holiday(dt):
+        if h < 14:
+            return TouPeriod.SUPER_OFF_PEAK
+        if h < 16:
+            return TouPeriod.OFF_PEAK
+        if h < 21:
+            return TouPeriod.ON_PEAK
+        return TouPeriod.OFF_PEAK
+    # Weekday
+    if h < 6:
+        return TouPeriod.SUPER_OFF_PEAK
+    if dt.month in (3, 4) and 10 <= h < 14:
+        return TouPeriod.SUPER_OFF_PEAK
+    if h < 16:
+        return TouPeriod.OFF_PEAK
+    if h < 21:
+        return TouPeriod.ON_PEAK
+    return TouPeriod.OFF_PEAK
+
+
+def drses_rate_at(dt: datetime) -> float:
+    """Return $/kWh for grid import at dt under Schedule DR-SES."""
+    season = "summer" if dt.month in _SUMMER_MONTHS else "winter"
+    return _DRSES_RATES[season][_drses_period_at(dt)]
+
+
 def cheap_charge_deadline(dt: datetime) -> datetime | None:
     """
     Return the end of today's Super Off-Peak window (2 pm), or None if already past it.
