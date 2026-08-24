@@ -542,11 +542,22 @@ def api_bill():
     day_n = (today - start).days + 1
     total_days = (end - start).days + 1
     projected = round(cur["net"] / max(1, day_n) * total_days, 2)
+
+    # Actual bill reconciliation — set via `franklinwh bill-record`. Keyed
+    # by the prior cycle's end date, same key alerts._alert_bill_reconciliation
+    # writes/reads, so the CLI and dashboard always agree on which cycle a
+    # recorded amount belongs to.
+    state = _load_peak_state(_OUT)
+    actual_prior = state.get(f"actual_bill_{prior_end.isoformat()}")
+    diff_prior = round(actual_prior - prior["net"], 2) if isinstance(actual_prior, (int, float)) else None
+
     return {
         "cycle_start": start.isoformat(), "cycle_end": end.isoformat(),
         "day": day_n, "days": total_days,
         "net_mtd": cur["net"], "projected": projected,
         "prior_net": prior["net"], "saved_mtd": cur["saved"],
+        "prior_cycle_end": prior_end.isoformat(),
+        "actual_prior": actual_prior, "diff_prior": diff_prior,
     }
 
 
@@ -558,8 +569,13 @@ def api_auth_status():
 
 
 @app.get("/api/attribution", dependencies=_authed)
-def api_attribution(days: int = Query(14, ge=1, le=90)):
+def api_attribution(days: int = Query(14, ge=1, le=400)):
     """Where each day's home load actually came from.
+
+    Cap raised from 90 to 400 (savings.compute's own le=365 plus slack) so
+    the dashboard's window selector can request "ALL" — rows with no data
+    are skipped below, so this is harmless before a year of history
+    actually exists; it just returns whatever's real.
 
     Paths, not sources: solar_kwh here is *direct* solar→home. Solar that
     charged the battery and served load after sunset is counted under

@@ -225,6 +225,31 @@ def notify_email(body: str, cfg: "Config") -> bool:
     return _with_retry(_send, "Email notification")
 
 
+def notify_ntfy(body: str, cfg: "Config") -> bool:
+    """POST to ntfy.sh (or a self-hosted instance) — free push, no account.
+
+    ntfy's body IS the message (not JSON like the generic webhook); title
+    and priority go in headers. Non-ASCII (emoji headers in particular)
+    must be UTF-8-encoded onto the wire explicitly — requests won't do it
+    for a plain `str` header value on all platforms.
+    """
+    if not cfg.ntfy_topic:
+        return False
+
+    def _send():
+        title = body.splitlines()[0][:100] if body else "FranklinWH Alert"
+        r = requests.post(
+            f"{cfg.ntfy_server.rstrip('/')}/{cfg.ntfy_topic}",
+            data=body.encode("utf-8"),
+            headers={"Title": title.encode("utf-8"), "Priority": "default"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        logger.debug("ntfy posted to topic %s", cfg.ntfy_topic)
+
+    return _with_retry(_send, "ntfy notification")
+
+
 def notify_webhook(body: str, urgent: bool, cfg: "Config") -> bool:
     """POST alert as JSON to cfg.webhook_url (Slack, Discord, custom endpoint, etc.)."""
     if not cfg.webhook_url:

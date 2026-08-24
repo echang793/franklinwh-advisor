@@ -53,6 +53,13 @@ class Config:
     # Generic webhook (POST JSON to Slack, Discord, custom URL, etc.)
     webhook_url: str = ""
 
+    # ntfy.sh push notifications — free, no account required. Set ntfy_topic
+    # to a hard-to-guess string (anyone who knows the topic can read it on
+    # the public server); ntfy_server lets self-hosted instances override
+    # the default public one.
+    ntfy_topic: str = ""
+    ntfy_server: str = "https://ntfy.sh"
+
     # Uptime monitoring — ping this URL each successful run (e.g. healthchecks.io).
     # If pings stop, the service notifies you the advisor has gone down.
     healthcheck_url: str = ""

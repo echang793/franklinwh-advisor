@@ -39,7 +39,7 @@ from .exporters import export_csv, export_json
 from .history import HistoryStore
 from .license import ENFORCE_LICENSE, check_license
 from .notifier import (notify_email, notify_imessage, notify_log,
-                       notify_macos, notify_telegram, notify_webhook,
+                       notify_macos, notify_ntfy, notify_telegram, notify_webhook,
                        fetch_telegram_chat_id, rec_to_text)
 from .predictor import predict
 from .scrapers import FAQScraper, ProductsScraper, SupportScraper
@@ -140,6 +140,78 @@ def _read_consec_errors(out: Path) -> int:
         return 0
 
 
+_CRASH_LOOP_STARTS_FILE  = ".start_times.json"
+_CRASH_LOOP_ALERT_MARKER = ".crash_loop_alerted"
+_CRASH_LOOP_WINDOW_MIN   = 10   # look at starts within this trailing window
+_CRASH_LOOP_THRESHOLD    = 4    # this many starts in the window = looping
+_CRASH_LOOP_ALERT_GAP_MIN = 60  # don't re-alert more than once/hour
+
+
+def _parse_iso(s: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _check_crash_loop(out: Path, cfg: Config) -> None:
+    """Detect launchd crash-looping independent of the watch loop's own
+    _ERROR_THRESHOLD counter below — that counter only increments inside the
+    try/except *within* the loop, so a crash before the loop is even reached
+    (bad import, corrupt config, syntax error in a just-edited module) writes
+    zero health-marker updates and is structurally invisible to it. This
+    tracks process starts directly, at the very top of every invocation, so
+    it catches exactly the failure mode _ERROR_THRESHOLD can't.
+    """
+    p = out / _CRASH_LOOP_STARTS_FILE
+    now = datetime.now()
+    try:
+        starts = json.loads(p.read_text())
+        if not isinstance(starts, list):
+            starts = []
+    except (OSError, json.JSONDecodeError):
+        starts = []
+    starts = [s for s in starts if isinstance(s, str)]
+    starts.append(now.isoformat())
+    starts = starts[-10:]
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(starts))
+    except OSError:
+        pass
+
+    cutoff  = now - timedelta(minutes=_CRASH_LOOP_WINDOW_MIN)
+    parsed  = [_parse_iso(s) for s in starts]
+    recent  = [dt for dt in parsed if dt is not None and dt >= cutoff]
+    if len(recent) < _CRASH_LOOP_THRESHOLD:
+        return
+
+    marker = out / _CRASH_LOOP_ALERT_MARKER
+    try:
+        last_alert = _parse_iso(marker.read_text().strip())
+    except OSError:
+        last_alert = None
+    if last_alert and (now - last_alert) < timedelta(minutes=_CRASH_LOOP_ALERT_GAP_MIN):
+        return
+
+    msg = (
+        f"🔴 <b>FranklinWH Advisor: crash-looping</b>\n"
+        f"{len(recent)} process starts in the last {_CRASH_LOOP_WINDOW_MIN} min — "
+        f"something is dying immediately on startup. Check advisor.log."
+    )
+    if cfg.telegram_bot_token and cfg.telegram_chat_id:
+        notify_telegram(msg, cfg.telegram_bot_token, cfg.telegram_chat_id)
+    if cfg.smtp_host and cfg.email_to:
+        notify_email(msg, cfg)
+    if cfg.webhook_url:
+        notify_webhook(msg, True, cfg)
+    if getattr(cfg, "ntfy_topic", ""):
+        notify_ntfy(msg, cfg)
+    try:
+        marker.write_text(now.isoformat())
+    except OSError:
+        pass
+
 
 def _dispatch_notifications(rec, cfg: Config, notify_flag: bool, last_mode: str | None, outdir: Path | None = None) -> None:
     """Send macOS + iMessage notifications when the recommendation changes or is critical."""
@@ -192,6 +264,9 @@ def _dispatch_notifications(rec, cfg: Config, notify_flag: bool, last_mode: str 
 
     if cfg.webhook_url:
         notify_webhook(rec_to_text(rec), critical, cfg)
+
+    if getattr(cfg, "ntfy_topic", ""):
+        notify_ntfy(rec_to_text(rec), cfg)
 
 
 def _resolve_gateway(client: AccountClient, gateway: str) -> str:
@@ -417,6 +492,31 @@ def setup(quick: bool) -> None:
     else:
         cfg.webhook_url = ""
 
+    # ── ntfy.sh ──────────────────────────────────────────────────────
+    click.echo()
+    click.echo(click.style("  ntfy.sh", bold=True) + "  — free push notifications, no account needed")
+    click.echo("    Pick a hard-to-guess topic name (anyone who knows it can read it on the public server)")
+    click.echo()
+    topic = click.prompt(
+        "  ntfy topic (leave blank to skip)",
+        default=cfg.ntfy_topic or "",
+    ).strip()
+    if topic:
+        cfg.ntfy_topic = topic
+        click.echo("  Sending test notification…", nl=False)
+        try:
+            if notify_ntfy("FranklinWH advisor connected ✓  This is your test message.", cfg):
+                click.echo(click.style(" Sent!", fg="green"))
+                _ok(f"ntfy configured — subscribe to '{topic}' in the ntfy app")
+            else:
+                click.echo(click.style(" Failed", fg="red"))
+                _warn("ntfy saved but test failed — check the topic/server (see advisor.log for details).")
+        except Exception as e:
+            click.echo(click.style(f" Failed: {e}", fg="red"))
+            _warn("ntfy saved but test failed.")
+    else:
+        cfg.ntfy_topic = ""
+
     # ── iMessage ─────────────────────────────────────────────────────
     click.echo()
     click.echo(click.style("  iMessage", bold=True) + "  — macOS only")
@@ -433,7 +533,7 @@ def setup(quick: bool) -> None:
         else:
             _ok(f"iMessage alerts will be sent to {cfg.imessage_phone}")
 
-    if not any([cfg.telegram_chat_id, cfg.email_to, cfg.webhook_url, cfg.imessage_phone]):
+    if not any([cfg.telegram_chat_id, cfg.email_to, cfg.webhook_url, cfg.imessage_phone, cfg.ntfy_topic]):
         _warn("No notification channels configured — you won't receive any alerts.")
 
     # ── AI Chatbot ────────────────────────────────────────────────────
@@ -669,6 +769,59 @@ def setup(quick: bool) -> None:
     click.echo()
 
 
+# ── Bill reconciliation ─────────────────────────────────────────────
+
+@cli.command("bill-record")
+@click.option("--amount", type=float, required=True,
+              help="Actual utility bill amount in dollars.")
+@click.option("--cycle-end", default="",
+              help="Billing cycle end date this bill covers (YYYY-MM-DD). "
+                   "Defaults to the most recently closed cycle.")
+@click.pass_context
+def bill_record(ctx: click.Context, amount: float, cycle_end: str) -> None:
+    """Record your real utility bill to compare against the app's projection.
+
+    The app estimates your bill from grid import/export at published TOU
+    rates (see `/api/bill`, _alert_bill_projection) — that's a model, not a
+    measurement. This closes the loop: once a real amount is on file for a
+    cycle, the dashboard and API show how far off the estimate actually was.
+    """
+    cfg = ctx.obj["config"]
+    outdir = Path(cfg.output_dir)
+    if not outdir.is_absolute():
+        outdir = Path(__file__).parent.parent / outdir
+
+    today = datetime.now().date()
+    cur_start, _cur_end = cycle_bounds(today, cfg.billing_cycle_start_day)
+    if cycle_end:
+        try:
+            end = datetime.strptime(cycle_end, "%Y-%m-%d").date()
+        except ValueError:
+            raise click.ClickException("--cycle-end must be YYYY-MM-DD")
+    else:
+        _, end = cycle_bounds(cur_start - timedelta(days=1), cfg.billing_cycle_start_day)
+
+    # _prune_old_state drops any actual_bill_* entry more than 30 days old
+    # the moment _save_peak_state next runs — which, for this key, is right
+    # now. Saving anyway would silently discard it with no sign anything
+    # went wrong; refuse instead and say why.
+    age_days = (today - end).days
+    if age_days > 29:
+        raise click.ClickException(
+            f"Cycle end {end.isoformat()} is {age_days} days old — too old, "
+            f"won't be kept (state entries expire after 30 days). "
+            f"Use a more recent --cycle-end."
+        )
+
+    with _state_lock(outdir):
+        state = _load_peak_state(outdir)
+        state[f"actual_bill_{end.isoformat()}"] = amount
+        _save_peak_state(outdir, state)
+
+    _ok(f"Recorded ${amount:.2f} for the cycle ending {end.strftime('%b %-d, %Y')}")
+    click.echo("  Check the dashboard's billing card or `franklinwh doctor` for the projection diff.")
+
+
 # ── Doctor ───────────────────────────────────────────────────────────
 
 @cli.command()
@@ -701,7 +854,7 @@ def doctor() -> None:
     # At least one notification channel
     has_channel = bool(
         cfg.imessage_phone or (cfg.telegram_bot_token and cfg.telegram_chat_id)
-        or (cfg.smtp_host and cfg.email_to) or cfg.webhook_url
+        or (cfg.smtp_host and cfg.email_to) or cfg.webhook_url or cfg.ntfy_topic
     )
     _check("Notification channel", has_channel)
     _check("Uptime monitoring",    bool(cfg.healthcheck_url),
@@ -1509,6 +1662,11 @@ def cmd_advise(
         _last_stats      = None  # cached for time-gated alerts during API outages
         _lic_warn_date   = ""    # one grace-period Telegram warning per day
 
+        # Crash-loop detection runs once per process start, before anything
+        # that could itself fail — see _check_crash_loop's docstring for why
+        # this can't just reuse _consec_errors.
+        _check_crash_loop(outdir, cfg)
+
         # Closed-loop EV charging control (opt-in). Constructor failures
         # (missing token file, bad VIN) must degrade to advisory-only, never
         # kill the advisor.
@@ -1537,6 +1695,8 @@ def cmd_advise(
                         notify_email(_lic_msg, cfg)
                     if cfg.webhook_url:
                         notify_webhook(_lic_msg, True, cfg)
+                    if getattr(cfg, "ntfy_topic", ""):
+                        notify_ntfy(_lic_msg, cfg)
                     break
                 if _lic.state == "grace":
                     _today_str = datetime.now().strftime("%Y-%m-%d")
@@ -1553,6 +1713,8 @@ def cmd_advise(
                             notify_email(_lic_msg, cfg)
                         if cfg.webhook_url:
                             notify_webhook(_lic_msg, False, cfg)
+                        if getattr(cfg, "ntfy_topic", ""):
+                            notify_ntfy(_lic_msg, cfg)
             try:
                 stats = client.get_stats(gateway)
                 _last_stats = stats
@@ -1675,6 +1837,8 @@ def cmd_advise(
                         notify_email(_recovered_msg, cfg)
                     if cfg.webhook_url:
                         notify_webhook(_recovered_msg, False, cfg)
+                    if getattr(cfg, "ntfy_topic", ""):
+                        notify_ntfy(_recovered_msg, cfg)
                 _consec_errors = 0
                 _ping_healthcheck(cfg)  # signal a healthy completed cycle
                 _write_health_marker(outdir, 0, None)
@@ -1708,6 +1872,8 @@ def cmd_advise(
                         notify_email(_err_msg, cfg)
                     if cfg.webhook_url:
                         notify_webhook(_err_msg, True, cfg)
+                    if getattr(cfg, "ntfy_topic", ""):
+                        notify_ntfy(_err_msg, cfg)
 
             if not watch:
                 break

@@ -41,6 +41,22 @@ def test_dispatch_runs_clean(tmp_path, monkeypatch):
     alerts._check_peak_alerts(_fake_stats(), cfg, tmp_path, store=store)
 
 
+def test_dispatch_runs_for_ntfy_only_config(tmp_path, monkeypatch):
+    """Regression: _check_peak_alerts used to hard-gate on iMessage/Telegram
+    only — an ntfy-only (or email-only, or webhook-only) config silently
+    never ran any of the ~30 alerts at all, even though _send_alert itself
+    has always supported all five channels."""
+    sent = []
+    monkeypatch.setattr(alerts, "_send_alert", lambda b, c, urgent=False, alert_name=None: sent.append(b))
+    monkeypatch.setattr(alerts, "fetch_nws_storm_alerts", lambda lat, lon: [])
+
+    store = HistoryStore(tmp_path / "h.db")
+    cfg = Config(ntfy_topic="my-topic", lat=33.0, lon=-117.0)
+    alerts._check_peak_alerts(_fake_stats(), cfg, tmp_path, store=store)
+    # The real proof the guard didn't bail early: state got written at all.
+    assert (tmp_path / ".peak_alert_state.json").exists()
+
+
 def test_alert_export_arbitrage_renders():
     cfg = Config(battery_capacity_kwh=13.6)
     c = _fake_stats(battery_soc_pct=95.0).current

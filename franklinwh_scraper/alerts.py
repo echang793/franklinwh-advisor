@@ -19,7 +19,8 @@ from .advisor import _EB_CHARGE_KW
 from .config import Config
 from .format_utils import fmt_hours, soc_bar, time_to_pct
 from .history import integrate_intervals
-from .notifier import notify_email, notify_imessage_text, notify_telegram, notify_webhook
+from .notifier import (notify_email, notify_imessage_text, notify_ntfy,
+                       notify_telegram, notify_webhook)
 from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
                   cycle_bounds, export_rate_at, on_peak_window,
                   peak_export_hour, period_at, rate_at, rates_are_stale)
@@ -295,6 +296,8 @@ def _send_alert(body: str, cfg: Config, urgent: bool = False, alert_name: str | 
         notify_email(body, cfg)
     if cfg.webhook_url:
         notify_webhook(body, urgent, cfg)
+    if getattr(cfg, "ntfy_topic", ""):
+        notify_ntfy(body, cfg)
     _log_alert(body, cfg, urgent)
 
 
@@ -431,6 +434,7 @@ _DATE_KEYED_PREFIXES = (
     # by one key per day per prefix, forever, for the life of the install.
     "predicted_kwh_", "predicted_avg_ghi_", "daily_import_cost_",
     "outages_", "sundown_pred_", "savings_daily_", "soc_7am_pred_",
+    "actual_bill_",
 )
 
 
@@ -2225,6 +2229,67 @@ def _alert_bill_projection(
     )
 
 
+def _alert_bill_reconciliation(
+    state: dict, today: str, now: datetime, cfg: Config, store,
+) -> str | None:
+    """A few days after each billing cycle closes: remind the user to log
+    their real utility bill via `franklinwh bill-record --amount X`, or —
+    once they have — report how far the app's own cost model was off.
+
+    `_alert_bill_projection` above only ever compares the model to itself
+    (a partial-cycle extrapolation vs. its own inputs); this is the only
+    place the estimate gets checked against a real, external number. Fires
+    once per cycle in a 3-10 day window after close (long enough for the
+    bill to likely be available, short enough to still be useful).
+    """
+    if store is None or now.hour not in (8, 9):
+        return None
+    start_day = getattr(cfg, "billing_cycle_start_day", 20)
+    cur_start, _cur_end = cycle_bounds(now.date(), start_day)
+    prior_start, prior_end = cycle_bounds(cur_start - timedelta(days=1), start_day)
+    days_since_close = (now.date() - prior_end).days
+    if days_since_close < 3 or days_since_close > 10:
+        return None
+
+    reminded_key = f"bill_reconcile_reminded_{prior_end.isoformat()}"
+    if state.get(reminded_key) == today:
+        return None
+    state[reminded_key] = today
+
+    actual = state.get(f"actual_bill_{prior_end.isoformat()}")
+    if actual is None:
+        logger.info("Bill reconciliation reminder sent for cycle ending %s", prior_end)
+        return (
+            f"💵 <b>FranklinWH: Log your real bill?</b>\n"
+            f"Billing cycle ending {prior_end.strftime('%b %-d')} closed {days_since_close} days ago.\n"
+            f"Run <code>franklinwh bill-record --amount X</code> to compare it against "
+            f"the app's estimate."
+        )
+
+    readings = store.weekly_readings(
+        prior_start.strftime("%Y-%m-%d"), prior_end.strftime("%Y-%m-%d")
+    )
+    if not readings:
+        return None
+    # Reuse savings.compute rather than hand-rolling the import/export
+    # integration again — savings.py's own docstring documents a real past
+    # bug where three call sites computed "savings" slightly differently
+    # and disagreed; this is the single definition, same one webapi.py's
+    # /api/bill uses for its own prior-cycle net cost.
+    sv = savings_compute(integrate_intervals(readings))
+    cycle_days = (prior_end - prior_start).days + 1
+    estimated  = sv.actual_net_energy_cost + base_service_cost(cycle_days)
+    diff       = actual - estimated
+    logger.info("Bill reconciliation: actual $%.2f vs estimated $%.2f (diff $%.2f)",
+                actual, estimated, diff)
+    return (
+        f"💵 <b>FranklinWH: Bill reconciliation</b>\n"
+        f"Cycle ending {prior_end.strftime('%b %-d')}: actual ${actual:.2f} vs "
+        f"app estimate ${estimated:.2f} — off by ${diff:+.2f} "
+        f"({abs(diff) / max(estimated, 0.01) * 100:.0f}%)."
+    )
+
+
 def _alert_heat_wave_prep(state: dict, today: str, now: datetime, c, outlook) -> str | None:
     """Evening alert when tomorrow's forecast exceeds 95°F — AC load spike risk."""
     if now.hour not in (21, 22) or outlook is None:
@@ -2613,7 +2678,18 @@ def _alert_weather_stale(state: dict, today: str, now: datetime) -> str | None:
 
 
 def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None, store=None) -> None:
-    if not cfg.imessage_phone and not (cfg.telegram_bot_token and cfg.telegram_chat_id):
+    # Bug fix: this guard used to only recognize iMessage/Telegram, so an
+    # email-, webhook-, or ntfy-only setup (no iMessage/Telegram configured)
+    # silently never ran the entire ~30-alert engine at all — _send_alert
+    # itself has always supported all five channels, this just never let it
+    # get called. Must mirror _send_alert's own channel set exactly.
+    if not any([
+        cfg.imessage_phone,
+        cfg.telegram_bot_token and cfg.telegram_chat_id,
+        cfg.smtp_host and cfg.email_to,
+        cfg.webhook_url,
+        getattr(cfg, "ntfy_topic", ""),
+    ]):
         return
 
     now   = datetime.now()
@@ -2650,6 +2726,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("peak_streak_good",     lambda: _alert_peak_streak_good(state, today, now)),
             ("self_sufficiency_streak", lambda: _alert_self_sufficiency_streak(state, today, now, store)),
             ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store, cfg)),
+            ("bill_reconciliation",  lambda: _alert_bill_reconciliation(state, today, now, cfg, store)),
             ("heat_wave_prep",       lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),
             ("multiday_cloudy_precharge", lambda: _alert_multiday_cloudy_precharge(state, today, now, c, outlook, cfg)),
             ("solar_surplus_overflow",    lambda: _alert_solar_surplus_overflow(state, today, now, c)),

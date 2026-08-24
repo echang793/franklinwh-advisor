@@ -1,0 +1,14 @@
+{
+  "name": "FranklinWH Energy Advisor",
+  "short_name": "FranklinWH",
+  "description": "Live battery, solar, and TOU billing dashboard for a FranklinWH home battery system.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#070c08",
+  "theme_color": "#070c08",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

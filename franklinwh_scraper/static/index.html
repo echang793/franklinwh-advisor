@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FranklinWH Energy Advisor</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#070c08">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="FranklinWH">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/html-to-image@1.11.11/dist/html-to-image.js"></script>
@@ -162,6 +169,7 @@ const S = {
   hist: [], histY: [], histIdx: -1, cmp: false,
   forecast: [], cc: 0, scrubIdx: -1,
   eb: null, rec: null, acc: [], tou: null, bill: null,
+  attribution: [], attrWindowDays: 14,
   tab: 0, focusId: null, flashId: null, narrow: window.innerWidth < 920,
   spans: {}, dragId: null, pending: null, presetSel: null,
   // demo
@@ -371,6 +379,7 @@ mkPanel('attribution', `
     <div class="plabel">SELF-SUFFICIENCY · WHERE POWER CAME FROM</div>
     <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#3f5244;">▮ BATTERY · ▮ SOLAR · ▮ GRID</div>
   </div>
+  <div id="attr-window" style="display:flex;gap:6px;margin-top:10px;"></div>
   <div id="attr-bars" style="display:flex;align-items:flex-end;gap:8px;margin-top:18px;height:110px;"></div>
   <div id="attr-foot" class="mono" style="font-size:10.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
 
@@ -988,9 +997,41 @@ function renderBatteryHealth(){
   const drift = last.pct_of_nameplate - first.pct_of_nameplate;
   $('bh-foot').textContent = `🔋 ${last.capacity_kwh.toFixed(1)} kWh effective (${last.pct_of_nameplate.toFixed(0)}% of ${S.batteryHealthNameplate.toFixed(1)} kWh nameplate) · ${drift>=0?'+':''}${drift.toFixed(1)}pt vs ${first.label}.`;
 }
+const ATTR_WINDOWS = [[14,'14D'], [30,'30D'], [90,'90D'], [400,'ALL']];
+function setAttrWindow(days){
+  if (S.attrWindowDays === days) return;
+  S.attrWindowDays = days;
+  renderAttribution();   // redraw the button row immediately
+  if (!DEMO) pollSlow();  // refetch now rather than waiting for the next slow-poll tick
+}
 function renderAttribution(){
-  const days = S.attribution || [];
-  if (!days.length) { $('attr-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#4c5f50;align-self:center;width:100%;text-align:center;">no attribution data yet</div>'; $('attr-foot').textContent=''; return; }
+  $('attr-window').innerHTML = ATTR_WINDOWS.map(([d,label]) => {
+    const active = S.attrWindowDays === d;
+    return `<button onclick="setAttrWindow(${d})" class="mono" style="font-size:9px;letter-spacing:.06em;padding:3px 8px;border-radius:4px;cursor:pointer;border:1px solid ${active?'#57e389':'#2a3a2e'};background:${active?'#193322':'transparent'};color:${active?'#8df0b0':'#5f7263'};">${label}</button>`;
+  }).join('');
+
+  const raw = S.attribution || [];
+  if (!raw.length) { $('attr-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#4c5f50;align-self:center;width:100%;text-align:center;">no attribution data yet</div>'; $('attr-foot').textContent=''; return; }
+
+  // Bucket into at most ~16 bars so 90D/ALL stay readable — daily data is
+  // still exact, just summed/re-derived per bucket for display. 14D/30D
+  // have <=30 days so bucketSize is 1 and this renders one bar per day,
+  // same as before this existed.
+  const bucketSize = Math.max(1, Math.ceil(raw.length / 16));
+  const days = [];
+  for (let i = 0; i < raw.length; i += bucketSize) {
+    const chunk = raw.slice(i, i + bucketSize);
+    const battery_kwh = chunk.reduce((a,d)=>a+d.battery_kwh,0);
+    const solar_kwh   = chunk.reduce((a,d)=>a+d.solar_kwh,0);
+    const grid_kwh    = chunk.reduce((a,d)=>a+d.grid_kwh,0);
+    const total_kwh   = battery_kwh + solar_kwh + grid_kwh;
+    days.push({
+      battery_kwh, solar_kwh, grid_kwh, total_kwh,
+      self_sufficiency_pct: total_kwh > 0 ? (battery_kwh + solar_kwh) / total_kwh * 100 : 0,
+      label: chunk[0].label,
+    });
+  }
+
   const mx = Math.max(...days.map(d => d.total_kwh), 1);
   const segH = kwh => Math.max(0, Math.round(kwh / mx * 84));
   $('attr-bars').innerHTML = days.map(d => {
@@ -1004,9 +1045,10 @@ function renderAttribution(){
       </div>
       <div class="mono" style="font-size:9px;color:#4c5f50;">${d.label}</div></div>`;
   }).join('');
-  const avgSelf = days.reduce((a,d) => a + d.self_sufficiency_pct, 0) / days.length;
-  const totalGrid = days.reduce((a,d) => a + d.grid_kwh, 0);
-  $('attr-foot').textContent = `⚡ ${avgSelf.toFixed(0)}% average self-sufficiency over ${days.length} days · ${totalGrid.toFixed(1)} kWh from grid total.`;
+  const avgSelf = raw.reduce((a,d) => a + d.self_sufficiency_pct, 0) / raw.length;
+  const totalGrid = raw.reduce((a,d) => a + d.grid_kwh, 0);
+  const bucketNote = bucketSize > 1 ? ` (${bucketSize}-day buckets)` : '';
+  $('attr-foot').textContent = `⚡ ${avgSelf.toFixed(0)}% average self-sufficiency over ${raw.length} days${bucketNote} · ${totalGrid.toFixed(1)} kWh from grid total.`;
 }
 function renderSavings(){
   const s = S.savings;
@@ -1432,7 +1474,7 @@ async function pollSlow(){
   const [h, f, acc, tou, bill, rec, health, bh, ev, attr, sav] = await Promise.allSettled([
     J('/api/history?hours=48'), J('/api/forecast'), J('/api/accuracy'),
     J('/api/tou'), J('/api/bill'), J('/api/recommendation'), J('/api/health'),
-    J('/api/battery-health'), J('/api/ev'), J('/api/attribution?days=14'), J('/api/savings?days=30'),
+    J('/api/battery-health'), J('/api/ev'), J(`/api/attribution?days=${S.attrWindowDays}`), J('/api/savings?days=30'),
   ]);
   const ok = r => r.status === 'fulfilled' ? r.value : null;
   const now = Date.now();

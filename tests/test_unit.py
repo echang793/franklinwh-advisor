@@ -1,5 +1,6 @@
 """Unit tests for FranklinWH pure logic — no network."""
 
+import json
 import pathlib
 import sys
 import time
@@ -1274,6 +1275,134 @@ def test_notify_webhook_reports_http_error_as_failure(monkeypatch):
     assert notifier.notify_webhook("test", False, cfg) is False
 
 
+def test_notify_ntfy_posts_to_topic_url(monkeypatch):
+    from franklinwh_scraper import notifier
+
+    calls = []
+
+    class _OkResponse:
+        def raise_for_status(self):
+            pass
+
+    def _fake_post(url, data=None, headers=None, timeout=None):
+        calls.append((url, data, headers))
+        return _OkResponse()
+
+    monkeypatch.setattr(notifier.requests, "post", _fake_post)
+    cfg = Config(ntfy_topic="my-secret-topic")
+    assert notifier.notify_ntfy("hello world", cfg) is True
+    assert len(calls) == 1
+    url, data, headers = calls[0]
+    assert url == "https://ntfy.sh/my-secret-topic"
+    assert data == b"hello world"
+    assert headers["Title"] == b"hello world"
+
+
+def test_notify_ntfy_respects_custom_server(monkeypatch):
+    from franklinwh_scraper import notifier
+
+    calls = []
+
+    class _OkResponse:
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(notifier.requests, "post",
+                         lambda url, **k: calls.append(url) or _OkResponse())
+    cfg = Config(ntfy_topic="t", ntfy_server="https://ntfy.example.com/")
+    notifier.notify_ntfy("hi", cfg)
+    assert calls[0] == "https://ntfy.example.com/t"
+
+
+def test_notify_ntfy_no_topic_returns_false(monkeypatch):
+    from franklinwh_scraper import notifier
+
+    cfg = Config()
+    assert notifier.notify_ntfy("hi", cfg) is False
+
+
+def test_notify_ntfy_reports_http_error_as_failure(monkeypatch):
+    from franklinwh_scraper import notifier
+    import requests
+
+    class _BadResponse:
+        def raise_for_status(self):
+            raise requests.HTTPError("500 Server Error")
+
+    monkeypatch.setattr(notifier.time, "sleep", lambda s: None)
+    monkeypatch.setattr(notifier.requests, "post", lambda *a, **k: _BadResponse())
+    cfg = Config(ntfy_topic="t")
+    assert notifier.notify_ntfy("hi", cfg) is False
+
+
+def test_check_crash_loop_fires_after_threshold_starts(tmp_path, monkeypatch):
+    from franklinwh_scraper import cli
+
+    sent = []
+    monkeypatch.setattr(cli, "notify_telegram", lambda *a, **k: sent.append(a))
+    cfg = Config(telegram_bot_token="t", telegram_chat_id="c")
+
+    # 4 starts within the 10-min window (fake clock via pre-seeded file).
+    now = datetime.now()
+    starts = [(now - timedelta(minutes=m)).isoformat() for m in (8, 6, 4, 2)]
+    (tmp_path / cli._CRASH_LOOP_STARTS_FILE).write_text(json.dumps(starts))
+
+    cli._check_crash_loop(tmp_path, cfg)
+    assert len(sent) == 1
+    assert "crash-looping" in sent[0][0]
+    assert (tmp_path / cli._CRASH_LOOP_ALERT_MARKER).exists()
+
+
+def test_check_crash_loop_silent_under_threshold(tmp_path, monkeypatch):
+    from franklinwh_scraper import cli
+
+    sent = []
+    monkeypatch.setattr(cli, "notify_telegram", lambda *a, **k: sent.append(a))
+    cfg = Config(telegram_bot_token="t", telegram_chat_id="c")
+
+    now = datetime.now()
+    starts = [(now - timedelta(minutes=m)).isoformat() for m in (8, 4)]
+    (tmp_path / cli._CRASH_LOOP_STARTS_FILE).write_text(json.dumps(starts))
+
+    cli._check_crash_loop(tmp_path, cfg)
+    assert sent == []
+
+
+def test_check_crash_loop_dedup_within_alert_gap(tmp_path, monkeypatch):
+    """A second crash-loop check shortly after the first shouldn't re-alert
+    even if starts keep accumulating past the threshold."""
+    from franklinwh_scraper import cli
+
+    sent = []
+    monkeypatch.setattr(cli, "notify_telegram", lambda *a, **k: sent.append(a))
+    cfg = Config(telegram_bot_token="t", telegram_chat_id="c")
+
+    now = datetime.now()
+    starts = [(now - timedelta(minutes=m)).isoformat() for m in (8, 6, 4, 2)]
+    (tmp_path / cli._CRASH_LOOP_STARTS_FILE).write_text(json.dumps(starts))
+    (tmp_path / cli._CRASH_LOOP_ALERT_MARKER).write_text((now - timedelta(minutes=5)).isoformat())
+
+    cli._check_crash_loop(tmp_path, cfg)
+    assert sent == []
+
+
+def test_check_crash_loop_ignores_malformed_timestamps(tmp_path, monkeypatch):
+    """A corrupt/partial entry in the starts file must not be miscounted as
+    'recent' — it should just be dropped, not treated as always-in-window."""
+    from franklinwh_scraper import cli
+
+    sent = []
+    monkeypatch.setattr(cli, "notify_telegram", lambda *a, **k: sent.append(a))
+    cfg = Config(telegram_bot_token="t", telegram_chat_id="c")
+
+    now = datetime.now()
+    starts = ["not-a-date", "", (now - timedelta(minutes=2)).isoformat()]
+    (tmp_path / cli._CRASH_LOOP_STARTS_FILE).write_text(json.dumps(starts))
+
+    cli._check_crash_loop(tmp_path, cfg)
+    assert sent == []  # only 1 genuinely-recent start (this call's own) + 1 valid = 2, under threshold
+
+
 def test_seasonal_forecast_confidence_gates_on_in_season_sample_size(tmp_path):
     """A slot backed by only 2 in-season readings must not show 'high'
     confidence just because the same weekday/hour has plenty of samples
@@ -1691,6 +1820,76 @@ def test_bill_projection_uses_real_cycle_length_not_30(tmp_path):
     assert msg is not None
     assert "Projected full cycle (31 days)" in msg
     assert "~30 days" not in msg
+
+
+def _insert_cycle_readings(db, start_day: int, month: str, days: range):
+    for day in days:
+        for hour in (0, 12):
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (f"{month}-{day:02d}T{hour:02d}:00:00", 0, hour, 1.0, 0.0, 50.0, 1.0, "normal", 0.0, 0.0),
+            )
+    db._conn.commit()
+
+
+def test_bill_reconciliation_reminds_when_no_actual_recorded(tmp_path):
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    # Cycle Jul 20 - Aug 19 closed; probe 5 days after close (Aug 24).
+    _insert_cycle_readings(db, 20, "2026-07", range(20, 32))
+    _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
+    now = datetime(2026, 8, 24, 8, 30)
+
+    msg = alerts._alert_bill_reconciliation({}, "2026-08-24", now, _C(billing_cycle_start_day=20), db)
+    assert msg is not None
+    assert "Log your real bill" in msg
+    assert "bill-record --amount" in msg
+
+
+def test_bill_reconciliation_reports_diff_once_actual_recorded(tmp_path):
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    _insert_cycle_readings(db, 20, "2026-07", range(20, 32))
+    _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
+    now = datetime(2026, 8, 24, 8, 30)
+
+    state = {"actual_bill_2026-08-19": 999.0}  # deliberately way off from the tiny synthetic load
+    msg = alerts._alert_bill_reconciliation(state, "2026-08-24", now, _C(billing_cycle_start_day=20), db)
+    assert msg is not None
+    assert "Bill reconciliation" in msg
+    assert "actual $999.00" in msg
+    assert "Log your real bill" not in msg
+
+
+def test_bill_reconciliation_gates_on_window_and_dedup(tmp_path):
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    _insert_cycle_readings(db, 20, "2026-07", range(20, 32))
+    _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
+    cfg = _C(billing_cycle_start_day=20)
+
+    # Too soon after close (1 day) — no reminder yet.
+    too_soon = datetime(2026, 8, 20, 8, 30)
+    assert alerts._alert_bill_reconciliation({}, "2026-08-20", too_soon, cfg, db) is None
+
+    # Too late (15 days) — window has passed.
+    too_late = datetime(2026, 9, 3, 8, 30)
+    assert alerts._alert_bill_reconciliation({}, "2026-09-03", too_late, cfg, db) is None
+
+    # In-window, wrong hour — gated to 8-9am.
+    wrong_hour = datetime(2026, 8, 24, 14, 0)
+    assert alerts._alert_bill_reconciliation({}, "2026-08-24", wrong_hour, cfg, db) is None
+
+    # In-window, right hour — fires once, then dedups same day.
+    now = datetime(2026, 8, 24, 8, 30)
+    state = {}
+    assert alerts._alert_bill_reconciliation(state, "2026-08-24", now, cfg, db) is not None
+    assert alerts._alert_bill_reconciliation(state, "2026-08-24", now, cfg, db) is None
 
 
 def test_chatbot_bill_matches_api_bill_cycle_window():
@@ -2276,6 +2475,42 @@ def test_dashboard_static_dir_resolves():
         f"index.html not found under {webapi._STATIC}"
 
 
+def test_pwa_manifest_and_icons_are_served(tmp_path, monkeypatch):
+    """manifest.json + both icon sizes must exist, be valid, and actually be
+    reachable through the app's real static mount (not just present on
+    disk) — StaticFiles is mounted at "/", so a typo'd filename 404s
+    silently rather than raising at import time."""
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+
+    manifest_path = webapi._STATIC / "manifest.json"
+    assert manifest_path.exists()
+    manifest = _json.loads(manifest_path.read_text())
+    assert manifest["name"]
+    icon_srcs = {icon["src"].lstrip("/") for icon in manifest["icons"]}
+    for src in icon_srcs:
+        assert (webapi._STATIC / src).exists(), f"{src} referenced by manifest.json but missing"
+        assert (webapi._STATIC / src).stat().st_size > 0
+
+    client = TestClient(webapi.app)
+    r = client.get("/manifest.json")
+    assert r.status_code == 200
+    for src in icon_srcs:
+        r = client.get(f"/{src}")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "image/png"
+
+
+def test_index_html_links_manifest():
+    from franklinwh_scraper import webapi
+
+    html = (webapi._STATIC / "index.html").read_text()
+    assert '<link rel="manifest" href="/manifest.json">' in html
+
+
 def test_dashboard_refuses_public_bind_without_token(monkeypatch):
     """The /api/* routes expose live load and billing data and have no auth
     unless dashboard_token is set."""
@@ -2301,6 +2536,90 @@ def test_dashboard_refuses_public_bind_without_token(monkeypatch):
     assert res.exit_code != 0
     assert "Refusing to bind" in res.output
     assert not called, "uvicorn.run must not be reached on a refused bind"
+
+def test_bill_record_writes_actual_bill_to_state(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    cfg = Config(output_dir=str(tmp_path), billing_cycle_start_day=20)
+    runner = CliRunner()
+    # A recent date, well inside the 30-day state-pruning window — matches
+    # real usage (the reconciliation reminder only ever fires 3-10 days
+    # after a cycle closes, so a manually-entered --cycle-end this old is
+    # the realistic case; see test_bill_record_warns_on_stale_cycle_end for
+    # the >25-day edge case).
+    recent = (datetime.now().date() - timedelta(days=5)).isoformat()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["bill-record", "--amount", "142.50",
+                                          "--cycle-end", recent])
+    assert res.exit_code == 0, res.output
+    state = _load_peak_state(tmp_path)
+    assert state[f"actual_bill_{recent}"] == 142.50
+    assert "Recorded $142.50" in res.output
+
+
+def test_bill_record_warns_on_stale_cycle_end(tmp_path):
+    """A --cycle-end older than the 30-day state-pruning window would be
+    silently discarded on save (_prune_old_state matches the actual_bill_
+    prefix) — must warn instead of pretending it stuck."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    cfg = Config(output_dir=str(tmp_path), billing_cycle_start_day=20)
+    runner = CliRunner()
+    stale = (datetime.now().date() - timedelta(days=40)).isoformat()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["bill-record", "--amount", "50", "--cycle-end", stale])
+    assert res.exit_code != 0
+    assert "too old" in res.output.lower() or "won't be kept" in res.output.lower()
+    state = _load_peak_state(tmp_path)
+    assert f"actual_bill_{stale}" not in state
+
+
+def test_bill_record_rejects_bad_date(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    cfg = Config(output_dir=str(tmp_path))
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["bill-record", "--amount", "100",
+                                          "--cycle-end", "not-a-date"])
+    assert res.exit_code != 0
+    assert "YYYY-MM-DD" in res.output
+
+
+def test_bill_record_defaults_to_most_recently_closed_cycle(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper.alerts import _load_peak_state
+    from franklinwh_scraper.tou import cycle_bounds
+
+    cfg = Config(output_dir=str(tmp_path), billing_cycle_start_day=20)
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["bill-record", "--amount", "88"])
+    assert res.exit_code == 0, res.output
+
+    state = _load_peak_state(tmp_path)
+    cur_start, _cur_end = cycle_bounds(datetime.now().date(), 20)
+    _, expected_end = cycle_bounds(cur_start - timedelta(days=1), 20)
+    assert state[f"actual_bill_{expected_end.isoformat()}"] == 88.0
+
 
 def test_hourly_bias_uses_ewma_not_flat_median():
     """Root-cause fix for the 2026-08 month-long low-prediction bias: hour 7
@@ -3594,6 +3913,34 @@ def test_api_ev_reports_controller_status_and_null_prediction_without_history(
     # special-case an absent key vs an explicit null.
     assert "prediction" in body
     assert body["prediction"] is None
+
+
+def test_api_bill_surfaces_actual_and_diff_when_recorded(tmp_path, monkeypatch):
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+
+    cfg = Config(billing_cycle_start_day=20, output_dir=str(tmp_path))
+    monkeypatch.setattr(webapi, "_cfg", cfg, raising=False)
+    monkeypatch.setattr(webapi, "_OUT", tmp_path, raising=False)
+
+    client = TestClient(webapi.app)
+    r = client.get("/api/bill")
+    assert r.status_code == 200
+    body = r.json()
+    # No actual bill recorded yet -> both keys present but null, never missing.
+    assert "actual_prior" in body and body["actual_prior"] is None
+    assert "diff_prior" in body and body["diff_prior"] is None
+    prior_key = f"actual_bill_{body['prior_cycle_end']}"
+
+    (tmp_path / ".peak_alert_state.json").write_text(_json.dumps({prior_key: 250.0}))
+
+    r2 = client.get("/api/bill")
+    body2 = r2.json()
+    assert body2["actual_prior"] == 250.0
+    assert body2["diff_prior"] == round(250.0 - body2["prior_net"], 2)
 
 
 def test_log_solar_calibration_inputs_writes_expected_fields(tmp_path):
