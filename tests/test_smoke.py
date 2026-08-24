@@ -120,10 +120,12 @@ def test_eod_digest_includes_tomorrow_solar(tmp_path):
 def test_eod_digest_format_locked(tmp_path):
     """Regression lock for the daily-summary format: no backup-hours line,
     predicted/actual/delta right-aligned to a fixed width. The "Predicted
-    SoC @ ..." line was removed from the digest by request 2026-08-19 —
-    the sunrise-anchored prediction (see _next_sunrise_after) is still
-    computed and stashed in state for the next morning's "Sunrise SoC
-    accuracy" line, just no longer shown in this message."""
+    SoC @ ..." line (no EV configured, so the plain label applies here —
+    see test_eod_digest_shows_without_ev_line_but_not_with_ev for the
+    ev_charging=True case) is back in the digest by request 2026-08-23,
+    reversing its 2026-08-19 removal; the sunrise-anchored prediction (see
+    _next_sunrise_after) is also still stashed in state for the next
+    morning's "Sunrise SoC accuracy" line either way."""
     now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
     checkpoint = (now + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
     hours = [
@@ -141,7 +143,7 @@ def test_eod_digest_format_locked(tmp_path):
     msg = alerts._alert_eod_digest(state, now.strftime("%Y-%m-%d"), now, stats, cfg, None, forecast)
     assert msg is not None
     assert "Backup:" not in msg
-    assert "Predicted SoC @" not in msg
+    assert "Predicted SoC @" in msg
     assert f"soc_7am_pred_{checkpoint.strftime('%Y-%m-%d')}" in state  # still stashed for tomorrow's accuracy line
     assert "  Predicted: 100.0 kWh" in msg
     assert "  Actual:     30.0 kWh" in msg  # right-aligned to width 5 — extra space vs "100.0"

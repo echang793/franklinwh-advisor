@@ -882,9 +882,20 @@ def test_rollup_old_readings_preserves_hourly_slots(tmp_path):
     assert recent_rows[0] == 2  # untouched
 
 
-def test_send_sundown_projects_soc_to_last_solar_hour():
+def test_send_sundown_projects_soc_to_last_solar_hour(tmp_path):
     """/sundown should project SoC forward using the forecast, stopping at
-    the last hour today still expecting real solar — not a fixed horizon."""
+    the last hour today still expecting real solar — not a fixed horizon.
+
+    bot._outdir must be set to an isolated tmp_path: _send_sundown loads
+    (and writes!) sundown_bias_samples via _load_peak_state(self._outdir or
+    Path(cfg.output_dir)) — left unset, this test used to silently read
+    AND write Eric's real live output/.peak_alert_state.json on every
+    pytest run, both polluting production state and making the assertion
+    below flaky against whatever bias the live system had accumulated
+    (caught 2026-08-23: a real -18pt live bias turned an expected 100%
+    into 82%, failing this test for a reason that had nothing to do with
+    the code under test).
+    """
     import types
     from franklinwh_scraper import chatbot as chatbot_mod
     from franklinwh_scraper.predictor import HourPrediction, UsageForecast
@@ -903,6 +914,7 @@ def test_send_sundown_projects_soc_to_last_solar_hour():
                              net_kwh=-6.0, peak_load_kw=1.0, confidence="high", data_days=30)
 
     bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._outdir = tmp_path
     bot._stats = types.SimpleNamespace(
         current=types.SimpleNamespace(battery_soc_pct=27.0),
     )
@@ -929,13 +941,18 @@ def test_send_sundown_projects_soc_to_last_solar_hour():
     assert "5:00 PM" in sent["text"]
 
 
-def test_send_sundown_estimates_surplus_solar_export():
+def test_send_sundown_estimates_surplus_solar_export(tmp_path):
     """/sundown adds a surplus-export estimate: once the walk-forward fills
     the battery, further solar surplus is clipped by the same
     min(bat_cap, ...) that models Self-Consumption auto-exporting a full
     battery's surplus — that clipped total is the export estimate, priced
     at today's best export rate (same tou.peak_export_hour the existing
-    export-arbitrage alert uses)."""
+    export-arbitrage alert uses).
+
+    bot._outdir = tmp_path: without it this silently wrote a real
+    sundown_pred_<today> entry into Eric's live output/.peak_alert_state.json
+    on every test run (see test_send_sundown_projects_soc_to_last_solar_hour
+    for the full story)."""
     import types
     from franklinwh_scraper import chatbot as chatbot_mod
     from franklinwh_scraper import tou
@@ -955,6 +972,7 @@ def test_send_sundown_estimates_surplus_solar_export():
                              net_kwh=8.0, peak_load_kw=1.0, confidence="high", data_days=30)
 
     bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._outdir = tmp_path
     # soc=80% -> 10.88 kWh; net +4 kW/hr (5.0 solar - 1.0 load) for hours
     # 9,10,11 (dt<=now and dt>sundown_dt=11:00 are skipped by the walk) ->
     # hour9: 10.88+4=14.88 clips 1.28 over cap; hour10/11: full +4 each
@@ -988,7 +1006,7 @@ def test_send_sundown_estimates_surplus_solar_export():
     assert f"${rate:.3f}/kWh" in text
 
 
-def test_send_sundown_omits_export_line_when_battery_never_fills():
+def test_send_sundown_omits_export_line_when_battery_never_fills(tmp_path):
     """No export line when the forecast never has the battery hitting cap
     before sundown — a marginal/negative kWh estimate would be noise, not
     signal."""
@@ -1010,6 +1028,7 @@ def test_send_sundown_omits_export_line_when_battery_never_fills():
                              net_kwh=-18.0, peak_load_kw=1.0, confidence="high", data_days=30)
 
     bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._outdir = tmp_path
     bot._stats = types.SimpleNamespace(
         current=types.SimpleNamespace(battery_soc_pct=20.0),  # 2.72 kWh, never near cap
     )
@@ -3510,13 +3529,14 @@ def test_morning_preview_omits_7am_accuracy_when_nothing_stored():
     assert "Sunrise SoC accuracy" not in msg
 
 
-def test_eod_digest_omits_ev_soc_lines_but_still_stashes_for_accuracy():
-    """The 'Without EV charging' / 'With EV charging (to floor)' lines were
-    removed from the digest text by request 2026-08-19 — but the
-    prediction is still computed and stashed in state so tomorrow's
-    morning-preview 'Sunrise SoC accuracy' line (a separate alert) keeps
-    working. (The floor-capping 'with EV' logic itself still lives in
-    webapi.py's /api/ev, untouched — this test only covers the digest.)"""
+def test_eod_digest_shows_without_ev_line_but_not_with_ev():
+    """'Without EV charging' was re-added to the digest by request
+    2026-08-23; 'With EV charging (to floor)' stays cut (removed
+    2026-08-19). The prediction is also still stashed in state so
+    tomorrow's morning-preview 'Sunrise SoC accuracy' line (a separate
+    alert) keeps working. (The floor-capping 'with EV' logic itself still
+    lives in webapi.py's /api/ev, untouched — this test only covers the
+    digest.)"""
     now = datetime.now().replace(hour=21, minute=30, second=0, microsecond=0)
     today = now.strftime("%Y-%m-%d")
     readings = [(f"{today}T{h:02d}:00:00", 0.5, 1.0, 0.0) for h in range(0, 20, 2)]
@@ -3530,9 +3550,8 @@ def test_eod_digest_omits_ev_soc_lines_but_still_stashes_for_accuracy():
 
     msg = alerts._alert_eod_digest(state, today, now, stats, cfg, None, None, store)
     assert msg is not None
-    assert "Without EV charging" not in msg
+    assert "Without EV charging" in msg
     assert "With EV charging" not in msg
-    assert "Predicted SoC @" not in msg
 
     stashed = state.get(f"soc_7am_pred_{today}") or next(
         (v for k, v in state.items() if k.startswith("soc_7am_pred_")), None)
@@ -3551,7 +3570,9 @@ def test_eod_digest_omits_with_ev_line_when_no_ev_configured():
     msg = alerts._alert_eod_digest({}, today, now, _digest_stats(), Config(),
                                    None, None, store)
     assert msg is not None
+    assert "Predicted SoC @" in msg
     assert "With EV charging" not in msg
+    assert "Without EV charging" not in msg
 
 
 def test_cli_shared_forecast_never_gets_live_anchor():

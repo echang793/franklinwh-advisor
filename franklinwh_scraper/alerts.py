@@ -1218,16 +1218,23 @@ def _alert_eod_digest(
             bias_samples.append(actual_pct - raw_pct)
             state["sundown_bias_samples"] = bias_samples[-_SUNDOWN_BIAS_CAP:]
 
-    # No longer shown in the digest text (removed by request 2026-08-19) —
-    # but the prediction is still computed and stashed here so tomorrow's
-    # morning-preview "Sunrise SoC accuracy" line (a separate alert) keeps
-    # working. See Config.no_ev_baseline_load_kw / _predict_overnight_soc_flat.
+    # "Without EV" is a flat assumed-baseline walk to the next sunrise (no
+    # forecast/solar/percentile model, by request 2026-08-17 — see
+    # Config.no_ev_baseline_load_kw) rather than EV charging. Sunrise (not
+    # a fixed clock hour) so this stays correct across the DST change
+    # instead of silently drifting relative to actual sunrise. Re-added
+    # 2026-08-23 by request — "with EV charging (to floor)" stays cut, only
+    # this line came back.
+    soc_6am_str = ""
     checkpoint_dt = _next_sunrise_after(now, outlook)
     overnight = _predict_overnight_soc_flat(
         now, soc, bat_cap, getattr(cfg, "no_ev_baseline_load_kw", 0.4), checkpoint_dt,
     )
     if overnight is not None:
-        pred_soc_6am, _hour_label = overnight
+        pred_soc_6am, hour_label = overnight
+        has_ev = getattr(cfg, "ev_charging", False)
+        label  = "Without EV charging" if has_ev else "Predicted SoC"
+        soc_6am_str = f"\n🌅 {label} @ {hour_label}: ~{pred_soc_6am:.0f}%"
         state[f"soc_7am_pred_{checkpoint_dt.strftime('%Y-%m-%d')}"] = {
             "pct": pred_soc_6am, "dt": checkpoint_dt.isoformat(),
         }
@@ -1365,7 +1372,7 @@ def _alert_eod_digest(
         f"Batt dis: {batt_dis_kwh:.1f} kWh\n"
         f"Home:     {home_kwh:.1f} kWh</code>{attribution_str}{self_suff_str}{peak_cov_str}{tou_str}{outage_str}\n"
         f"<code>─────────────────────</code>\n"
-        f"🔋 {_soc_bar(soc)}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{precharge_str}"
+        f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{precharge_str}"
     )
 
 
