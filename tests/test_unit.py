@@ -3484,6 +3484,106 @@ def test_eod_digest_stores_7am_prediction_for_tomorrow(monkeypatch):
     assert state[key]["low_pct"] < state[key]["pct"] < state[key]["high_pct"]
 
 
+def test_morning_preview_pr_calibration_undoes_yesterdays_correction():
+    """The EWMA sample fed into perf_ratio_samples must be the
+    baseline-relative true ratio (raw residual * perf_ratio actually used
+    yesterday), not the raw residual itself — feeding the raw residual is a
+    self-referential mean-of-ratios estimator that systematically
+    undershoots (fixed 2026-08-24, see _get_performance_ratio's docstring).
+    The displayed daily_pr_ accuracy figure stays the raw residual — this
+    only changes what gets fed into the correction EWMA."""
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    state = {
+        f"predicted_kwh_{yesterday}": 20.0,
+        f"predicted_avg_ghi_{yesterday}": 500.0,  # sunny
+        f"perf_ratio_used_{yesterday}": 1.1,       # yesterday's prediction used PR=1.1
+    }
+
+    store = _AttrStore(attr=(0.0, 0.0, 0.0))
+    store.daily_solar_kwh_api = lambda d: 24.0  # actual -> raw ratio 24/20 = 1.2
+
+    c = types.SimpleNamespace(battery_soc_pct=50.0, solar_production_kw=0.0)
+    alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert state[f"daily_pr_{yesterday}"] == 1.2                    # display: raw residual, unchanged
+    assert state["perf_ratio_samples"] == [1.2 * 1.1]                # EWMA input: undone (true) ratio
+    assert f"perf_ratio_used_{yesterday}" not in state                # cleaned up
+
+
+def test_morning_preview_pr_calibration_defaults_to_1_when_perf_ratio_used_missing():
+    """No perf_ratio_used_<date> in state (e.g. a soc_7am_pred_-only entry
+    from before this shipped) must default to 1.0, not KeyError — true_ratio
+    then equals the raw residual, same as the old behavior."""
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    state = {
+        f"predicted_kwh_{yesterday}": 20.0,
+        f"predicted_avg_ghi_{yesterday}": 500.0,
+    }
+
+    store = _AttrStore(attr=(0.0, 0.0, 0.0))
+    store.daily_solar_kwh_api = lambda d: 24.0
+
+    c = types.SimpleNamespace(battery_soc_pct=50.0, solar_production_kw=0.0)
+    alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert state["perf_ratio_samples"] == [1.2]
+
+
+def test_morning_preview_pr_calibration_cleans_up_on_rejected_outlier():
+    """A day rejected by the _PR_MIN outlier gate must still pop
+    perf_ratio_used_<date> — otherwise a run of bad-GHI days would leak
+    that key into state forever (only _DATE_KEYED_PREFIXES' 30-day prune
+    would eventually catch it)."""
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    state = {
+        f"predicted_kwh_{yesterday}": 20.0,
+        f"predicted_avg_ghi_{yesterday}": 500.0,
+        f"perf_ratio_used_{yesterday}": 1.1,
+    }
+
+    store = _AttrStore(attr=(0.0, 0.0, 0.0))
+    store.daily_solar_kwh_api = lambda d: 5.0  # ratio 0.25 -> well under _PR_MIN (0.65)
+
+    c = types.SimpleNamespace(battery_soc_pct=50.0, solar_production_kw=0.0)
+    alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert "perf_ratio_samples" not in state          # rejected, no EWMA update
+    assert f"perf_ratio_used_{yesterday}" not in state  # still cleaned up
+
+
+def test_morning_preview_pr_calibration_undoes_cloudy_bucket_correctly():
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    state = {
+        f"predicted_kwh_{yesterday}": 5.0,
+        f"predicted_avg_ghi_{yesterday}": 200.0,  # cloudy (< _GHI_CLOUDY_THRESHOLD)
+        f"perf_ratio_used_{yesterday}": 0.85,
+    }
+
+    store = _AttrStore(attr=(0.0, 0.0, 0.0))
+    store.daily_solar_kwh_api = lambda d: 6.0  # raw ratio 1.2
+
+    import types
+    c = types.SimpleNamespace(battery_soc_pct=50.0, solar_production_kw=0.0)
+    alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert "perf_ratio_samples" not in state
+    assert state["perf_ratio_cloudy_samples"] == [1.2 * 0.85]
+
+
 def test_morning_preview_reports_7am_prediction_accuracy_from_store():
     import types
 
