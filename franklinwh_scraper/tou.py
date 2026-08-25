@@ -25,6 +25,18 @@ class TouPeriod(str, Enum):
 
 _SUMMER_MONTHS = {6, 7, 8, 9, 10}  # June–October
 
+# NOT independently verified against a real bill yet (unlike the export
+# rate below, fixed 2026-08-24). The customer is actually on San Diego
+# Community Power (SDCP, a CCA) — real SDCP generation-only rates from an
+# itemized bill are on-peak $0.38242, off-peak $0.11828, super-off-peak
+# $0.0368/kWh (summer), well below these numbers, because these are
+# bundled SDG&E rates (delivery+generation) and SDCP splits the two.
+# Reconstructing the correct combined delivery+generation rate needs a
+# per-TOU-period delivery breakdown the bill summary doesn't show
+# (sdge.com/SolarBillDetails has it) — on/off-peak here happen to be
+# close to a rough combined estimate, but super-off-peak looks likely too
+# high. Left alone rather than guessing at delivery's TOU structure from
+# one bill; revisit with a SolarBillDetails export or a second bill.
 _RATES = {
     "summer": {
         TouPeriod.SUPER_OFF_PEAK: 0.12424,
@@ -47,39 +59,44 @@ _ON_PEAK_END   = 21  # 9 pm
 # $0.79343/day. Verify against your bill; update if SDG&E changes it.
 BASE_SERVICE_DAILY = 0.79343
 
-# NEM 3.0 / Net Billing Tariff export credit rates ($/kWh).
-# Aug/Sep have boosted evening export rates worth modeling; all other months
-# use the NBT avoided-cost floor (~$0.05/kWh), far below the import rate.
-# Source: user's SDG&E export schedule.
-_NEM3_EXPORT_RATES: dict[int, dict[int, float]] = {
-    8: {17: 0.907, 18: 1.022, 19: 0.920, 20: 0.996, 21: 0.895, 22: 0.885},
-    9: {17: 0.253, 18: 0.595, 19: 0.673, 20: 0.380, 21: 0.154, 22: 0.154},
-}
-_NEM3_DEFAULT_EXPORT_RATE = 0.05  # $/kWh — NBT avoided-cost floor most months
+# Export credit rate ($/kWh) — actual customer is on San Diego Community
+# Power (SDCP, a CCA), not bundled SDG&E generation. Real number confirmed
+# 2026-08-24 from an itemized SDG&E/SDCP bill (cycle 7/21-8/18/26, "Legacy
+# 2024 Pricing"): SDCP generation export credit $0.08201/kWh + $0.0075/kWh
+# adder = $0.08951, plus SDG&E delivery export credit ~$0.0313/kWh
+# (-$3.29 / 105 kWh) = ~$0.121/kWh combined. Flat, not hour-differentiated
+# — the bill shows one rate applied to total monthly export, no per-hour
+# schedule.
+#
+# This REPLACES a previous $0.885-1.022/kWh Aug/Sep "boosted evening rate"
+# table that turned out to have no support in the real bill — source
+# unclear, off by ~8-10x from the real CCA export credit, and had been
+# driving every export-arbitrage/sundown-export-value $ estimate the app
+# showed. If SDG&E's dynamic RIN wholesale pricing (mentioned on the bill,
+# sdge.com's hourly-pricing-by-RIN tool) turns out to be a real, separate
+# export mechanism on top of the CCA credit, this flat rate would need to
+# become "CCA credit + RIN premium" instead — not established by this bill
+# alone, so not modeled here.
+_NEM3_DEFAULT_EXPORT_RATE = 0.121  # $/kWh — real SDCP+SDG&E combined export credit
 
 
 def export_rate_at(dt: datetime) -> float:
-    """Return NEM 3.0 export credit rate ($/kWh) for grid export at dt."""
-    hour_rates = _NEM3_EXPORT_RATES.get(dt.month)
-    if hour_rates:
-        return hour_rates.get(dt.hour, _NEM3_DEFAULT_EXPORT_RATE)
+    """Return the export credit rate ($/kWh) for grid export at dt.
+
+    Flat year-round — see _NEM3_DEFAULT_EXPORT_RATE's docstring. `dt` is
+    kept in the signature (unused) so every call site that reasonably
+    expects a time-varying rate doesn't need touching if real hourly data
+    ever replaces this.
+    """
     return _NEM3_DEFAULT_EXPORT_RATE
 
 
 def peak_export_hour(month: int) -> tuple[int, float]:
-    """Highest-value export (hour, $/kWh) for the month.
-
-    Aug/Sep use SDG&E's published per-hour NEM 3.0 boosted-evening rates.
-    Every other month falls back to a representative evening export hour
-    at the flat NBT avoided-cost floor (_NEM3_DEFAULT_EXPORT_RATE) — we
-    don't have SDG&E's published per-hour export schedule for those
-    months, so a flat floor is the honest number to advertise rather than
-    fabricating hourly variation the alert used to be hard-gated off for.
+    """Highest-value export (hour, $/kWh). Flat rate now (see
+    _NEM3_DEFAULT_EXPORT_RATE) so "peak" is nominal — returns a
+    representative evening hour at the one real rate, kept as a
+    (hour, rate) pair since callers display both.
     """
-    rates = _NEM3_EXPORT_RATES.get(month)
-    if rates:
-        hour = max(rates, key=rates.__getitem__)
-        return hour, rates[hour]
     return 18, _NEM3_DEFAULT_EXPORT_RATE
 
 

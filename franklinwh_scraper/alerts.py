@@ -1028,19 +1028,19 @@ def _alert_export_arbitrage(
 
     credit = exportable_kwh * peak_rate
     if credit < 1.0:
-        # Outside Aug/Sep the rate is the flat $0.05 floor, not a boosted
-        # hourly rate — without this, a routine day would "opportunity"-
-        # alert for a $0.10-$0.30 credit that isn't worth the notification.
+        # A small exportable surplus (small battery, or usage_forecast
+        # already ate most of it) isn't worth a notification even at the
+        # real flat rate (tou._NEM3_DEFAULT_EXPORT_RATE).
         return None
     hour_label = datetime(now.year, now.month, now.day, peak_hour).strftime("%-I %p")
     state["export_arb_date"] = today
     logger.info("Export arbitrage alert: %.1f kWh @ $%.3f = $%.2f at %s",
                 exportable_kwh, peak_rate, credit, hour_label)
     return (
-        f"💰 <b>FranklinWH: Peak export opportunity today</b>\n"
-        f"Battery {soc:.0f}% — hold and export ~{exportable_kwh:.1f} kWh to grid at "
-        f"{hour_label} (${peak_rate:.3f}/kWh) ≈ ${credit:.2f} credit\n"
-        f"That's the day's highest export rate this month. Recharge afterward from solar."
+        f"💰 <b>FranklinWH: Export opportunity today</b>\n"
+        f"Battery {soc:.0f}% — hold and export ~{exportable_kwh:.1f} kWh to grid "
+        f"(${peak_rate:.3f}/kWh flat) ≈ ${credit:.2f} credit\n"
+        f"Recharge afterward from solar."
     )
 
 

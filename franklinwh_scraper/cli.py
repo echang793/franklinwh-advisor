@@ -2010,9 +2010,10 @@ def cmd_savings(ctx: click.Context, days: int, out: str | None) -> None:
     _hr()
     _info(f"Priced at rates effective {sv.priced_at}; base service charge excluded")
     _info("(it is incurred either way, so counting it would inflate savings).")
-    if sv.export_days_at_assumed_rate:
-        _info(f"{sv.export_days_at_assumed_rate} export day(s) priced at the assumed "
-              f"NBT floor rate — SDG&E publishes hourly export rates only for Aug/Sep.")
+    # Export credit is a single flat real rate now (see
+    # tou._NEM3_DEFAULT_EXPORT_RATE's docstring) — no more boosted-vs-floor
+    # distinction to caveat, so export_days_at_assumed_rate (still populated,
+    # now always == every export day) no longer needs its own footnote.
 
 
 @grp_account.command("ev-status")

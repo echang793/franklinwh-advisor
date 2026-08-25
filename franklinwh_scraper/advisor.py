@@ -18,10 +18,12 @@ class Mode(str, Enum):
     # Advisory only — recommend() deliberately never returns this, and
     # test_recommend_never_returns_time_of_use enforces that.
     #
-    # The genuine case for TOU is export arbitrage, which only holds in
-    # Aug/Sep where tou._NEM3_EXPORT_RATES has real published per-hour rates
-    # ($0.90-1.02 vs the $0.80 on-peak import rate). The other ten months use
-    # the flat avoided-cost floor, so TOU is never the better call there.
+    # The case for TOU would be export arbitrage — but the real combined
+    # export credit (tou._NEM3_DEFAULT_EXPORT_RATE, confirmed 2026-08-24
+    # from an actual SDG&E/SDCP bill: ~$0.12/kWh) never comes close to
+    # beating the ~$0.80 on-peak import rate, any month. (An earlier,
+    # unsupported $0.90-1.02/kWh Aug/Sep figure briefly made this look
+    # seasonal — it wasn't; the real rate is flat and always loses.)
     #
     # It also can't be a decision-ladder rung: recommend()'s output drives
     # mode-change notifications that dedup on alerted_{mode}_date, so a TOU

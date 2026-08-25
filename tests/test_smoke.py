@@ -58,13 +58,25 @@ def test_dispatch_runs_for_ntfy_only_config(tmp_path, monkeypatch):
 
 
 def test_alert_export_arbitrage_renders():
+    """Export credit is a flat real rate now (~$0.121/kWh, see
+    tou._NEM3_DEFAULT_EXPORT_RATE) — the old boosted-Aug/Sep-only firing
+    pattern is gone along with the fake boosted rate that produced it; at
+    sufficient SoC this fires the same way in any month."""
     cfg = Config(battery_capacity_kwh=13.6)
     c = _fake_stats(battery_soc_pct=95.0).current
-    # August noon, high SoC → fires
     msg = alerts._alert_export_arbitrage({}, "2026-08-15", datetime(2026, 8, 15, 12), c, cfg, None)
     assert msg and "export" in msg.lower()
-    # July → inert
-    assert alerts._alert_export_arbitrage({}, "2026-07-15", datetime(2026, 7, 15, 12), c, cfg, None) is None
+    msg_july = alerts._alert_export_arbitrage({}, "2026-07-15", datetime(2026, 7, 15, 12), c, cfg, None)
+    assert msg_july and "export" in msg_july.lower()
+
+
+def test_alert_export_arbitrage_inert_below_credit_floor():
+    """Stays inert when the exportable surplus is too small to clear the
+    $1 minimum credit — a small battery keeps exportable_kwh (and so the
+    $ credit) below that floor even at qualifying SoC."""
+    cfg = Config(battery_capacity_kwh=2.0)  # (95-20)/100*2.0 = 1.5 kWh * $0.121 = $0.18, well under $1
+    c = _fake_stats(battery_soc_pct=95.0).current
+    assert alerts._alert_export_arbitrage({}, "2026-08-15", datetime(2026, 8, 15, 12), c, cfg, None) is None
 
 
 def test_ev_charge_window():
