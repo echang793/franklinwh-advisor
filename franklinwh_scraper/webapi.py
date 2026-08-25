@@ -27,6 +27,7 @@ from .alerts import (
     _get_hourly_bias,
     _get_performance_ratio,
     _get_system_peak_kw,
+    _get_vpp_event,
     _GHI_CLOUDY_THRESHOLD,
     _load_peak_state,
     _next_sunrise_after,
@@ -413,6 +414,45 @@ def api_ev():
                     }
         except Exception:
             out["prediction"] = None
+    return out
+
+
+@app.get("/api/vpp", dependencies=_authed)
+def api_vpp():
+    """VPP grid-support event status (e.g. SDG&E DSGS) — logged manually
+    via `franklinwh vpp-event`, since no program exposes a public API to
+    poll. export_kwh_so_far/est_payout_so_far are live-computed from real
+    readings within the event window, not a forecast.
+    """
+    out = {"vpp_enrolled": bool(getattr(_cfg, "vpp_enrolled", False)), "error": False}
+    if not out["vpp_enrolled"]:
+        return out
+
+    state = _load_peak_state(_OUT)
+    now = datetime.now()
+    ev = _get_vpp_event(state, now)
+    if ev is None:
+        out["event"] = None
+        return out
+
+    rate = ev["rate_per_kwh"]
+    export_kwh = 0.0
+    try:
+        rows = _readings_since(ev["start"], min(now, ev["end"]))
+        for _dt, hours, grid_kw, _home_kw, _solar_kw in _intervals(rows):
+            if grid_kw < 0:
+                export_kwh += -grid_kw * hours
+    except Exception:
+        pass
+
+    out["event"] = {
+        "start": ev["start"].isoformat(),
+        "end": ev["end"].isoformat(),
+        "active": ev["start"] <= now <= ev["end"],
+        "rate_per_kwh": rate,
+        "export_kwh_so_far": round(export_kwh, 2),
+        "est_payout_so_far": round(export_kwh * rate, 2) if rate else None,
+    }
     return out
 
 

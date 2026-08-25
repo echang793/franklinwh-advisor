@@ -156,8 +156,8 @@ const DEMO = new URLSearchParams(location.search).get('demo') === '1';
 const CAP0 = 13.6;
 const $ = id => document.getElementById(id);
 const M = "'JetBrains Mono',monospace";
-const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','batteryhealth','attribution','savings','alerts','digests','ev'];
-const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',attribution:'ATTRIBUTION',savings:'SAVINGS',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING'};
+const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','batteryhealth','attribution','savings','alerts','digests','ev','vpp'];
+const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',attribution:'ATTRIBUTION',savings:'SAVINGS',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING',vpp:'VPP EVENT'};
 
 // ── Live state ───────────────────────────────────────────────────────
 const S = {
@@ -168,7 +168,7 @@ const S = {
   alerts: [], unread: 0, alertsVisible: true, filterCat: 'ALL',
   hist: [], histY: [], histIdx: -1, cmp: false,
   forecast: [], cc: 0, scrubIdx: -1,
-  eb: null, rec: null, acc: [], tou: null, bill: null,
+  eb: null, rec: null, acc: [], tou: null, bill: null, vpp: null,
   attribution: [], attrWindowDays: 14,
   tab: 0, focusId: null, flashId: null, narrow: window.innerWidth < 920,
   spans: {}, dragId: null, pending: null, presetSel: null,
@@ -455,6 +455,20 @@ mkPanel('ev', `
     </div>
   </div>`);
 
+mkPanel('vpp', `
+  <div class="plabel">VPP EVENT</div>
+  <div id="vpp-empty" class="mono" style="font-size:11px;color:#4c5f50;margin-top:18px;"></div>
+  <div id="vpp-body" style="display:none;">
+    <div style="display:flex;align-items:center;gap:10px;margin-top:18px;flex-wrap:wrap;">
+      <span id="vpp-status" class="mono" style="font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;">—</span>
+      <span id="vpp-window" class="mono" style="font-size:11px;color:#6d8272;">—</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:16px;">
+      <div class="tile"><div id="vpp-export" style="font-size:24px;font-weight:700;color:#57e389;">— <span style="font-size:14px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">exported this window</div></div>
+      <div class="tile"><div id="vpp-payout" style="font-size:24px;font-weight:700;color:#f5d18a;">— <span style="font-size:14px;color:#7d937f;">$</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">est. payout</div></div>
+    </div>
+  </div>`);
+
 // ── Toolbar ──────────────────────────────────────────────────────────
 function buildToolbar(){
   const tb = $('toolbar');
@@ -536,7 +550,7 @@ function snapshot(){
 }
 
 // ── Layout system ────────────────────────────────────────────────────
-function defaultLayout(){ return { left:['battery','flow','forecast','ebplan','accuracy','attribution','alerts'], right:['history','bill','savings','mode','touclock','batteryhealth','digests','ev'] }; }
+function defaultLayout(){ return { left:['battery','flow','forecast','ebplan','accuracy','attribution','alerts'], right:['history','bill','savings','mode','touclock','batteryhealth','digests','ev','vpp'] }; }
 // Merge a saved layout against the current PANEL_IDS instead of requiring
 // an exact set match — previously, adding (or renaming) even one panel
 // silently discarded every user's custom drag arrangement back to default,
@@ -1120,6 +1134,37 @@ function renderEv(){
       <span class="mono" style="color:#4c5f50;">${relTime(d.timestamp)}</span></div>`;
   }).join('') : '<div class="mono" style="font-size:11px;color:#4c5f50;">no decisions logged yet</div>';
 }
+function renderVpp(){
+  const v = S.vpp;
+  if (!v || !v.vpp_enrolled) {
+    $('vpp-empty').textContent = 'Not enrolled in a VPP program — set vpp_enrolled in ~/.franklinwh.json.';
+    $('vpp-empty').style.display = '';
+    $('vpp-body').style.display = 'none';
+    return;
+  }
+  const ev = v.event;
+  if (!ev) {
+    $('vpp-empty').textContent = 'No VPP event logged. `franklinwh vpp-event --start HH:MM --end HH:MM`.';
+    $('vpp-empty').style.display = '';
+    $('vpp-body').style.display = 'none';
+    return;
+  }
+  $('vpp-empty').style.display = 'none';
+  $('vpp-body').style.display = '';
+
+  const start = new Date(ev.start), end = new Date(ev.end);
+  const fmt = d => d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+  const upcoming = start > nowT();
+  $('vpp-status').textContent = ev.active ? '⚡ ACTIVE' : (upcoming ? 'UPCOMING' : 'ENDED');
+  $('vpp-status').style.cssText = ev.active
+    ? "font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;background:#57e389;color:#07160b;border:1px solid #57e389;"
+    : "font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;";
+  $('vpp-window').textContent = `${fmt(start)} – ${fmt(end)}` + (ev.rate_per_kwh != null ? ` · $${ev.rate_per_kwh.toFixed(3)}/kWh` : '');
+  $('vpp-export').innerHTML = `${ev.export_kwh_so_far.toFixed(1)} <span style="font-size:14px;color:#7d937f;">kWh</span>`;
+  $('vpp-payout').innerHTML = ev.est_payout_so_far != null
+    ? `${ev.est_payout_so_far.toFixed(2)} <span style="font-size:14px;color:#7d937f;">$</span>`
+    : '— <span style="font-size:14px;color:#7d937f;">$</span>';
+}
 function renderTou(){
   const t = S.tou;
   const now = nowT();
@@ -1471,10 +1516,11 @@ async function pollSlow(){
   // update instead of blanking all 7 slow-refresh panels for the cycle —
   // each panel keeps showing its last-known-good data until that specific
   // endpoint recovers.
-  const [h, f, acc, tou, bill, rec, health, bh, ev, attr, sav] = await Promise.allSettled([
+  const [h, f, acc, tou, bill, rec, health, bh, ev, attr, sav, vpp] = await Promise.allSettled([
     J('/api/history?hours=48'), J('/api/forecast'), J('/api/accuracy'),
     J('/api/tou'), J('/api/bill'), J('/api/recommendation'), J('/api/health'),
     J('/api/battery-health'), J('/api/ev'), J(`/api/attribution?days=${S.attrWindowDays}`), J('/api/savings?days=30'),
+    J('/api/vpp'),
   ]);
   const ok = r => r.status === 'fulfilled' ? r.value : null;
   const now = Date.now();
@@ -1508,6 +1554,9 @@ async function pollSlow(){
 
   const evv = ok(ev);
   if (evv) { S.ev = evv; renderEv(); }
+
+  const vppv = ok(vpp);
+  if (vppv) { S.vpp = vppv; renderVpp(); }
 
   const attrv = ok(attr);
   if (attrv) { S.attribution = attrv.days || []; renderAttribution(); }
@@ -1620,7 +1669,7 @@ function demoData(){
     { ts: new Date(Date.now()-120000).toISOString(), body: '⚡ Switch to <b>Time-of-Use</b> mode. Battery at 78% with 14 kWh of solar still expected — hold charge for the 4–9 PM peak window and export at <b>$0.529/kWh</b>.' },
     { ts: new Date(Date.now()-120000).toISOString(), body: 'Heads up: grid peak pricing starts in 1h 28m. Current plan saves an estimated <b>$4.80</b> today vs Self-Use.' },
   ], true);
-  renderHistory(); renderForecast(); renderAccuracy(); renderBatteryHealth(); renderTou(); renderBill(); renderMode(); renderEv(); renderAttribution(); renderSavings();
+  renderHistory(); renderForecast(); renderAccuracy(); renderBatteryHealth(); renderTou(); renderBill(); renderMode(); renderEv(); renderVpp(); renderAttribution(); renderSavings();
   $('m-apply').addEventListener('click', () => {
     if (S.applying || S.modeApplied) return;
     S.applying = true; $('m-apply').textContent = '◈ SWITCHING…';

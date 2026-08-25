@@ -60,6 +60,14 @@ class Config:
     ntfy_topic: str = ""
     ntfy_server: str = "https://ntfy.sh"
 
+    # VPP (Virtual Power Plant) grid-support program enrollment — e.g.
+    # SDG&E DSGS (Demand Side Grid Support), which pays for reduced grid
+    # draw / net export during dispatched events. No program exposes a
+    # public API to poll for events, so they're logged manually via
+    # `franklinwh vpp-event`; this flag just gates the feature's UI/alerts
+    # off for anyone not enrolled.
+    vpp_enrolled: bool = False
+
     # Uptime monitoring — ping this URL each successful run (e.g. healthchecks.io).
     # If pings stop, the service notifies you the advisor has gone down.
     healthcheck_url: str = ""

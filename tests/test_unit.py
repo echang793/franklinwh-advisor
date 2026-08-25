@@ -1908,6 +1908,132 @@ def test_bill_reconciliation_gates_on_window_and_dedup(tmp_path):
     assert alerts._alert_bill_reconciliation(state, "2026-08-24", now, cfg, db) is None
 
 
+def test_get_vpp_event_active_upcoming_expired():
+    now = datetime(2026, 8, 25, 17, 0, 0)
+    active = {"vpp_event": {
+        "start": (now - timedelta(hours=1)).isoformat(),
+        "end": (now + timedelta(hours=2)).isoformat(),
+        "rate_per_kwh": 2.0,
+    }}
+    ev = alerts._get_vpp_event(active, now)
+    assert ev is not None
+    assert alerts._vpp_event_active(active, now) is True
+
+    upcoming = {"vpp_event": {
+        "start": (now + timedelta(hours=1)).isoformat(),
+        "end": (now + timedelta(hours=3)).isoformat(),
+        "rate_per_kwh": None,
+    }}
+    assert alerts._get_vpp_event(upcoming, now) is not None
+    assert alerts._vpp_event_active(upcoming, now) is False
+
+    assert alerts._get_vpp_event({}, now) is None
+
+
+def test_get_vpp_event_self_cleans_past_grace_period():
+    now = datetime(2026, 8, 25, 17, 0, 0)
+    ended_long_ago = {"vpp_event": {
+        "start": (now - timedelta(hours=6)).isoformat(),
+        "end": (now - timedelta(hours=4)).isoformat(),  # 4h past end, grace is 2h
+        "rate_per_kwh": None,
+    }}
+    assert alerts._get_vpp_event(ended_long_ago, now) is None
+    assert "vpp_event" not in ended_long_ago  # popped, not left dangling
+
+    just_ended = {"vpp_event": {
+        "start": (now - timedelta(hours=6)).isoformat(),
+        "end": (now - timedelta(hours=1)).isoformat(),  # 1h past end, within 2h grace
+        "rate_per_kwh": None,
+    }}
+    assert alerts._get_vpp_event(just_ended, now) is not None
+
+
+def test_get_vpp_event_drops_malformed_entry():
+    now = datetime(2026, 8, 25, 17, 0, 0)
+    state = {"vpp_event": {"start": "not-a-date", "end": "also-not-a-date"}}
+    assert alerts._get_vpp_event(state, now) is None
+    assert "vpp_event" not in state
+
+
+def test_alert_vpp_event_started_fires_once_and_gates_on_enrolled():
+    from franklinwh_scraper.config import Config as _C
+
+    now = datetime(2026, 8, 25, 17, 0, 0)
+    ev = {"start": (now - timedelta(minutes=5)).isoformat(),
+          "end": (now + timedelta(hours=2)).isoformat(), "rate_per_kwh": 2.0}
+
+    # Not enrolled -> silent even with a logged, active event.
+    state = {"vpp_event": ev}
+    assert alerts._alert_vpp_event_started(state, "2026-08-25", now, _C(vpp_enrolled=False)) is None
+
+    cfg = _C(vpp_enrolled=True)
+    state = {"vpp_event": ev}
+    msg = alerts._alert_vpp_event_started(state, "2026-08-25", now, cfg)
+    assert msg is not None
+    assert "VPP event active" in msg
+    assert "$2.00/kWh" in msg
+    # Fires once — same event's start already announced.
+    assert alerts._alert_vpp_event_started(state, "2026-08-25", now, cfg) is None
+
+
+def test_alert_vpp_event_started_waits_for_start_time():
+    from franklinwh_scraper.config import Config as _C
+
+    now = datetime(2026, 8, 25, 17, 0, 0)
+    upcoming = {"vpp_event": {
+        "start": (now + timedelta(hours=1)).isoformat(),
+        "end": (now + timedelta(hours=3)).isoformat(), "rate_per_kwh": None,
+    }}
+    assert alerts._alert_vpp_event_started(upcoming, "2026-08-25", now, _C(vpp_enrolled=True)) is None
+
+
+def test_alert_vpp_event_ended_reports_export_and_payout(tmp_path):
+    from franklinwh_scraper.config import Config as _C
+
+    start = datetime(2026, 8, 25, 16, 0, 0)
+    end   = datetime(2026, 8, 25, 18, 0, 0)
+    now   = end + timedelta(minutes=5)
+
+    db = HistoryStore(tmp_path / "h.db")
+    # 2 hours exporting 3 kW steady -> 6 kWh exported (grid_use_kw negative =
+    # export). The 18:05 reading is the "past end" point readings_between's
+    # exclusive upper bound needs to close the 17:00-18:00 interval — it
+    # falls within the alert's own 15-min slack window and gets trimmed
+    # back out before summing (its own 18:00-18:05 interval isn't counted).
+    for ts in ("16:00", "17:00", "18:00", "18:05"):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"2026-08-25T{ts}:00", 1, int(ts[:2]), 0.5, 4.0, 60.0, -3.0, "normal", 0.0, 2.5),
+        )
+    db._conn.commit()
+
+    state = {"vpp_event": {
+        "start": start.isoformat(), "end": end.isoformat(), "rate_per_kwh": 2.0,
+    }}
+    cfg = _C(vpp_enrolled=True)
+    msg = alerts._alert_vpp_event_ended(state, "2026-08-25", now, cfg, db)
+    assert msg is not None
+    assert "VPP event ended" in msg
+    assert "6.0 kWh exported" in msg
+    assert "$12.00 estimated payout" in msg
+    # Fires once.
+    assert alerts._alert_vpp_event_ended(state, "2026-08-25", now, cfg, db) is None
+
+
+def test_alert_vpp_event_ended_waits_for_end_time():
+    from franklinwh_scraper.config import Config as _C
+
+    now = datetime(2026, 8, 25, 17, 0, 0)
+    state = {"vpp_event": {
+        "start": (now - timedelta(hours=1)).isoformat(),
+        "end": (now + timedelta(hours=1)).isoformat(),  # still active, not ended
+        "rate_per_kwh": 2.0,
+    }}
+    assert alerts._alert_vpp_event_ended(state, "2026-08-25", now, _C(vpp_enrolled=True), None) is None
+
+
 def test_chatbot_bill_matches_api_bill_cycle_window():
     """The payoff: /bill and /api/bill must derive the same cycle window.
     They disagreed for real — the API said day 19 while the chatbot computed a
@@ -2424,6 +2550,101 @@ def test_critical_soc_still_fires_in_the_evening(monkeypatch):
     assert rec.urgency == "critical"
 
 
+# ── VPP (Virtual Power Plant) event override ───────────────────────────
+
+def _soft_eb_stats_outlook(soc=20.0):
+    """Low SoC + poor solar, no forecast — hits the static-threshold
+    'WARNING: low SoC + poor solar forecast' branch, a *soft* (non-critical)
+    Emergency Backup call the VPP override is allowed to countermand."""
+    import types
+    outlook = types.SimpleNamespace(
+        avg_ghi=lambda h: 50.0, avg_cloud_cover=lambda h: 90.0,
+        peak_ghi_today=lambda: 60.0,
+    )
+    stats = types.SimpleNamespace(current=types.SimpleNamespace(
+        battery_soc_pct=soc, home_load_kw=1.0, solar_production_kw=0.1,
+        grid_status="normal",
+    ), totals=types.SimpleNamespace())
+    return stats, outlook
+
+
+def test_vpp_event_overrides_soft_emergency_backup(monkeypatch):
+    from franklinwh_scraper import advisor
+
+    now = datetime(2026, 8, 25, 17, 0, 0)
+    monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
+    stats, outlook = _soft_eb_stats_outlook(soc=20.0)
+
+    # Sanity: without a VPP event this really is a soft (warning) EB call.
+    baseline = advisor.recommend(stats, outlook=outlook, forecast=None, battery_capacity_kwh=13.6)
+    assert baseline.mode is advisor.Mode.EMERGENCY_BACKUP
+    assert baseline.urgency == "warning"
+
+    vpp_event = {"start": now - timedelta(hours=1), "end": now + timedelta(hours=2), "rate_per_kwh": 2.0}
+    rec = advisor.recommend(stats, outlook=outlook, forecast=None, battery_capacity_kwh=13.6,
+                            vpp_event=vpp_event)
+    assert rec.mode is advisor.Mode.SELF_CONSUMPTION
+    assert rec.urgency == "info"
+    assert "VPP event active" in rec.reason
+    assert "$2.00/kWh" in rec.reason
+    assert "Would otherwise have been" in rec.reason
+
+
+def test_vpp_event_never_overrides_critical_emergency_backup(monkeypatch):
+    """Grid-down / critically-low-SoC safety calls must never be overridden
+    for a VPP payout — both are urgency='critical', which the override
+    explicitly excludes."""
+    from franklinwh_scraper import advisor
+
+    now = datetime(2026, 7, 30, 19, 0, 0)
+    monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
+    stats, outlook, fc = _crit_case(now, soc=11.0, solar_kw=0.0)
+
+    vpp_event = {"start": now - timedelta(hours=1), "end": now + timedelta(hours=2), "rate_per_kwh": 2.0}
+    rec = advisor.recommend(stats, outlook=outlook, forecast=fc, battery_capacity_kwh=13.6,
+                            vpp_event=vpp_event)
+    assert rec.mode is advisor.Mode.EMERGENCY_BACKUP
+    assert rec.urgency == "critical"
+
+
+def test_vpp_event_inactive_does_not_override(monkeypatch):
+    """A logged event outside its start/end window (upcoming or already
+    ended) must not touch the recommendation at all."""
+    from franklinwh_scraper import advisor
+
+    now = datetime(2026, 8, 25, 17, 0, 0)
+    monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
+    stats, outlook = _soft_eb_stats_outlook(soc=20.0)
+
+    future_event = {"start": now + timedelta(hours=1), "end": now + timedelta(hours=3), "rate_per_kwh": 2.0}
+    rec = advisor.recommend(stats, outlook=outlook, forecast=None, battery_capacity_kwh=13.6,
+                            vpp_event=future_event)
+    assert rec.mode is advisor.Mode.EMERGENCY_BACKUP
+    assert rec.urgency == "warning"
+    assert "VPP" not in rec.reason
+
+
+def test_vpp_event_annotates_compatible_recommendation_without_changing_mode(monkeypatch):
+    """When the underlying recommendation is already Self-Consumption
+    (compatible with the VPP goal), the mode must stay as-is — only the
+    reason gets the event context appended."""
+    from franklinwh_scraper import advisor
+
+    now = datetime(2026, 7, 30, 10, 0, 0)
+    monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
+    stats, outlook, fc = _crit_case(now, soc=70.0, solar_kw=5.0)
+
+    baseline = advisor.recommend(stats, outlook=outlook, forecast=fc, battery_capacity_kwh=13.6)
+    assert baseline.mode is advisor.Mode.SELF_CONSUMPTION
+
+    vpp_event = {"start": now - timedelta(hours=1), "end": now + timedelta(hours=2), "rate_per_kwh": None}
+    rec = advisor.recommend(stats, outlook=outlook, forecast=fc, battery_capacity_kwh=13.6,
+                            vpp_event=vpp_event)
+    assert rec.mode is advisor.Mode.SELF_CONSUMPTION
+    assert "VPP event active" in rec.reason
+    assert baseline.reason in rec.reason  # original reasoning preserved, just annotated
+
+
 def _digest_stats(soc=55.0, home_load_kw=1.5):
     import types
     return types.SimpleNamespace(
@@ -2635,6 +2856,139 @@ def test_bill_record_defaults_to_most_recently_closed_cycle(tmp_path):
     cur_start, _cur_end = cycle_bounds(datetime.now().date(), 20)
     _, expected_end = cycle_bounds(cur_start - timedelta(days=1), 20)
     assert state[f"actual_bill_{expected_end.isoformat()}"] == 88.0
+
+
+def test_vpp_event_logs_start_end_and_rate(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    cfg = Config(output_dir=str(tmp_path))
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["vpp-event", "--start", "16:00", "--end", "21:00",
+                                          "--rate", "2.00"])
+    assert res.exit_code == 0, res.output
+    assert "Logged VPP event" in res.output
+
+    state = _load_peak_state(tmp_path)
+    ev = state["vpp_event"]
+    today = datetime.now().date().isoformat()
+    assert ev["start"] == f"{today}T16:00:00"
+    assert ev["end"] == f"{today}T21:00:00"
+    assert ev["rate_per_kwh"] == 2.0
+
+
+def test_vpp_event_accepts_full_datetime():
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    cfg = Config(output_dir="/tmp/nonexistent-vpp-test")
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["vpp-event", "--start", "2026-08-25T16:00",
+                                          "--end", "2026-08-25T21:00"])
+    assert res.exit_code == 0, res.output
+
+
+def test_vpp_event_rejects_end_before_start(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    cfg = Config(output_dir=str(tmp_path))
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["vpp-event", "--start", "21:00", "--end", "16:00"])
+    assert res.exit_code != 0
+    assert "must be after" in res.output
+
+
+def test_vpp_event_rejects_bad_time_format(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    cfg = Config(output_dir=str(tmp_path))
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["vpp-event", "--start", "not-a-time", "--end", "21:00"])
+    assert res.exit_code != 0
+    assert "Can't parse" in res.output
+
+
+def test_vpp_event_requires_start_and_end_unless_clearing(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    cfg = Config(output_dir=str(tmp_path))
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["vpp-event"])
+    assert res.exit_code != 0
+    assert "required" in res.output.lower()
+
+
+def test_vpp_event_clear_removes_logged_event(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper.alerts import _load_peak_state, _save_peak_state
+
+    _save_peak_state(tmp_path, {"vpp_event": {"start": "x", "end": "y", "rate_per_kwh": None}})
+
+    cfg = Config(output_dir=str(tmp_path))
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["vpp-event", "--clear"])
+    assert res.exit_code == 0, res.output
+    assert "Cleared" in res.output
+    assert "vpp_event" not in _load_peak_state(tmp_path)
+
+
+def test_vpp_event_clear_when_nothing_logged_says_so(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    cfg = Config(output_dir=str(tmp_path))
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["vpp-event", "--clear"])
+    assert res.exit_code == 0, res.output
+    assert "No VPP event was logged" in res.output
+
+
+def test_vpp_event_warns_when_not_enrolled(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    cfg = Config(output_dir=str(tmp_path), vpp_enrolled=False)
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["vpp-event", "--start", "16:00", "--end", "21:00"])
+    assert res.exit_code == 0, res.output
+    assert "vpp_enrolled is False" in res.output
 
 
 def test_hourly_bias_uses_ewma_not_flat_median():
@@ -4125,6 +4479,73 @@ def test_api_ev_reports_controller_status_and_null_prediction_without_history(
     # special-case an absent key vs an explicit null.
     assert "prediction" in body
     assert body["prediction"] is None
+
+
+def test_api_vpp_short_circuits_when_not_enrolled(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+
+    monkeypatch.setattr(webapi, "_cfg", Config(vpp_enrolled=False), raising=False)
+    client = TestClient(webapi.app)
+    r = client.get("/api/vpp")
+    assert r.status_code == 200
+    assert r.json() == {"vpp_enrolled": False, "error": False}
+
+
+def test_api_vpp_reports_no_event_when_none_logged(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+
+    monkeypatch.setattr(webapi, "_cfg", Config(vpp_enrolled=True, output_dir=str(tmp_path)),
+                        raising=False)
+    monkeypatch.setattr(webapi, "_OUT", tmp_path, raising=False)
+    client = TestClient(webapi.app)
+    r = client.get("/api/vpp")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["vpp_enrolled"] is True
+    assert body["event"] is None
+
+
+def test_api_vpp_reports_active_event_with_live_export_and_payout(tmp_path, monkeypatch):
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+
+    db = HistoryStore(tmp_path / "history.db")
+    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    start = now - timedelta(hours=1)
+    for i, ts in enumerate((start, start + timedelta(hours=1))):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts.isoformat(), ts.weekday(), ts.hour, 0.5, 4.0, 60.0, -2.0, "normal", 0.0, 1.5),
+        )
+    db._conn.commit()
+
+    cfg = Config(vpp_enrolled=True, output_dir=str(tmp_path))
+    monkeypatch.setattr(webapi, "_cfg", cfg, raising=False)
+    monkeypatch.setattr(webapi, "_OUT", tmp_path, raising=False)
+
+    ev = {
+        "start": start.isoformat(), "end": (now + timedelta(hours=1)).isoformat(),
+        "rate_per_kwh": 2.0, "logged_at": start.isoformat(),
+    }
+    (tmp_path / ".peak_alert_state.json").write_text(_json.dumps({"vpp_event": ev}))
+
+    client = TestClient(webapi.app)
+    r = client.get("/api/vpp")
+    assert r.status_code == 200
+    body = r.json()["event"]
+    assert body["active"] is True
+    assert body["rate_per_kwh"] == 2.0
+    assert body["export_kwh_so_far"] >= 0  # exact value depends on integration window; just must not error/be None
+    assert body["est_payout_so_far"] is not None
 
 
 def test_api_bill_surfaces_actual_and_diff_when_recorded(tmp_path, monkeypatch):

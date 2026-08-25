@@ -26,6 +26,7 @@ from .alerts import (
     _get_hourly_bias,
     _get_performance_ratio,
     _get_system_peak_kw,
+    _get_vpp_event,
     _load_peak_state,
     _ping_healthcheck,
     _save_peak_state,
@@ -820,6 +821,73 @@ def bill_record(ctx: click.Context, amount: float, cycle_end: str) -> None:
 
     _ok(f"Recorded ${amount:.2f} for the cycle ending {end.strftime('%b %-d, %Y')}")
     click.echo("  Check the dashboard's billing card or `franklinwh doctor` for the projection diff.")
+
+
+# ── VPP events ───────────────────────────────────────────────────────
+
+def _parse_vpp_time(s: str) -> datetime:
+    """Accept a bare HH:MM (assumes today) or a full YYYY-MM-DDTHH:MM."""
+    try:
+        if "T" in s:
+            return datetime.strptime(s, "%Y-%m-%dT%H:%M")
+        t = datetime.strptime(s, "%H:%M").time()
+        return datetime.combine(datetime.now().date(), t)
+    except ValueError:
+        raise click.ClickException(f"Can't parse '{s}' — use HH:MM or YYYY-MM-DDTHH:MM")
+
+
+@cli.command("vpp-event")
+@click.option("--start", default="", help="Event start: HH:MM (today) or YYYY-MM-DDTHH:MM.")
+@click.option("--end", default="", help="Event end: HH:MM (today) or YYYY-MM-DDTHH:MM.")
+@click.option("--rate", type=float, default=None,
+              help="Payout rate in $/kWh, if known — enables the estimated-payout line "
+                   "in the post-event summary.")
+@click.option("--clear", is_flag=True, default=False,
+              help="Cancel/remove the currently logged event instead of logging a new one.")
+@click.pass_context
+def vpp_event(ctx: click.Context, start: str, end: str, rate: float | None, clear: bool) -> None:
+    """Log a VPP grid-support event (e.g. SDG&E DSGS) for the duration of
+    which the advisor pushes Self-Consumption/export instead of building
+    reserves via Emergency Backup — no program exposes a public API to
+    poll for events, so this is how the app finds out about one.
+    """
+    cfg = ctx.obj["config"]
+    outdir = Path(cfg.output_dir)
+    if not outdir.is_absolute():
+        outdir = Path(__file__).parent.parent / outdir
+
+    if clear:
+        with _state_lock(outdir):
+            state = _load_peak_state(outdir)
+            had = state.pop("vpp_event", None) is not None
+            _save_peak_state(outdir, state)
+        _ok("Cleared logged VPP event" if had else "No VPP event was logged")
+        return
+
+    if not start or not end:
+        raise click.ClickException("--start and --end are required (or pass --clear to cancel).")
+    start_dt = _parse_vpp_time(start)
+    end_dt   = _parse_vpp_time(end)
+    if end_dt <= start_dt:
+        raise click.ClickException("--end must be after --start")
+
+    with _state_lock(outdir):
+        state = _load_peak_state(outdir)
+        state["vpp_event"] = {
+            "start": start_dt.isoformat(), "end": end_dt.isoformat(),
+            "rate_per_kwh": rate, "logged_at": datetime.now().isoformat(),
+        }
+        # A fresh event replaces any stale started/ended dedup markers from
+        # a previous one, so this one's own start/end alerts can fire.
+        state.pop("vpp_event_started_alerted", None)
+        state.pop("vpp_event_ended_alerted", None)
+        _save_peak_state(outdir, state)
+
+    rate_str = f" @ ${rate:.2f}/kWh" if rate else ""
+    _ok(f"Logged VPP event: {start_dt.strftime('%-I:%M %p')} – {end_dt.strftime('%-I:%M %p')}{rate_str}")
+    click.echo("  App will push Self-Consumption/export instead of Emergency Backup during this window.")
+    if not getattr(cfg, "vpp_enrolled", False):
+        _warn("cfg.vpp_enrolled is False — set it in ~/.franklinwh.json to enable VPP alerts/dashboard status.")
 
 
 # ── Doctor ───────────────────────────────────────────────────────────
@@ -1769,6 +1837,10 @@ def cmd_advise(
                 rec = recommend(
                     stats, outlook, usage_forecast,
                     battery_capacity_kwh=getattr(cfg, "battery_capacity_kwh", _BATTERY_CAPACITY_KWH),
+                    vpp_event=(
+                        _get_vpp_event(_peak_state, datetime.now())
+                        if getattr(cfg, "vpp_enrolled", False) else None
+                    ),
                 )
 
                 if _chatbot is not None:

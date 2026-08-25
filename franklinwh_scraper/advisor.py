@@ -213,13 +213,19 @@ def _tou_eb_plan(
     }
 
 
-def recommend(
+def _recommend_raw(
     stats: Stats,
     outlook: SolarOutlook | None,
     forecast: UsageForecast | None = None,
     battery_capacity_kwh: float = 13.6,
 ) -> Recommendation:
-    """Evaluate current state + weather + usage forecast → mode recommendation."""
+    """Evaluate current state + weather + usage forecast → mode recommendation.
+
+    Renamed from `recommend` (2026-08-25) — `recommend()` below wraps this
+    with the VPP-event override so every early `return` in here stays a
+    single, un-tangled decision ladder instead of threading a VPP check
+    through each branch.
+    """
     soc         = stats.current.battery_soc_pct
     home_kw     = stats.current.home_load_kw
     solar_kw    = stats.current.solar_production_kw
@@ -459,4 +465,67 @@ def recommend(
         ),
         urgency="info",
         details=details,
+    )
+
+
+def recommend(
+    stats: Stats,
+    outlook: SolarOutlook | None,
+    forecast: UsageForecast | None = None,
+    battery_capacity_kwh: float = 13.6,
+    vpp_event: dict | None = None,
+) -> Recommendation:
+    """_recommend_raw(), then override for an active VPP grid-support event
+    (e.g. SDG&E DSGS) — pass `vpp_event` as {"start": datetime, "end":
+    datetime, "rate_per_kwh": float | None} when one is logged (see
+    alerts._get_vpp_event; the caller resolves it, not this module, to
+    avoid alerts.py <-> advisor.py becoming a circular import).
+
+    DSGS pays for *reduced grid draw* during the event window — the
+    opposite of what Emergency Backup does (it actively charges FROM the
+    grid). Overriding EMERGENCY_BACKUP -> SELF_CONSUMPTION during an
+    active event is safe precisely because it's gated on urgency !=
+    "critical": both hard-safety branches above (grid down, critically-low
+    SoC with no solar recovery) return urgency="critical" and are never
+    touched, VPP payout or not. Every other EMERGENCY_BACKUP branch
+    (including the TOU-aware projected-shortfall one) is a *soft*
+    reserve-building call the override is allowed to countermand — DSGS
+    events are typically scheduled at/near on-peak hours specifically
+    because the grid needs support then, so staying discharged usually
+    avoids the TOU on-peak import cost too, not just earning the payout.
+    """
+    rec = _recommend_raw(stats, outlook, forecast, battery_capacity_kwh)
+    if vpp_event is None:
+        return rec
+
+    now = datetime.now()
+    if not (vpp_event["start"] <= now <= vpp_event["end"]):
+        return rec
+
+    rate = vpp_event.get("rate_per_kwh")
+    event_note = (
+        f"\n⚡ VPP event active ({vpp_event['start'].strftime('%-I:%M %p')}–"
+        f"{vpp_event['end'].strftime('%-I:%M %p')}"
+        + (f", ${rate:.2f}/kWh" if rate else "")
+        + ")."
+    )
+
+    if rec.mode == Mode.EMERGENCY_BACKUP and rec.urgency != "critical":
+        return Recommendation(
+            mode=Mode.SELF_CONSUMPTION,
+            reason=(
+                "VPP event active — pushing Self-Consumption to reduce grid draw "
+                "for event compensation instead of building reserves.\n"
+                f"(Would otherwise have been: {rec.reason})"
+                + event_note
+            ),
+            urgency="info",
+            details=rec.details,
+        )
+
+    # Already Self-Consumption/NO_CHANGE — compatible with the event as-is;
+    # just surface the context so whichever alert fires carries it too.
+    return Recommendation(
+        mode=rec.mode, reason=rec.reason + event_note,
+        urgency=rec.urgency, details=rec.details,
     )

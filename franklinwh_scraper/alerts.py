@@ -143,6 +143,113 @@ def _get_sundown_bias(state: dict) -> float:
     return _ewma(samples)
 
 
+# ── VPP (Virtual Power Plant) grid-support events ─────────────────────
+# e.g. SDG&E DSGS (Demand Side Grid Support): pays for reduced grid draw /
+# net export during a dispatched event window. No program exposes a public
+# API to poll, so events are logged manually via `franklinwh vpp-event`
+# into state["vpp_event"] = {"start": iso, "end": iso, "rate_per_kwh":
+# float|None, "logged_at": iso}. A grace period past `end` keeps the event
+# visible to the post-event payout-summary alert before self-cleaning.
+_VPP_EVENT_GRACE = timedelta(hours=2)
+
+
+def _get_vpp_event(state: dict, now: datetime) -> dict | None:
+    """Return the logged event with parsed start/end datetimes, or None if
+    nothing's logged or it's aged past its grace period (auto-cleared)."""
+    ev = state.get("vpp_event")
+    if not ev:
+        return None
+    try:
+        start = datetime.fromisoformat(ev["start"])
+        end   = datetime.fromisoformat(ev["end"])
+    except (KeyError, ValueError, TypeError):
+        state.pop("vpp_event", None)  # malformed — drop rather than crash on it forever
+        return None
+    if now > end + _VPP_EVENT_GRACE:
+        state.pop("vpp_event", None)
+        return None
+    return {"start": start, "end": end, "rate_per_kwh": ev.get("rate_per_kwh")}
+
+
+def _vpp_event_active(state: dict, now: datetime) -> bool:
+    ev = _get_vpp_event(state, now)
+    return ev is not None and ev["start"] <= now <= ev["end"]
+
+
+def _alert_vpp_event_started(state: dict, today: str, now: datetime, cfg: Config) -> str | None:
+    """Fires once as soon as a logged event's window is reached — whether
+    that's a lead-time notice (logged well ahead of start) or immediate
+    (logged after the event already began, e.g. same-day DSGS notice).
+    Independent of whether recommend()'s mode-override actually changes
+    anything this cycle — the user asked to know the event is active
+    regardless of whether a mode-change notification also fires."""
+    if not getattr(cfg, "vpp_enrolled", False):
+        return None
+    ev = _get_vpp_event(state, now)
+    if ev is None or now < ev["start"]:
+        return None
+    key = "vpp_event_started_alerted"
+    if state.get(key) == ev["start"].isoformat():
+        return None
+    state[key] = ev["start"].isoformat()
+    rate_str = f" (${ev['rate_per_kwh']:.2f}/kWh)" if ev["rate_per_kwh"] else ""
+    logger.info("VPP event started: %s - %s%s", ev["start"], ev["end"], rate_str)
+    return (
+        f"⚡ <b>FranklinWH: VPP event active</b>\n"
+        f"{ev['start'].strftime('%-I:%M %p')} – {ev['end'].strftime('%-I:%M %p')}{rate_str}\n"
+        f"Pushing Self-Consumption/export for the duration — avoid drawing from the grid if you can."
+    )
+
+
+def _alert_vpp_event_ended(state: dict, today: str, now: datetime, cfg: Config, store) -> str | None:
+    """Fires once after the event window closes — reports real exported
+    kWh during the window (from history, not a forecast) and an estimated
+    payout if a $/kWh rate was logged with the event."""
+    if not getattr(cfg, "vpp_enrolled", False):
+        return None
+    ev_raw = state.get("vpp_event")
+    if not ev_raw:
+        return None
+    try:
+        start = datetime.fromisoformat(ev_raw["start"])
+        end   = datetime.fromisoformat(ev_raw["end"])
+    except (KeyError, ValueError, TypeError):
+        return None
+    if now < end:
+        return None
+    key = "vpp_event_ended_alerted"
+    if state.get(key) == end.isoformat():
+        return None
+    state[key] = end.isoformat()
+
+    rate = ev_raw.get("rate_per_kwh")
+    export_kwh = 0.0
+    if store is not None:
+        try:
+            # readings_between's upper bound is exclusive, so a query ending
+            # exactly at `end` would never see the one reading needed to
+            # close the final interval before it — fetch with slack past
+            # the boundary (same fix _cycle_cost uses in webapi.py) and
+            # trim intervals back to the real event window before summing.
+            slack = timedelta(minutes=15)
+            readings = store.readings_between(start.isoformat(), (end + slack).isoformat())
+            for dt0, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(readings):
+                if dt0 >= end:
+                    continue
+                if grid_kw < 0:
+                    export_kwh += -grid_kw * hours
+        except Exception:
+            logger.exception("VPP event summary: readings query failed")
+
+    payout_str = f" ≈ ${export_kwh * rate:.2f} estimated payout" if rate else ""
+    logger.info("VPP event ended: exported %.1f kWh%s", export_kwh, payout_str)
+    return (
+        f"✅ <b>FranklinWH: VPP event ended</b>\n"
+        f"{start.strftime('%-I:%M %p')} – {end.strftime('%-I:%M %p')}: "
+        f"~{export_kwh:.1f} kWh exported{payout_str}"
+    )
+
+
 _NO_EV_LOAD_MIN_SAMPLES = 5   # confirmed no-EV nights before an hour's ground truth is trusted
 _NO_EV_LOAD_CAP = 40          # ~a season of confirmed no-EV nights per hour
 _NO_EV_FLOOR_TOLERANCE = 1.0  # pt — how close to cfg.ev_charge_floor_soc counts as "at the floor"
@@ -2984,6 +3091,8 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),
+            ("vpp_event_started",    lambda: _alert_vpp_event_started(state, today, now, cfg)),
+            ("vpp_event_ended",      lambda: _alert_vpp_event_ended(state, today, now, cfg, store)),
         ]
         # (body, urgent) — fast_drain returns two tiers from one candidate
         # (critical below 35% SoC, plus a lower-urgency "unusual drain"
