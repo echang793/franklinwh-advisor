@@ -2059,7 +2059,7 @@ def test_alert_vpp_event_ended_reports_export_and_payout(tmp_path):
     # accepted as a small undercount, see the code comment) — only the
     # 16:00-17:00 interval is captured here, 1h * 2.5kW = 2.5 kWh.
     assert "2.5 kWh discharged" in msg
-    assert "$5.00 estimated payout (at discharge)" in msg
+    assert "$5.00 toward this year's gift card (at discharge)" in msg
     # Fires once.
     assert alerts._alert_vpp_event_ended(state, "2026-08-25", now, cfg, db) is None
 

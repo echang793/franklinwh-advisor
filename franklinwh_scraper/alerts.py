@@ -259,14 +259,17 @@ def _alert_vpp_event_ended(state: dict, today: str, now: datetime, cfg: Config, 
         except Exception:
             logger.exception("VPP event summary: readings query failed")
 
-    payout_str = f" ≈ ${discharge_kwh * rate:.2f} estimated payout (at discharge)" if rate else ""
+    # DSGS settles annually via Visa gift card, not a per-event cash payment
+    # (confirmed by user 2026-08-25) — "estimated payout" reads like money
+    # owed right now, which it isn't. Framed as a running tally instead.
+    payout_str = f" ≈ ${discharge_kwh * rate:.2f} toward this year's gift card (at discharge)" if rate else ""
     logger.info("VPP event ended: exported %.1f kWh, discharged %.1f kWh%s",
                 export_kwh, discharge_kwh, payout_str)
     return (
         f"✅ <b>FranklinWH: VPP event ended</b>\n"
         f"{start.strftime('%-I:%M %p')} – {end.strftime('%-I:%M %p')}: "
         f"~{export_kwh:.1f} kWh exported, ~{discharge_kwh:.1f} kWh discharged{payout_str}\n"
-        f"(not sure which metric your program pays on — showing both)"
+        f"(not sure which metric your program pays on — showing both. DSGS pays annually via gift card, not per event.)"
     )
 
 
