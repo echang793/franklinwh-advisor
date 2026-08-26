@@ -1485,6 +1485,44 @@ def test_daily_battery_kwh_clamps_long_gaps(tmp_path):
     assert chg < 1.0  # clamped to <=1h of avg power, not the full 8h gap
 
 
+def test_battery_kwh_between_arbitrary_window(tmp_path):
+    """Same math as daily_battery_kwh but for an arbitrary sub-day window
+    (e.g. a VPP event) instead of a full calendar date. Upper bound is
+    exclusive (matches readings_between) — a reading exactly at the query's
+    end isn't included, so it can't anchor a final trapezoidal interval;
+    callers that need the last interval closed must query with slack past
+    the real boundary (see _alert_vpp_event_ended for that pattern)."""
+    db = HistoryStore(tmp_path / "h.db")
+    # Discharging 2.5 kW at 16:00 and 17:00 (1 interval between them, 1h
+    # -> 2.5 kWh); 18:00's reading is excluded by the exclusive end bound,
+    # so it doesn't close a second interval. 19:00 charging is outside
+    # even a slack-extended window.
+    for ts, kw in (("16:00", 2.5), ("17:00", 2.5), ("18:00", 2.5), ("19:00", -1.0)):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"2026-08-25T{ts}:00", 1, int(ts[:2]), 0.5, 0.0, 50.0, 0.0, "normal", 0.0, kw),
+        )
+    db._conn.commit()
+
+    chg, dis = db.battery_kwh_between("2026-08-25T16:00:00", "2026-08-25T18:00:00")
+    assert dis == 2.5
+    assert chg == 0.0
+
+    # Extend past 18:00 (with slack) to also capture the 17:00-18:00 and
+    # 18:00-19:00 intervals: +2.5 kWh discharge for 17:00-18:00, and for
+    # the mixed 18:00-19:00 interval the trapezoidal *average* of (2.5,
+    # -1.0) is +0.75 kW — still net-positive over that hour, so it counts
+    # as +0.75 kWh discharge rather than splitting into separate charge/
+    # discharge portions (this integrator, like daily_battery_kwh, buckets
+    # each whole interval by its average sign, not sub-interval sign
+    # changes). Total: 2.5 + 2.5 + 0.75 = 5.75.
+    chg2, dis2 = db.battery_kwh_between("2026-08-25T16:00:00", "2026-08-25T19:01:00")
+    assert dis2 == 5.75
+    assert chg2 == 0.0
+
+
 def test_read_consec_errors_persists_across_process_restart(tmp_path):
     """A cron-based (no --watch) install runs a fresh process per invocation
     — the error streak must survive that, or the 'N poll errors in a row'
@@ -2017,7 +2055,11 @@ def test_alert_vpp_event_ended_reports_export_and_payout(tmp_path):
     assert msg is not None
     assert "VPP event ended" in msg
     assert "6.0 kWh exported" in msg
-    assert "$12.00 estimated payout" in msg
+    # discharge_kwh's query has no slack past `end` (exclusive upper bound
+    # accepted as a small undercount, see the code comment) — only the
+    # 16:00-17:00 interval is captured here, 1h * 2.5kW = 2.5 kWh.
+    assert "2.5 kWh discharged" in msg
+    assert "$5.00 estimated payout (at discharge)" in msg
     # Fires once.
     assert alerts._alert_vpp_event_ended(state, "2026-08-25", now, cfg, db) is None
 
@@ -4545,6 +4587,7 @@ def test_api_vpp_reports_active_event_with_live_export_and_payout(tmp_path, monk
     assert body["active"] is True
     assert body["rate_per_kwh"] == 2.0
     assert body["export_kwh_so_far"] >= 0  # exact value depends on integration window; just must not error/be None
+    assert body["discharge_kwh_so_far"] >= 0
     assert body["est_payout_so_far"] is not None
 
 

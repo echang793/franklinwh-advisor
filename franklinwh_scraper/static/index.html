@@ -463,10 +463,12 @@ mkPanel('vpp', `
       <span id="vpp-status" class="mono" style="font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;">—</span>
       <span id="vpp-window" class="mono" style="font-size:11px;color:#6d8272;">—</span>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:16px;">
-      <div class="tile"><div id="vpp-export" style="font-size:24px;font-weight:700;color:#57e389;">— <span style="font-size:14px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">exported this window</div></div>
-      <div class="tile"><div id="vpp-payout" style="font-size:24px;font-weight:700;color:#f5d18a;">— <span style="font-size:14px;color:#7d937f;">$</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">est. payout</div></div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px;">
+      <div class="tile"><div id="vpp-export" style="font-size:22px;font-weight:700;color:#8fb4ff;">— <span style="font-size:13px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:9.5px;letter-spacing:.06em;color:#5f7263;margin-top:4px;">exported</div></div>
+      <div class="tile"><div id="vpp-discharge" style="font-size:22px;font-weight:700;color:#57e389;">— <span style="font-size:13px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:9.5px;letter-spacing:.06em;color:#5f7263;margin-top:4px;">discharged</div></div>
+      <div class="tile"><div id="vpp-payout" style="font-size:22px;font-weight:700;color:#f5d18a;">— <span style="font-size:13px;color:#7d937f;">$</span></div><div class="mono" style="font-size:9.5px;letter-spacing:.06em;color:#5f7263;margin-top:4px;">est. payout</div></div>
     </div>
+    <div class="mono" style="font-size:9.5px;color:#4c5f50;margin-top:10px;">Payment metric (export vs. discharge vs. load reduction) not confirmed — both shown.</div>
   </div>`);
 
 // ── Toolbar ──────────────────────────────────────────────────────────
@@ -1160,10 +1162,11 @@ function renderVpp(){
     ? "font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;background:#57e389;color:#07160b;border:1px solid #57e389;"
     : "font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;";
   $('vpp-window').textContent = `${fmt(start)} – ${fmt(end)}` + (ev.rate_per_kwh != null ? ` · $${ev.rate_per_kwh.toFixed(3)}/kWh` : '');
-  $('vpp-export').innerHTML = `${ev.export_kwh_so_far.toFixed(1)} <span style="font-size:14px;color:#7d937f;">kWh</span>`;
+  $('vpp-export').innerHTML = `${ev.export_kwh_so_far.toFixed(1)} <span style="font-size:13px;color:#7d937f;">kWh</span>`;
+  $('vpp-discharge').innerHTML = `${(ev.discharge_kwh_so_far ?? 0).toFixed(1)} <span style="font-size:13px;color:#7d937f;">kWh</span>`;
   $('vpp-payout').innerHTML = ev.est_payout_so_far != null
-    ? `${ev.est_payout_so_far.toFixed(2)} <span style="font-size:14px;color:#7d937f;">$</span>`
-    : '— <span style="font-size:14px;color:#7d937f;">$</span>';
+    ? `${ev.est_payout_so_far.toFixed(2)} <span style="font-size:13px;color:#7d937f;">$</span>`
+    : '— <span style="font-size:13px;color:#7d937f;">$</span>';
 }
 function renderTou(){
   const t = S.tou;

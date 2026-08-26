@@ -436,22 +436,32 @@ def api_vpp():
         return out
 
     rate = ev["rate_per_kwh"]
+    window_end = min(now, ev["end"])
     export_kwh = 0.0
+    discharge_kwh = 0.0
     try:
-        rows = _readings_since(ev["start"], min(now, ev["end"]))
+        rows = _readings_since(ev["start"], window_end)
         for _dt, hours, grid_kw, _home_kw, _solar_kw in _intervals(rows):
             if grid_kw < 0:
                 export_kwh += -grid_kw * hours
+        with HistoryStore(_OUT / "history.db") as history:
+            _chg, discharge_kwh = history.battery_kwh_between(
+                ev["start"].isoformat(), window_end.isoformat())
     except Exception:
         pass
 
+    # Which metric the program actually pays on (export, discharge, or load
+    # reduction vs. a baseline) isn't something this app can determine —
+    # both are surfaced, est_payout_so_far uses discharge as the more
+    # common metric for behind-the-meter battery participation.
     out["event"] = {
         "start": ev["start"].isoformat(),
         "end": ev["end"].isoformat(),
         "active": ev["start"] <= now <= ev["end"],
         "rate_per_kwh": rate,
         "export_kwh_so_far": round(export_kwh, 2),
-        "est_payout_so_far": round(export_kwh * rate, 2) if rate else None,
+        "discharge_kwh_so_far": round(discharge_kwh, 2),
+        "est_payout_so_far": round(discharge_kwh * rate, 2) if rate else None,
     }
     return out
 

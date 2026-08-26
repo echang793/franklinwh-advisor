@@ -202,9 +202,19 @@ def _alert_vpp_event_started(state: dict, today: str, now: datetime, cfg: Config
 
 
 def _alert_vpp_event_ended(state: dict, today: str, now: datetime, cfg: Config, store) -> str | None:
-    """Fires once after the event window closes — reports real exported
-    kWh during the window (from history, not a forecast) and an estimated
-    payout if a $/kWh rate was logged with the event."""
+    """Fires once after the event window closes — reports real exported and
+    discharged kWh during the window (from history, not a forecast).
+
+    Both numbers, not just one: DSGS-style VPP programs pay against
+    different metrics depending on participation option/aggregator — net
+    grid export, battery discharge, or load reduction vs. a baseline —
+    and which applies isn't something this app can determine on its own
+    (confirmed with user 2026-08-25: not certain which, guessing
+    discharge). Showing both lets the user match whichever the real
+    settlement statement uses; the estimated-payout line (only shown if a
+    rate was logged) uses discharge, since that's the more common metric
+    for behind-the-meter battery participation and the user's own guess.
+    """
     if not getattr(cfg, "vpp_enrolled", False):
         return None
     ev_raw = state.get("vpp_event")
@@ -224,6 +234,7 @@ def _alert_vpp_event_ended(state: dict, today: str, now: datetime, cfg: Config, 
 
     rate = ev_raw.get("rate_per_kwh")
     export_kwh = 0.0
+    discharge_kwh = 0.0
     if store is not None:
         try:
             # readings_between's upper bound is exclusive, so a query ending
@@ -238,15 +249,24 @@ def _alert_vpp_event_ended(state: dict, today: str, now: datetime, cfg: Config, 
                     continue
                 if grid_kw < 0:
                     export_kwh += -grid_kw * hours
+            # No slack needed here (unlike the export loop above): this
+            # returns a pre-summed total, not per-interval tuples to trim,
+            # so extending past `end` would over-count the tail instead of
+            # under-counting it. Accept the small under-count from the
+            # exclusive upper bound instead — same trade-off every other
+            # readings_between caller in this file already accepts.
+            _chg, discharge_kwh = store.battery_kwh_between(start.isoformat(), end.isoformat())
         except Exception:
             logger.exception("VPP event summary: readings query failed")
 
-    payout_str = f" ≈ ${export_kwh * rate:.2f} estimated payout" if rate else ""
-    logger.info("VPP event ended: exported %.1f kWh%s", export_kwh, payout_str)
+    payout_str = f" ≈ ${discharge_kwh * rate:.2f} estimated payout (at discharge)" if rate else ""
+    logger.info("VPP event ended: exported %.1f kWh, discharged %.1f kWh%s",
+                export_kwh, discharge_kwh, payout_str)
     return (
         f"✅ <b>FranklinWH: VPP event ended</b>\n"
         f"{start.strftime('%-I:%M %p')} – {end.strftime('%-I:%M %p')}: "
-        f"~{export_kwh:.1f} kWh exported{payout_str}"
+        f"~{export_kwh:.1f} kWh exported, ~{discharge_kwh:.1f} kWh discharged{payout_str}\n"
+        f"(not sure which metric your program pays on — showing both)"
     )
 
 

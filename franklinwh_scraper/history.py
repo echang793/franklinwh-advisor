@@ -428,6 +428,37 @@ class HistoryStore:
                 chg += -avg * dt_h
         return round(chg, 2), round(dis, 2)
 
+    def battery_kwh_between(self, start_iso: str, end_iso: str) -> tuple[float, float]:
+        """Return (charge_kwh, discharge_kwh) for an arbitrary ISO datetime
+        range (not calendar-day-bound like daily_battery_kwh) — e.g. a VPP
+        event window. Same clamped trapezoidal integration; kept as its own
+        method rather than generalizing daily_battery_kwh so neither call
+        site has to reason about the other's date-vs-datetime contract.
+        """
+        rows = self._conn.execute(
+            "SELECT timestamp, battery_use_kw FROM readings "
+            "WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+            (start_iso, end_iso),
+        ).fetchall()
+        chg = dis = 0.0
+        for i in range(1, len(rows)):
+            t1, b1 = rows[i - 1]
+            t2, b2 = rows[i]
+            try:
+                dt_h = min(
+                    _MAX_INTEGRATION_GAP_H,
+                    (datetime.fromisoformat(t2) - datetime.fromisoformat(t1)).total_seconds() / 3600,
+                )
+            except (ValueError, TypeError):
+                logger.warning("Skipping interval with bad timestamp: %r → %r", t1, t2)
+                continue
+            avg = (b1 + b2) / 2
+            if avg > 0:
+                dis += avg * dt_h
+            else:
+                chg += -avg * dt_h
+        return round(chg, 2), round(dis, 2)
+
     def round_trip_efficiency_samples(
         self, start_date: str, end_date: str, min_charge_kwh: float = 1.0,
     ) -> list[float]:
