@@ -21,6 +21,7 @@ from .advisor import Mode, recommend
 from .alerts import (
     _BATTERY_CAPACITY_KWH,
     _GHI_CLOUDY_THRESHOLD,
+    _PR_BIAS_FIX_DATE,
     _SOLAR_CAL_LOG_FILE,
     _check_peak_alerts,
     _get_hourly_bias,
@@ -2214,7 +2215,23 @@ def cmd_accuracy(ctx: click.Context, out: str | None) -> None:
             "the prior day's actual solar output."
         )
 
+    # Floor at the same date _alert_solar_degradation floors its baseline at:
+    # the 2026-08-24 perf_ratio EWMA bias fix live-migrated daily_pr from
+    # running ~6% high to centering near 1.0. Without this, the week-over-
+    # week trend column partly reports that migration discontinuity as
+    # forecast drift rather than real accuracy change.
+    excluded_pre_fix = sum(1 for d in daily_pr if d < _PR_BIAS_FIX_DATE)
+    daily_pr = {d: v for d, v in daily_pr.items() if d >= _PR_BIAS_FIX_DATE}
+    if not daily_pr:
+        raise click.ClickException(
+            "No accuracy data since the perf_ratio bias-fix migration "
+            f"({_PR_BIAS_FIX_DATE}) yet."
+        )
+
     _header("Solar Forecast Accuracy")
+    if excluded_pre_fix:
+        _info(f"Excluding {excluded_pre_fix} day(s) before {_PR_BIAS_FIX_DATE} "
+              f"(perf_ratio bias-fix migration — see alerts.py:_PR_BIAS_FIX_DATE)")
 
     by_week: dict[str, list[float]] = {}
     for date_str, ratio in daily_pr.items():

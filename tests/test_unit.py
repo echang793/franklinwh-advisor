@@ -2891,6 +2891,37 @@ def test_bill_record_warns_on_stale_cycle_end(tmp_path):
     assert f"actual_bill_{stale}" not in state
 
 
+def test_accuracy_excludes_pre_bias_fix_days(tmp_path):
+    """cmd_accuracy must floor at the same _PR_BIAS_FIX_DATE that
+    _alert_solar_degradation floors at — otherwise the week-over-week
+    trend column partly reports the 2026-08-24 perf_ratio migration
+    discontinuity as forecast drift instead of real accuracy change."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper.alerts import _save_peak_state
+
+    state = {
+        # Pre-fix: inflated ratio (1.15 -> 15% "error") — must be excluded.
+        "daily_pr_2026-08-20": 1.15,
+        "daily_pr_2026-08-21": 1.15,
+        # Post-fix: centered near 1.0 — must be the only days counted.
+        "daily_pr_2026-08-24": 1.02,
+        "daily_pr_2026-08-25": 0.98,
+    }
+    _save_peak_state(tmp_path, state)
+    cfg = Config(output_dir=str(tmp_path))
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["account", "accuracy"])
+    assert res.exit_code == 0, res.output
+    assert "Excluding 2 day(s) before 2026-08-24" in res.output
+    assert "2026-08-20" not in res.output
+    assert "Overall: 2 day(s)" in res.output
+
+
 def test_bill_record_rejects_bad_date(tmp_path):
     from unittest.mock import patch
 
