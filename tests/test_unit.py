@@ -431,6 +431,34 @@ def test_prediction_drift_alert_silent_when_centred():
     assert alerts._alert_prediction_drift(state, "2026-07-15", now) is None
 
 
+def test_solar_degradation_fires_on_genuine_drop():
+    # Well past the 2026-08-24 bias-fix date — the 30-day window here is the
+    # normal moving window, not floored, so this exercises the ordinary path.
+    now = datetime(2026, 10, 1, 9)
+    state = {
+        f"daily_pr_2026-09-{d:02d}": (0.90 if d >= 24 else 1.10)
+        for d in range(1, 31)
+    }
+    msg = alerts._alert_solar_degradation(state, "2026-10-01", now)
+    assert msg is not None and "trending down" in msg
+    assert state["solar_degradation_alerted_week"] == now.strftime("%G-W%V")
+
+
+def test_solar_degradation_ignores_pre_bias_fix_baseline():
+    # Reproduces the real false-positive: daily_pr_ inflated ~1.0-1.2 before
+    # 2026-08-24 (perf_ratio EWMA undershoot, fixed that date), then settling
+    # near 1.0 after. A naive 30-day baseline vs 7-day recent window reads
+    # the calibration fix itself as an 8% drop. The floor at the fix date
+    # should keep the baseline from reaching pre-fix samples, leaving too
+    # few post-fix samples (7 < 10) to evaluate at all.
+    now = datetime(2026, 8, 31, 9)
+    state = {
+        f"daily_pr_2026-08-{d:02d}": (1.06 if d < 24 else 0.98)
+        for d in range(1, 31)
+    }
+    assert alerts._alert_solar_degradation(state, "2026-08-31", now) is None
+
+
 def _make_license(tmp_path, monkeypatch, gateway="GW123", expires="2099-01-01",
                   tamper=False):
     import base64

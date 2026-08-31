@@ -2102,13 +2102,26 @@ def _alert_prediction_drift(state: dict, today: str, now: datetime) -> str | Non
     )
 
 
+# 2026-08-24: fixed a self-referential bias in the perf_ratio EWMA (it was
+# fed post-correction residuals instead of the true multiplier, so it
+# converged to an undershoot — predictions ran low, daily_pr ran ~6% high
+# as a result). The fix was live-migrated on this date, so daily_pr_ values
+# from before it are systematically inflated relative to values after it.
+# Comparing a 30-day baseline that straddles this date against a 7-day
+# window entirely after it reads the calibration fix itself as a solar
+# output drop. Floor both windows here so the baseline can't reach back
+# past the fix — this self-obsoletes once real time moves the 30-day
+# window's start past this date on its own.
+_PR_BIAS_FIX_DATE = "2026-08-24"
+
+
 def _alert_solar_degradation(state: dict, today: str, now: datetime) -> str | None:
     """Morning check: 7-day rolling PR median drops >5% vs 30-day baseline → possible degradation."""
     week_key = now.strftime("%G-W%V")  # ISO year-week, e.g. 2026-W23
     if now.hour not in (8, 9) or state.get("solar_degradation_alerted_week") == week_key:
         return None
 
-    cutoff_30 = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+    cutoff_30 = max((now - timedelta(days=30)).strftime("%Y-%m-%d"), _PR_BIAS_FIX_DATE)
     cutoff_7  = (now - timedelta(days=7)).strftime("%Y-%m-%d")
 
     all_pr: list[float]    = []
