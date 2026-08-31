@@ -2417,6 +2417,47 @@ def test_build_context_includes_recommendation_and_forecast(tmp_path):
     assert len(ctx.split("\n")) <= 26
 
 
+def test_build_context_includes_active_vpp_event(tmp_path):
+    """The bot must see an active VPP event, or it can't answer 'am I in a
+    grid-support event right now' and could contradict the started/ended
+    alerts the user just received."""
+    from franklinwh_scraper.alerts import _save_peak_state
+    from franklinwh_scraper.chatbot import build_context
+
+    now = datetime.now()
+    _save_peak_state(tmp_path, {
+        "vpp_event": {
+            "start": (now - timedelta(minutes=30)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "rate_per_kwh": 0.50,
+            "logged_at": now.isoformat(),
+        }
+    })
+    ctx = build_context(None, None, None, Config(vpp_enrolled=True), outdir=tmp_path)
+    assert "VPP event:" in ctx
+    assert "ACTIVE NOW" in ctx
+    assert "$0.50/kWh" in ctx
+
+
+def test_build_context_omits_vpp_when_not_enrolled(tmp_path):
+    """Not enrolled → no VPP line, even if state somehow has a stale event
+    (e.g. leftover from before vpp_enrolled was turned off)."""
+    from franklinwh_scraper.alerts import _save_peak_state
+    from franklinwh_scraper.chatbot import build_context
+
+    now = datetime.now()
+    _save_peak_state(tmp_path, {
+        "vpp_event": {
+            "start": (now - timedelta(minutes=30)).isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+            "rate_per_kwh": None,
+            "logged_at": now.isoformat(),
+        }
+    })
+    ctx = build_context(None, None, None, Config(vpp_enrolled=False), outdir=tmp_path)
+    assert "VPP event:" not in ctx
+
+
 def test_build_context_survives_missing_alert_log(tmp_path):
     """A missing/unreadable alert log must not break /status."""
     import types

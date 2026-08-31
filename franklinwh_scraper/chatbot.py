@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from .alerts import _get_vpp_event, _load_peak_state
 from .format_utils import fmt_hours, soc_bar, time_to_pct
 from .tou import _RATES, TouPeriod, on_peak_window, period_at, rate_at
 
@@ -207,6 +208,26 @@ def build_context(stats, history, outlook, cfg, *, rec=None, forecast=None,
                 lines.append("  Recent alerts:")
                 lines += [f"    · {b}" for b in recent]
         except (OSError, ValueError):
+            pass
+
+    # Active/upcoming VPP (e.g. SDG&E DSGS) event — without this the bot
+    # can't answer "am I in a grid-support event right now" and could
+    # confidently contradict the advisor's own started/ended alerts.
+    if outdir is not None and getattr(cfg, "vpp_enrolled", False):
+        try:
+            state = _load_peak_state(outdir)
+            ev = _get_vpp_event(state, now)
+            if ev is not None:
+                rate_str = f", ${ev['rate_per_kwh']:.2f}/kWh" if ev["rate_per_kwh"] else ", rate not logged"
+                window = f"{ev['start'].strftime('%-I:%M %p')}–{ev['end'].strftime('%-I:%M %p')}"
+                if ev["start"] <= now <= ev["end"]:
+                    status = f"ACTIVE NOW ({window}{rate_str}) — pushing Self-Consumption/export"
+                elif now < ev["start"]:
+                    status = f"upcoming {window}{rate_str}"
+                else:
+                    status = f"just ended {window}{rate_str} — payout metric not confirmed, tracking both export and discharge kWh"
+                lines.append(f"  VPP event:     {status}")
+        except (OSError, ValueError, KeyError):
             pass
 
     capacity = getattr(cfg, "battery_capacity_kwh", 13.6)
@@ -1035,7 +1056,7 @@ class TelegramChatBot:
         """
         from pathlib import Path
 
-        from .alerts import _load_peak_state, _save_peak_state, _state_lock
+        from .alerts import _save_peak_state, _state_lock
         out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
         now = datetime.now()
         until = now + timedelta(hours=hours) if hours > 0 else None
@@ -1057,7 +1078,6 @@ class TelegramChatBot:
         peek at state — no lock needed for an informational display."""
         from pathlib import Path
 
-        from .alerts import _load_peak_state
         out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
         until_raw = _load_peak_state(out).get("alerts_muted_until")
         if not until_raw:
