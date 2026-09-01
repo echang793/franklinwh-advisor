@@ -4964,22 +4964,28 @@ def test_drses_period_at_march_carveout():
 
 
 def test_drses_rate_at_on_peak_matches_verified_table():
-    """Pinned against SDG&E's official 1-1-26 DR-SES Total Rates Table —
-    catches an accidental edit to the hardcoded schedule."""
-    assert tou.drses_rate_at(datetime(2026, 7, 8, 17)) == pytest.approx(0.74506)
-    assert tou.drses_rate_at(datetime(2026, 1, 8, 17)) == pytest.approx(0.47444)
+    """Pinned against the real unbundled DR-SES numbers (SDG&E delivery +
+    SDCP generation, 2026-08-31) — catches an accidental edit to the
+    hardcoded schedule."""
+    assert tou.drses_rate_at(datetime(2026, 7, 8, 17)) == pytest.approx(0.69413)
+    assert tou.drses_rate_at(datetime(2026, 1, 8, 17)) == pytest.approx(0.45352)
 
 
-def test_compare_rate_plans_prefers_cheaper_plan():
+def test_compare_rate_plans_evtou5_currently_cheaper():
     from franklinwh_scraper.savings import compare_rate_plans
 
-    # All grid import during a weekday summer on-peak hour, where DR-SES
-    # (0.74506) is cheaper than EV-TOU-5 (0.79988) — see tou._RATES.
+    # With real unbundled numbers (both plans priced as SDG&E delivery +
+    # SDCP generation, not bundled SDG&E), EV-TOU-5 is cheaper than DR-SES
+    # at every TOU period for this customer — DR-SES's generation rate runs
+    # slightly higher than EV-TOU-5's at every period, and EV-TOU-5 alone
+    # gets the deep super-off-peak delivery discount. This replaces a
+    # pre-correction test that had it backwards, comparing a bundled DR-SES
+    # number against an unbundled EV-TOU-5 number.
     dt = datetime(2026, 7, 8, 17)  # Wed 5pm, on-peak both schedules
     intervals = [(dt, 1.0, 2.0, 2.0, 0.0)]  # (dt, hours, grid_kw, home_kw, solar_kw)
     cmp = compare_rate_plans(intervals)
-    assert cmp.drses_import_cost < cmp.evtou5_import_cost
-    assert cmp.monthly_savings > 0
+    assert cmp.evtou5_import_cost < cmp.drses_import_cost
+    assert cmp.monthly_savings < 0  # switching to DR-SES would cost more, not save
     assert cmp.import_kwh == pytest.approx(2.0)
 
 

@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from enum import Enum
 
-# SDG&E revises rates roughly twice per year. If today is more than 180 days
-# past this date, bill estimates may be stale — update _RATES below.
-_RATES_EFFECTIVE_DATE = date(2026, 1, 1)
+# SDG&E/SDCP revise rates roughly twice per year. If today is more than 180
+# days past this date, bill estimates may be stale — update _RATES below.
+_RATES_EFFECTIVE_DATE = date(2026, 1, 1)  # SDCP's EV-TOU-5 generation table date
 
 
 def rates_are_stale(today: date | None = None) -> bool:
@@ -25,28 +25,51 @@ class TouPeriod(str, Enum):
 
 _SUMMER_MONTHS = {6, 7, 8, 9, 10}  # June–October
 
-# NOT independently verified against a real bill yet (unlike the export
-# rate below, fixed 2026-08-24). The customer is actually on San Diego
-# Community Power (SDCP, a CCA) — real SDCP generation-only rates from an
-# itemized bill are on-peak $0.38242, off-peak $0.11828, super-off-peak
-# $0.0368/kWh (summer), well below these numbers, because these are
-# bundled SDG&E rates (delivery+generation) and SDCP splits the two.
-# Reconstructing the correct combined delivery+generation rate needs a
-# per-TOU-period delivery breakdown the bill summary doesn't show
-# (sdge.com/SolarBillDetails has it) — on/off-peak here happen to be
-# close to a rough combined estimate, but super-off-peak looks likely too
-# high. Left alone rather than guessing at delivery's TOU structure from
-# one bill; revisit with a SolarBillDetails export or a second bill.
+# Reconstructed from two real, dated, public rate schedules — no bundled
+# SDG&E number and no guess at delivery's TOU structure, unlike the
+# previous version of this table.
+#
+# Customer is on San Diego Community Power (SDCP, a CCA), not bundled
+# SDG&E generation. Unbundled customers pay SDG&E delivery + SDCP
+# generation separately (SDG&E's own EV-TOU-5-P tariff, note 2: "Unbundled
+# customers do not pay SDG&E's commodity rates").
+#
+# Delivery (SDG&E, "UDC Total" + "WF-NBC + DWR-BC Rate" columns of
+# Schedule EV-TOU-5-P, effective 10/1/2025, sdge.com/sites/default/files/
+# regulatory/10-1-25%20Schedule%20EV-TOU-5-P%20Total%20Rates%20Table.pdf):
+# flat across summer/winter — only Transmission+Distribution differ by
+# period, and on-peak/off-peak share the same value in this tariff, only
+# super-off-peak drops.
+#   on-peak = off-peak: 0.30120 (UDC) + 0.00595 (WF-NBC/DWR-BC) = 0.30715
+#   super-off-peak:     0.02858 (UDC) + 0.00595 (WF-NBC/DWR-BC) = 0.03453
+#
+# Generation (SDCP EV-TOU-5, PowerBase column — matches this customer's
+# own itemized bill numbers to within routine periodic-update drift;
+# PowerOn is ~$0.01-0.03/kWh higher and not what the bill shows.
+# "2026 Current Residential Rates", effective 1/1/2026,
+# sdcommunitypower.org/wp-content/uploads/2026/01/Res_2021V_2026.pdf):
+#   summer: on-peak 0.38298, off-peak 0.11853, super-off-peak 0.03696
+#   winter: on-peak 0.14237, off-peak 0.09205, super-off-peak 0.03039
+#
+# Known gap: PCIA (Power Charge Indifference Adjustment), a small
+# vintage-dependent line item SDG&E charges unbundled customers on top of
+# delivery — not included below. SDG&E's own published DA-vintage table
+# ranges roughly -$0.032 to +$0.002/kWh depending on the year the
+# customer's cohort left bundled service; the CCA-specific vintage table
+# lives in a separate CCA-CRS schedule this session didn't have access to.
+# If your bill shows a "PCIA" line item, that value should be added to
+# every period below — until then this table is real delivery + real
+# generation, missing one small, usually negative, adjustment.
 _RATES = {
     "summer": {
-        TouPeriod.SUPER_OFF_PEAK: 0.12424,
-        TouPeriod.OFF_PEAK:       0.50245,
-        TouPeriod.ON_PEAK:        0.79988,
+        TouPeriod.SUPER_OFF_PEAK: 0.07149,
+        TouPeriod.OFF_PEAK:       0.42568,
+        TouPeriod.ON_PEAK:        0.69013,
     },
     "winter": {
-        TouPeriod.SUPER_OFF_PEAK: 0.11686,
-        TouPeriod.OFF_PEAK:       0.47267,
-        TouPeriod.ON_PEAK:        0.52926,
+        TouPeriod.SUPER_OFF_PEAK: 0.06492,
+        TouPeriod.OFF_PEAK:       0.39920,
+        TouPeriod.ON_PEAK:        0.44952,
     },
 }
 
@@ -152,21 +175,38 @@ def rate_at(dt: datetime) -> float:
 
 # ── Schedule DR-SES (residential-with-solar alternative to EV-TOU-5) ──────
 # Used only for the rate-plan-comparison alert (savings.compare_rate_plans) —
-# never for billing math above, which is all EV-TOU-5. Rates verified against
-# SDG&E's official "1-1-26 Schedule DR-SES Total Rates Table" (sdge.com/
-# sites/default/files/regulatory/1-1-26%20Schedule%20DR-SES%20Total%20Rates
-# %20Table.pdf), fetched 2026-08-24 — same _RATES_EFFECTIVE_DATE staleness
-# caveat as EV-TOU-5's _RATES applies here too.
+# never for billing math above, which is all EV-TOU-5.
+#
+# Reconstructed the same way as EV-TOU-5's _RATES above (2026-08-31), for
+# the same reason: the previous version of this table was SDG&E's bundled
+# DR-SES rate, but the customer is on SDCP (a CCA), same as for EV-TOU-5 —
+# comparing a bundled DR-SES number against an unbundled EV-TOU-5 number
+# would have silently made this comparison meaningless the moment EV-TOU-5
+# switched to real unbundled numbers.
+#
+# Delivery (SDG&E, "UDC Total" + "WF-NBC + DWR-BC Rate" of Schedule DR-SES,
+# effective 6/1/2025, sdge.com/sites/default/files/regulatory/6-1-25%20
+# Schedule%20DR-SES%20Total%20Rates%20Table.pdf): flat across ALL periods
+# and both seasons, unlike EV-TOU-5 — DR-SES has no time-varying delivery
+# component at all, only Distribution differs slightly from EV-TOU-5's.
+#   every period, every season: 0.29962 (UDC) + 0.00595 (WF-NBC/DWR-BC) = 0.30557
+#
+# Generation (SDCP DR-SES, PowerBase column, same source/date as EV-TOU-5's
+# SDCP generation numbers above):
+#   summer: on-peak 0.38856, off-peak 0.12411, super-off-peak 0.04254
+#   winter: on-peak 0.14795, off-peak 0.09763, super-off-peak 0.03597
+#
+# Same PCIA gap as EV-TOU-5's _RATES — not included, see that comment.
 _DRSES_RATES = {
     "summer": {
-        TouPeriod.SUPER_OFF_PEAK: 0.35588,
-        TouPeriod.OFF_PEAK:       0.44763,
-        TouPeriod.ON_PEAK:        0.74506,
+        TouPeriod.SUPER_OFF_PEAK: 0.34811,
+        TouPeriod.OFF_PEAK:       0.42968,
+        TouPeriod.ON_PEAK:        0.69413,
     },
     "winter": {
-        TouPeriod.SUPER_OFF_PEAK: 0.34850,
-        TouPeriod.OFF_PEAK:       0.41785,
-        TouPeriod.ON_PEAK:        0.47444,
+        TouPeriod.SUPER_OFF_PEAK: 0.34154,
+        TouPeriod.OFF_PEAK:       0.40320,
+        TouPeriod.ON_PEAK:        0.45352,
     },
 }
 # Base Services Charge is $0.79343/day on DR-SES too (same UDC line item as
