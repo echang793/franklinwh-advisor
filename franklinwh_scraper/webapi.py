@@ -32,6 +32,7 @@ from .alerts import (
     _load_peak_state,
     _next_sunrise_after,
     _predict_overnight_soc_flat,
+    _PR_BIAS_FIX_DATE,
 )
 from .advisor import _tou_eb_plan
 from .config import load as load_config
@@ -292,6 +293,15 @@ def api_accuracy(days: int = Query(7, ge=1, le=30)):
             for i in range(days, 0, -1):
                 d = (date.today() - timedelta(days=i))
                 ds = d.isoformat()
+                # Same floor cli.py's cmd_accuracy uses: daily_pr_/predicted_kwh_
+                # values from before the 2026-08-24 perf_ratio EWMA bias fix ran
+                # ~6% high relative to actual (predictions had been
+                # undershooting). A wider `days` request would otherwise mix
+                # pre-fix and post-fix days into one mean error, understating
+                # current accuracy. Self-obsoletes once real time moves the
+                # request window past this date on its own.
+                if ds < _PR_BIAS_FIX_DATE:
+                    continue
                 pred = state.get(f"predicted_kwh_{ds}")
                 if not pred:  # skips both missing and a legitimately-zero forecast
                     continue

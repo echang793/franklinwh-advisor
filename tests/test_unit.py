@@ -4623,6 +4623,54 @@ def test_api_ev_reports_controller_status_and_null_prediction_without_history(
     assert body["prediction"] is None
 
 
+def test_api_accuracy_excludes_pre_bias_fix_days(tmp_path, monkeypatch):
+    """Mirrors cmd_accuracy's floor (see test_accuracy_excludes_pre_bias_fix_days):
+    a wide `days` request must not mix pre-2026-08-24 predicted_kwh_ days
+    (perf_ratio ran ~6% high) into the dashboard's mean-error figure."""
+    from datetime import date
+
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+    from franklinwh_scraper.alerts import _save_peak_state
+    from franklinwh_scraper.history import HistoryStore
+
+    real_date = date
+
+    class _FakeDate(real_date):
+        @classmethod
+        def today(cls):
+            return real_date(2026, 8, 31)
+
+    monkeypatch.setattr(webapi, "date", _FakeDate)
+
+    db = HistoryStore(tmp_path / "history.db")
+    state = {}
+    # Pre-fix day (2026-08-20): should never appear even with days=30.
+    # Post-fix day (2026-08-25): should appear.
+    for ds, kwh in (("2026-08-20", 10.0), ("2026-08-25", 12.0)):
+        state[f"predicted_kwh_{ds}"] = kwh
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"{ds}T12:00:00", 0, 12, 1.0, 3.0, 50.0, 0.0, "normal", kwh, 0.0),
+        )
+    db._conn.commit()
+    db.close()
+    _save_peak_state(tmp_path, state)
+
+    monkeypatch.setattr(webapi, "_cfg", Config(output_dir=str(tmp_path)), raising=False)
+    monkeypatch.setattr(webapi, "_OUT", tmp_path, raising=False)
+    client = TestClient(webapi.app)
+    r = client.get("/api/accuracy", params={"days": 30})
+    assert r.status_code == 200
+    body = r.json()
+    dates = [d["date"] for d in body["days"]]
+    assert "2026-08-20" not in dates
+    assert "2026-08-25" in dates
+
+
 def test_api_vpp_short_circuits_when_not_enrolled(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
