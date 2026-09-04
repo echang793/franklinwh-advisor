@@ -778,6 +778,50 @@ def _log_solar_calibration_inputs(
         logger.debug("Solar calibration log write failed", exc_info=True)
 
 
+# Rotating greeting for the morning preview — requested 2026-08-31 so the
+# alert doesn't say "Good morning!" every single day. Picked by day-of-year
+# modulo len(), not random.choice() — deterministic (same day always picks
+# the same greeting, so it's testable and reproducible) rather than truly
+# random, and the alert only fires once/day anyway so there's no
+# within-day repetition to avoid.
+_MORNING_GREETINGS = [
+    "Good morning!",
+    "Rise and shine!",
+    "Morning!",
+    "Top of the morning!",
+    "Good morning, sunshine!",
+    "Hey there!",
+    "Here's your morning briefing",
+    "Solar's up, so are we",
+    "Fresh forecast just in",
+    "Another day, another kWh",
+    "Morning check-in",
+    "Your daily energy digest",
+    "Let's talk solar",
+    "Rise and recharge",
+    "Morning update incoming",
+    "Hello again!",
+    "Here's what's cooking today",
+    "Daybreak digest",
+    "Good morning, home team",
+    "New day, new forecast",
+    "Morning, early bird",
+    "Sunrise report",
+    "Here's the morning scoop",
+    "Good morning — the sun's out (probably)",
+    "Ready when you are",
+    "Morning, morning",
+    "Let's see what today's got",
+    "The forecast is in",
+    "Good morning, let's get to it",
+    "Hey — quick morning rundown",
+]
+
+
+def _morning_greeting(now: datetime) -> str:
+    return _MORNING_GREETINGS[now.timetuple().tm_yday % len(_MORNING_GREETINGS)]
+
+
 def _alert_morning_preview(
     state: dict, today: str, now: datetime, c,
     outlook, usage_forecast, store, cfg: Config | None = None,
@@ -972,7 +1016,7 @@ def _alert_morning_preview(
     state["morning_preview_date"] = today
     logger.info("Morning preview alert sent for %s", today)
     return (
-        f"☀️ <b>FranklinWH: Good morning!</b>\n"
+        f"☀️ <b>FranklinWH: {_morning_greeting(now)}</b>\n"
         f"🔋 {_soc_bar(soc)}  ·  Solar: <b>{solar_kw:.2f} kW</b>\n"
         f"{solar_est}{peak_window_str}{soc_7am_acc_str}"
     )

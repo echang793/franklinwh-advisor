@@ -3977,6 +3977,33 @@ def test_eod_digest_stores_7am_prediction_for_tomorrow(monkeypatch):
     assert state[key]["low_pct"] < state[key]["pct"] < state[key]["high_pct"]
 
 
+def test_morning_greeting_varies_by_day_of_year():
+    """Requested 2026-08-31: the morning alert must not say 'Good morning!'
+    every single day. Deterministic (day-of-year modulo), not random.choice
+    — so the same date always reproduces the same greeting."""
+    d1 = datetime(2026, 1, 1)
+    d2 = datetime(2026, 1, 2)
+    g1 = alerts._morning_greeting(d1)
+    g2 = alerts._morning_greeting(d2)
+    assert g1 != g2
+    assert g1 in alerts._MORNING_GREETINGS
+    assert g2 in alerts._MORNING_GREETINGS
+    # Reproducible for the same date.
+    assert alerts._morning_greeting(d1) == g1
+
+
+def test_morning_preview_uses_rotating_greeting():
+    import types
+
+    now = datetime(2026, 1, 5, 7, 45)  # a date whose greeting isn't "Good morning!"
+    today = now.strftime("%Y-%m-%d")
+    c = types.SimpleNamespace(battery_soc_pct=50.0, solar_production_kw=0.0)
+    msg = alerts._alert_morning_preview({}, today, now, c, None, None, None, Config())
+    expected = alerts._morning_greeting(now)
+    assert expected in msg
+    assert expected != "Good morning!"  # confirms this date actually exercises rotation
+
+
 def test_morning_preview_pr_calibration_undoes_yesterdays_correction():
     """The EWMA sample fed into perf_ratio_samples must be the
     baseline-relative true ratio (raw residual * perf_ratio actually used
