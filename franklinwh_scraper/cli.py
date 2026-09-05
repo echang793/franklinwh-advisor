@@ -29,7 +29,6 @@ from .alerts import (
     _get_system_peak_kw,
     _get_vpp_event,
     _load_peak_state,
-    _ping_healthcheck,
     _save_peak_state,
     _state_lock,
 )
@@ -1913,7 +1912,6 @@ def cmd_advise(
                     if getattr(cfg, "ntfy_topic", ""):
                         notify_ntfy(_recovered_msg, cfg)
                 _consec_errors = 0
-                _ping_healthcheck(cfg)  # signal a healthy completed cycle
                 _write_health_marker(outdir, 0, None)
 
             except Exception as e:
@@ -1947,6 +1945,21 @@ def cmd_advise(
                         notify_webhook(_err_msg, True, cfg)
                     if getattr(cfg, "ntfy_topic", ""):
                         notify_ntfy(_err_msg, cfg)
+
+            # Unconditional — fires whether this cycle's gateway call
+            # succeeded or not. Was inside the try block's success path
+            # only, which conflated "the advisor loop is alive" with "the
+            # FranklinWH cloud API happened to answer this cycle" — two
+            # different reliability domains. The gateway is flaky often
+            # enough (500s, timeouts, connection resets — already tolerated
+            # here via retry and only escalated to the user past
+            # _ERROR_THRESHOLD consecutive failures) that healthchecks.io's
+            # tighter external grace window was flapping down/up on
+            # transient blips this loop was already recovering from on its
+            # own, well before the license-invalid `break` above would ever
+            # be hit. A hard process crash or a fully hung loop still won't
+            # ping — that's the failure this switch exists to catch.
+            _ping_healthcheck(cfg)
 
             if not watch:
                 break
