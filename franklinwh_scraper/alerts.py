@@ -1135,6 +1135,28 @@ def _alert_solar_stopped(state: dict, today: str, now: datetime, c) -> str | Non
     )
 
 
+def _eb_switch_time_str(
+    now: datetime, soc: float, target_pct: float, cap: float, deadline: datetime,
+) -> str | None:
+    """When to flip to Emergency Backup to reach target_pct by `deadline`, at
+    the conservative advisor._EB_CHARGE_KW AC charge rate — or None if
+    already there. Module-level (not nested in _alert_cloudy_eb_target) so
+    the clamp-to-"now" branch is directly testable: it's mathematically
+    unreachable through that alert's own 7-8am firing window given a 13.6
+    kWh-class battery (max possible deficit only needs ~2.7h of EB, and
+    peak_start is hours away at that point), but stays here as a real
+    guard for a smaller-battery install or if the firing window ever
+    changes."""
+    deficit_kwh = max(0.0, (target_pct - soc) / 100 * cap)
+    if deficit_kwh <= 0:
+        return None
+    hours_needed = deficit_kwh / _EB_CHARGE_KW
+    switch_at = deadline - timedelta(hours=hours_needed)
+    if switch_at <= now:
+        return "now — won't fully reach it by then even starting immediately"
+    return switch_at.strftime("%-I:%M %p")
+
+
 def _alert_cloudy_eb_target(
     state: dict, today: str, now: datetime, c, cfg: Config, outlook, store,
 ) -> str | None:
@@ -1188,19 +1210,40 @@ def _alert_cloudy_eb_target(
     cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
     target_med = min(100.0, max(0.0, (load_med - remaining_solar_kwh) / cap * 100))
     target_p75 = min(100.0, max(0.0, (load_p75 - remaining_solar_kwh) / cap * 100))
+    soc = c.battery_soc_pct
+
+    # Reach-by deadline: start of on-peak, same convention _tou_eb_plan and
+    # _precharge_plan already use — grid-charging past this point is buying
+    # power at the most expensive rate of the day instead of super-off-peak,
+    # defeating the point of front-loading via EB.
+    peak_start, _ = on_peak_window(now)
+
+    switch_med = _eb_switch_time_str(now, soc, target_med, cap, peak_start)
+    switch_p75 = _eb_switch_time_str(now, soc, target_p75, cap, peak_start)
+
+    if switch_med is None:
+        timing_str = "\n⏰ Already at target — no EB needed for a typical day."
+        if switch_p75 is not None:
+            timing_str += f" (Heavier day: switch to EB at {switch_p75}.)"
+    else:
+        timing_str = f"\n⏰ Reach {target_med:.0f}% by {peak_start.strftime('%-I:%M %p')} — switch to EB at {switch_med}."
+        if switch_p75 is not None:
+            timing_str += f" (Heavier day: {switch_p75}.)"
 
     state["cloudy_eb_alert_date"] = today
     logger.info(
         "Cloudy EB target alert sent for %s: soc=%.0f%% target_med=%.0f%% target_p75=%.0f%% "
-        "remaining_solar=%.1fkWh load_med=%.1fkWh load_p75=%.1fkWh",
-        today, c.battery_soc_pct, target_med, target_p75, remaining_solar_kwh, load_med, load_p75,
+        "remaining_solar=%.1fkWh load_med=%.1fkWh load_p75=%.1fkWh switch_med=%s switch_p75=%s",
+        today, soc, target_med, target_p75, remaining_solar_kwh, load_med, load_p75,
+        switch_med, switch_p75,
     )
     return (
         f"🌥️ <b>FranklinWH: Cloudy day — EB charge target</b>\n"
-        f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Remaining solar today: ~{remaining_solar_kwh:.1f} kWh\n"
+        f"🔋 {_soc_bar(soc)}  ·  Remaining solar today: ~{remaining_solar_kwh:.1f} kWh\n"
         f"Charge to <b>~{target_med:.0f}%</b> for a typical {now.strftime('%A')} "
         f"(~{target_p75:.0f}% if today runs heavier than usual)\n"
         f"Based on {now.strftime('%A')} home-load history from {now.strftime('%-I%p').lower()} to midnight."
+        f"{timing_str}"
     )
 
 

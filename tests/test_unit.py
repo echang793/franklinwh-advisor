@@ -5216,6 +5216,48 @@ def test_alert_cloudy_eb_target_silent_without_calibration_or_store():
     assert alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, Config(), outlook, None) is None
 
 
+def test_eb_switch_time_str_computes_from_deficit_and_charge_rate():
+    """cap=13.6, target=88.235%, soc=10% -> deficit 10.64 kWh @ 5.0 kW ->
+    2.128h before the 4pm deadline -> 1:52 PM. Real numbers verified by
+    running the calc directly before hardcoding (2026-09-06)."""
+    now = datetime(2026, 9, 6, 7, 30)
+    deadline = datetime(2026, 9, 6, 16, 0)
+    assert alerts._eb_switch_time_str(now, 10.0, 88.235, 13.6, deadline) == "1:52 PM"
+    assert alerts._eb_switch_time_str(now, 90.0, 88.235, 13.6, deadline) is None  # already there
+
+
+def test_eb_switch_time_str_clamps_to_now_when_deadline_too_close():
+    """Mathematically unreachable through _alert_cloudy_eb_target's own
+    7-8am gate (see the function's own docstring) — tested directly here."""
+    now = datetime(2026, 9, 6, 15, 55)
+    deadline = datetime(2026, 9, 6, 16, 0)  # only 5 min left
+    result = alerts._eb_switch_time_str(now, 0.0, 100.0, 13.6, deadline)
+    assert result is not None and result.startswith("now")
+
+
+def test_alert_cloudy_eb_target_includes_switch_time():
+    import types
+    now = datetime(2026, 9, 6, 7, 30)  # a Sunday
+    state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
+    outlook = _eb_target_outlook(cloudy=True, remaining_kwh=5.0)
+    store = _EbTargetFakeStore(med_kw=1.0, p75_kw=2.0)
+    cfg = Config(battery_capacity_kwh=13.6)
+
+    # soc=10%: below both targets (med 88%, p75 100% capped) -> both switch times shown.
+    c = types.SimpleNamespace(battery_soc_pct=10.0)
+    body = alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, cfg, outlook, store)
+    assert "Reach 88% by 4:00 PM" in body
+    assert "switch to EB at 1:52 PM" in body
+    assert "Heavier day: 1:33 PM" in body
+
+    # soc=90%: above median target, below p75 -> "already at target" + heavier-day contingency.
+    state2 = {"solar_cal_samples": [3.5, 3.6, 3.4]}
+    c2 = types.SimpleNamespace(battery_soc_pct=90.0)
+    body2 = alerts._alert_cloudy_eb_target(state2, "2026-09-06", now, c2, cfg, outlook, store)
+    assert "Already at target — no EB needed for a typical day" in body2
+    assert "Heavier day: switch to EB at 3:43 PM" in body2
+
+
 def test_alert_round_trip_efficiency_fires_on_sustained_drop():
 
     class FakeStore:
