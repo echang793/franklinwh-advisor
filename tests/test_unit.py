@@ -4490,7 +4490,7 @@ def test_ev_status_days_filters_and_summarizes(tmp_path):
     assert "track surplus" in windowed_out
 
 
-def test_send_alert_attaches_mute_buttons_except_always_on(monkeypatch):
+def test_send_alert_attaches_mute_buttons_except_always_on(monkeypatch, tmp_path):
     """Alerts should carry the same 2h/8h mute buttons as the standalone
     /mute command — except the safety alerts _alert_enabled never lets
     /mute silence in the first place, which must never even look mutable."""
@@ -4499,7 +4499,14 @@ def test_send_alert_attaches_mute_buttons_except_always_on(monkeypatch):
         alerts, "notify_telegram",
         lambda body, token, chat_id, reply_markup=None: calls.append(reply_markup))
 
-    cfg = Config(telegram_bot_token="x", telegram_chat_id="y")
+    # output_dir defaults to the relative "output" — without overriding it,
+    # _send_alert's _log_alert call falls through to the real production
+    # output/alerts_log.jsonl (same class of bug as the /sundown
+    # test-isolation fix earlier this session, a different file this time).
+    # notify_telegram is mocked above so no real message ever went out, but
+    # this dummy "battery full"/"grid down!" text was leaking into the real
+    # alert history the dashboard and chatbot both read from.
+    cfg = Config(telegram_bot_token="x", telegram_chat_id="y", output_dir=str(tmp_path))
 
     alerts._send_alert("battery full", cfg, alert_name="solar_surplus_overflow")
     assert calls[-1] == alerts._MUTE_KEYBOARD
