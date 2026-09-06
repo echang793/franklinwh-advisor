@@ -5164,56 +5164,74 @@ def _eb_target_outlook(cloudy=True, remaining_kwh=5.0):
 
 def test_alert_cloudy_eb_target_fires_with_median_and_p75():
     import types
-    now = datetime(2026, 9, 6, 7, 30)  # a Sunday
+    now = datetime(2026, 9, 7, 7, 30)  # a Monday — not a _HEAVY_LOAD_WEEKDAYS day
     state = {"solar_cal_samples": [3.5, 3.6, 3.4]}  # >=3 -> _get_system_peak_kw bootstrap path
     outlook = _eb_target_outlook(cloudy=True, remaining_kwh=5.0)
     store = _EbTargetFakeStore(med_kw=1.0, p75_kw=2.0)  # 17 remaining hrs (7-23)
     c = types.SimpleNamespace(battery_soc_pct=51.0)
     cfg = Config(battery_capacity_kwh=13.6)
 
-    body = alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, cfg, outlook, store)
+    body = alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, cfg, outlook, store)
     assert body is not None
     assert "Cloudy day" in body
     # load_med = 17*1.0=17.0, load_p75 = 17*2.0=34.0, remaining_solar=5.0, cap=13.6
     # target_med = (17-5)/13.6*100 = 88.2% -> ~88%; target_p75 capped at 100%
     assert "~88%" in body
     assert "~100%" in body
-    assert state["cloudy_eb_alert_date"] == "2026-09-06"
+    assert state["cloudy_eb_alert_date"] == "2026-09-07"
     # Dedup: no re-fire same day.
-    assert alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, cfg, outlook, store) is None
+    assert alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, cfg, outlook, store) is None
 
 
 def test_alert_cloudy_eb_target_silent_when_not_cloudy():
     import types
-    now = datetime(2026, 9, 6, 7, 30)
+    now = datetime(2026, 9, 7, 7, 30)
     state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
     outlook = _eb_target_outlook(cloudy=False)
     store = _EbTargetFakeStore()
     c = types.SimpleNamespace(battery_soc_pct=51.0)
-    assert alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, Config(), outlook, store) is None
+    assert alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, Config(), outlook, store) is None
 
 
 def test_alert_cloudy_eb_target_silent_outside_morning_window():
     import types
-    now = datetime(2026, 9, 6, 11, 0)
+    now = datetime(2026, 9, 7, 11, 0)
     state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
     outlook = _eb_target_outlook(cloudy=True)
     store = _EbTargetFakeStore()
     c = types.SimpleNamespace(battery_soc_pct=51.0)
-    assert alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, Config(), outlook, store) is None
+    assert alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, Config(), outlook, store) is None
 
 
 def test_alert_cloudy_eb_target_silent_without_calibration_or_store():
     import types
-    now = datetime(2026, 9, 6, 7, 30)
+    now = datetime(2026, 9, 7, 7, 30)
     outlook = _eb_target_outlook(cloudy=True)
     c = types.SimpleNamespace(battery_soc_pct=51.0)
     # No system-peak calibration yet.
-    assert alerts._alert_cloudy_eb_target({}, "2026-09-06", now, c, Config(),
+    assert alerts._alert_cloudy_eb_target({}, "2026-09-07", now, c, Config(),
                                           outlook, _EbTargetFakeStore()) is None
     # No store at all.
     state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
-    assert alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, Config(), outlook, None) is None
+    assert alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, Config(), outlook, None) is None
+
+
+def test_alert_cloudy_eb_target_sunday_uses_p75_as_typical():
+    """User confirmed 2026-09-06 the dryer runs most Sundays — P75, not
+    median, is Sunday's realistic baseline, so Sunday must lead with P75 as
+    the primary target/switch-time and label it as the dryer-day default."""
+    import types
+    now = datetime(2026, 9, 6, 7, 30)  # a Sunday — in _HEAVY_LOAD_WEEKDAYS
+    state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
+    outlook = _eb_target_outlook(cloudy=True, remaining_kwh=5.0)
+    store = _EbTargetFakeStore(med_kw=1.0, p75_kw=2.0)
+    c = types.SimpleNamespace(battery_soc_pct=51.0)
+    cfg = Config(battery_capacity_kwh=13.6)
+
+    body = alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, cfg, outlook, store)
+    assert body is not None
+    assert "~100%</b> for a typical dryer-day Sunday" in body
+    assert "~88% if no dryer today" in body
 
 
 def test_eb_switch_time_str_computes_from_deficit_and_charge_rate():
@@ -5237,7 +5255,7 @@ def test_eb_switch_time_str_clamps_to_now_when_deadline_too_close():
 
 def test_alert_cloudy_eb_target_includes_switch_time():
     import types
-    now = datetime(2026, 9, 6, 7, 30)  # a Sunday
+    now = datetime(2026, 9, 7, 7, 30)  # a Monday — not a _HEAVY_LOAD_WEEKDAYS day
     state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
     outlook = _eb_target_outlook(cloudy=True, remaining_kwh=5.0)
     store = _EbTargetFakeStore(med_kw=1.0, p75_kw=2.0)
@@ -5245,7 +5263,7 @@ def test_alert_cloudy_eb_target_includes_switch_time():
 
     # soc=10%: below both targets (med 88%, p75 100% capped) -> both switch times shown.
     c = types.SimpleNamespace(battery_soc_pct=10.0)
-    body = alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, cfg, outlook, store)
+    body = alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, cfg, outlook, store)
     assert "Reach 88% by 4:00 PM" in body
     assert "switch to EB at 1:52 PM" in body
     assert "Heavier day: 1:33 PM" in body
@@ -5253,8 +5271,8 @@ def test_alert_cloudy_eb_target_includes_switch_time():
     # soc=90%: above median target, below p75 -> "already at target" + heavier-day contingency.
     state2 = {"solar_cal_samples": [3.5, 3.6, 3.4]}
     c2 = types.SimpleNamespace(battery_soc_pct=90.0)
-    body2 = alerts._alert_cloudy_eb_target(state2, "2026-09-06", now, c2, cfg, outlook, store)
-    assert "Already at target — no EB needed for a typical day" in body2
+    body2 = alerts._alert_cloudy_eb_target(state2, "2026-09-07", now, c2, cfg, outlook, store)
+    assert "Already at target — no EB needed for a typical Monday" in body2
     assert "Heavier day: switch to EB at 3:43 PM" in body2
 
 

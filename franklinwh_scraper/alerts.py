@@ -1135,6 +1135,11 @@ def _alert_solar_stopped(state: dict, today: str, now: datetime, c) -> str | Non
     )
 
 
+# datetime.weekday(): Monday=0 .. Sunday=6. Days where P75 (not median) is
+# the realistic "typical" baseline — see _alert_cloudy_eb_target's docstring.
+_HEAVY_LOAD_WEEKDAYS = {6}  # Sunday: recurring dryer day, confirmed 2026-09-06
+
+
 def _eb_switch_time_str(
     now: datetime, soc: float, target_pct: float, cap: float, deadline: datetime,
 ) -> str | None:
@@ -1183,6 +1188,13 @@ def _alert_cloudy_eb_target(
     one _classify_and_record_no_ev_night feeds); revisit if the P75/median
     gap turns out to track EV days once the user confirms which days those
     are.
+
+    Sunday specifically flips which percentile is "typical": user confirmed
+    2026-09-06 they've run the dryer most Sundays for a few months, so P75
+    (not median) is Sunday's realistic baseline — median would systematically
+    undershoot on the day it matters most. Hardcoded per-weekday override
+    rather than a general habit-detection feature; revisit if other
+    days/appliances turn out to need the same treatment.
     """
     if now.hour not in (7, 8) or state.get("cloudy_eb_alert_date") == today:
         return None
@@ -1221,27 +1233,37 @@ def _alert_cloudy_eb_target(
     switch_med = _eb_switch_time_str(now, soc, target_med, cap, peak_start)
     switch_p75 = _eb_switch_time_str(now, soc, target_p75, cap, peak_start)
 
-    if switch_med is None:
-        timing_str = "\n⏰ Already at target — no EB needed for a typical day."
-        if switch_p75 is not None:
-            timing_str += f" (Heavier day: switch to EB at {switch_p75}.)"
+    # Sunday: P75 is the realistic baseline (dryer day, see docstring), not
+    # the outlier — swap which target/switch-time is framed as "typical".
+    is_dryer_day = dow in _HEAVY_LOAD_WEEKDAYS
+    primary_target, secondary_target = (target_p75, target_med) if is_dryer_day else (target_med, target_p75)
+    primary_switch, secondary_switch = (switch_p75, switch_med) if is_dryer_day else (switch_med, switch_p75)
+    typical_label   = "typical dryer-day Sunday" if is_dryer_day else f"typical {now.strftime('%A')}"
+    secondary_label = "if no dryer today" if is_dryer_day else "if today runs heavier than usual"
+    secondary_switch_label = "no dryer today" if is_dryer_day else "heavier day"
+
+    if primary_switch is None:
+        timing_str = f"\n⏰ Already at target — no EB needed for a {typical_label}."
+        if secondary_switch is not None:
+            timing_str += f" ({secondary_switch_label.capitalize()}: switch to EB at {secondary_switch}.)"
     else:
-        timing_str = f"\n⏰ Reach {target_med:.0f}% by {peak_start.strftime('%-I:%M %p')} — switch to EB at {switch_med}."
-        if switch_p75 is not None:
-            timing_str += f" (Heavier day: {switch_p75}.)"
+        timing_str = f"\n⏰ Reach {primary_target:.0f}% by {peak_start.strftime('%-I:%M %p')} — switch to EB at {primary_switch}."
+        if secondary_switch is not None:
+            timing_str += f" ({secondary_switch_label.capitalize()}: {secondary_switch}.)"
 
     state["cloudy_eb_alert_date"] = today
     logger.info(
         "Cloudy EB target alert sent for %s: soc=%.0f%% target_med=%.0f%% target_p75=%.0f%% "
-        "remaining_solar=%.1fkWh load_med=%.1fkWh load_p75=%.1fkWh switch_med=%s switch_p75=%s",
-        today, soc, target_med, target_p75, remaining_solar_kwh, load_med, load_p75,
+        "dryer_day=%s remaining_solar=%.1fkWh load_med=%.1fkWh load_p75=%.1fkWh "
+        "switch_med=%s switch_p75=%s",
+        today, soc, target_med, target_p75, is_dryer_day, remaining_solar_kwh, load_med, load_p75,
         switch_med, switch_p75,
     )
     return (
         f"🌥️ <b>FranklinWH: Cloudy day — EB charge target</b>\n"
         f"🔋 {_soc_bar(soc)}  ·  Remaining solar today: ~{remaining_solar_kwh:.1f} kWh\n"
-        f"Charge to <b>~{target_med:.0f}%</b> for a typical {now.strftime('%A')} "
-        f"(~{target_p75:.0f}% if today runs heavier than usual)\n"
+        f"Charge to <b>~{primary_target:.0f}%</b> for a {typical_label} "
+        f"(~{secondary_target:.0f}% {secondary_label})\n"
         f"Based on {now.strftime('%A')} home-load history from {now.strftime('%-I%p').lower()} to midnight."
         f"{timing_str}"
     )
