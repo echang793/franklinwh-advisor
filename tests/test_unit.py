@@ -5144,6 +5144,78 @@ def test_round_trip_efficiency_skips_low_charge_days(tmp_path):
     assert db.round_trip_efficiency_samples("2026-05-01", "2026-05-01") == []
 
 
+class _EbTargetFakeStore:
+    """load_profile(percentile) -> {(weekday, hour): kw}, flat by percentile."""
+    def __init__(self, med_kw=1.0, p75_kw=2.0):
+        self._med_kw, self._p75_kw = med_kw, p75_kw
+
+    def load_profile(self, percentile=0.5):
+        kw = self._p75_kw if percentile >= 0.75 else self._med_kw
+        return {(dow, h): kw for dow in range(7) for h in range(24)}
+
+
+def _eb_target_outlook(cloudy=True, remaining_kwh=5.0):
+    import types
+    return types.SimpleNamespace(
+        avg_ghi=lambda h: (200.0 if cloudy else 500.0),
+        remaining_today_generation_kwh=lambda sp, pr, hb: remaining_kwh,
+    )
+
+
+def test_alert_cloudy_eb_target_fires_with_median_and_p75():
+    import types
+    now = datetime(2026, 9, 6, 7, 30)  # a Sunday
+    state = {"solar_cal_samples": [3.5, 3.6, 3.4]}  # >=3 -> _get_system_peak_kw bootstrap path
+    outlook = _eb_target_outlook(cloudy=True, remaining_kwh=5.0)
+    store = _EbTargetFakeStore(med_kw=1.0, p75_kw=2.0)  # 17 remaining hrs (7-23)
+    c = types.SimpleNamespace(battery_soc_pct=51.0)
+    cfg = Config(battery_capacity_kwh=13.6)
+
+    body = alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, cfg, outlook, store)
+    assert body is not None
+    assert "Cloudy day" in body
+    # load_med = 17*1.0=17.0, load_p75 = 17*2.0=34.0, remaining_solar=5.0, cap=13.6
+    # target_med = (17-5)/13.6*100 = 88.2% -> ~88%; target_p75 capped at 100%
+    assert "~88%" in body
+    assert "~100%" in body
+    assert state["cloudy_eb_alert_date"] == "2026-09-06"
+    # Dedup: no re-fire same day.
+    assert alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, cfg, outlook, store) is None
+
+
+def test_alert_cloudy_eb_target_silent_when_not_cloudy():
+    import types
+    now = datetime(2026, 9, 6, 7, 30)
+    state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
+    outlook = _eb_target_outlook(cloudy=False)
+    store = _EbTargetFakeStore()
+    c = types.SimpleNamespace(battery_soc_pct=51.0)
+    assert alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, Config(), outlook, store) is None
+
+
+def test_alert_cloudy_eb_target_silent_outside_morning_window():
+    import types
+    now = datetime(2026, 9, 6, 11, 0)
+    state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
+    outlook = _eb_target_outlook(cloudy=True)
+    store = _EbTargetFakeStore()
+    c = types.SimpleNamespace(battery_soc_pct=51.0)
+    assert alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, Config(), outlook, store) is None
+
+
+def test_alert_cloudy_eb_target_silent_without_calibration_or_store():
+    import types
+    now = datetime(2026, 9, 6, 7, 30)
+    outlook = _eb_target_outlook(cloudy=True)
+    c = types.SimpleNamespace(battery_soc_pct=51.0)
+    # No system-peak calibration yet.
+    assert alerts._alert_cloudy_eb_target({}, "2026-09-06", now, c, Config(),
+                                          outlook, _EbTargetFakeStore()) is None
+    # No store at all.
+    state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
+    assert alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, Config(), outlook, None) is None
+
+
 def test_alert_round_trip_efficiency_fires_on_sustained_drop():
 
     class FakeStore:

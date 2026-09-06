@@ -1135,6 +1135,75 @@ def _alert_solar_stopped(state: dict, today: str, now: datetime, c) -> str | Non
     )
 
 
+def _alert_cloudy_eb_target(
+    state: dict, today: str, now: datetime, c, cfg: Config, outlook, store,
+) -> str | None:
+    """Morning guidance on a cloudy day: what SoC to charge to via Emergency
+    Backup to cover the rest of the day, for a user whose habit is charging
+    the EV separately from the grid at super-off-peak on cloudy days (so EB
+    only needs to cover home load, not EV) rather than relying on solar/
+    battery for it (requested 2026-09-06).
+
+    Uses this day-of-week's historical home-load profile (store.load_profile,
+    keyed by (weekday, hour) — the same table cmd_history's "Avg home load
+    by hour" already surfaces) for the remaining hours today, net of the
+    remaining solar still forecast. Shows both a median (typical day) and
+    P75 (heavier day) target — the gap between them is usually real day-to-
+    day variance (whether the EV happened to charge during a metered daytime
+    window that day), not a data problem, so a single point estimate would
+    be false precision.
+
+    Caveat NOT spelled out in the alert body (kept short for Telegram): this
+    reads whatever the FranklinWH gateway's home_load_kw captured, with no
+    EV-specific exclusion — if EV charging ever happens during a metered
+    daytime window it inflates the historical load this alert bases its
+    target on. No no-EV daytime classifier exists yet (only the overnight
+    one _classify_and_record_no_ev_night feeds); revisit if the P75/median
+    gap turns out to track EV days once the user confirms which days those
+    are.
+    """
+    if now.hour not in (7, 8) or state.get("cloudy_eb_alert_date") == today:
+        return None
+    if outlook is None or outlook.avg_ghi(12) >= _GHI_CLOUDY_THRESHOLD:
+        return None
+    if store is None:
+        return None
+
+    sp = _get_system_peak_kw(state)
+    if sp is None:
+        return None
+    hb = _get_hourly_bias(state)
+    pr = _get_performance_ratio(state, cloudy=True)
+    remaining_solar_kwh = outlook.remaining_today_generation_kwh(sp, pr, hb)
+
+    dow    = now.weekday()
+    hours  = range(now.hour, 24)
+    med    = store.load_profile(0.5)
+    p75    = store.load_profile(0.75)
+    load_med = sum(v for h in hours if (v := med.get((dow, h))) is not None)
+    load_p75 = sum(v for h in range(now.hour, 24) if (v := p75.get((dow, h))) is not None)
+    if load_med <= 0:
+        return None  # not enough history for this weekday/hour range yet
+
+    cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
+    target_med = min(100.0, max(0.0, (load_med - remaining_solar_kwh) / cap * 100))
+    target_p75 = min(100.0, max(0.0, (load_p75 - remaining_solar_kwh) / cap * 100))
+
+    state["cloudy_eb_alert_date"] = today
+    logger.info(
+        "Cloudy EB target alert sent for %s: soc=%.0f%% target_med=%.0f%% target_p75=%.0f%% "
+        "remaining_solar=%.1fkWh load_med=%.1fkWh load_p75=%.1fkWh",
+        today, c.battery_soc_pct, target_med, target_p75, remaining_solar_kwh, load_med, load_p75,
+    )
+    return (
+        f"🌥️ <b>FranklinWH: Cloudy day — EB charge target</b>\n"
+        f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Remaining solar today: ~{remaining_solar_kwh:.1f} kWh\n"
+        f"Charge to <b>~{target_med:.0f}%</b> for a typical {now.strftime('%A')} "
+        f"(~{target_p75:.0f}% if today runs heavier than usual)\n"
+        f"Based on {now.strftime('%A')} home-load history from {now.strftime('%-I%p').lower()} to midnight."
+    )
+
+
 def _alert_low_noon_soc(
     state: dict, today: str, now: datetime, c, cfg: Config,
     outlook=None, usage_forecast=None, store=None,
@@ -3141,6 +3210,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("low_morning_solar", lambda: _alert_low_morning_solar(state, today, now, c)),
             ("solar_stopped",     lambda: _alert_solar_stopped(state, today, now, c)),
             ("low_noon_soc",      lambda: _alert_low_noon_soc(state, today, now, c, cfg, outlook, usage_forecast, store)),
+            ("cloudy_eb_target",  lambda: _alert_cloudy_eb_target(state, today, now, c, cfg, outlook, store)),
             ("export_arbitrage",  lambda: _alert_export_arbitrage(state, today, now, c, cfg, usage_forecast)),
             ("eod_digest",        lambda: _alert_eod_digest(state, today, now, stats, cfg, outlook, usage_forecast, store)),
             ("weekly_summary",    lambda: _alert_weekly_summary(state, today, now, store, cfg)),

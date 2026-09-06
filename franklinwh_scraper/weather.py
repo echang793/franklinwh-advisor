@@ -161,6 +161,24 @@ class SolarOutlook:
             total_kwh += h.ghi_wm2 / 1000.0 * system_peak_kw * eff
         return round(total_kwh * perf_ratio, 1)
 
+    def remaining_today_generation_kwh(
+        self, system_peak_kw: float, perf_ratio: float = 1.0,
+        hourly_bias: dict[int, float] | None = None,
+    ) -> float:
+        """Same as today_generation_kwh but only future hours (h.time > now)
+        — for a mid-day "how much solar is left today" estimate, where
+        summing the whole day would double-count generation already
+        reflected in the current battery SoC/history."""
+        now = self._local_now()
+        remaining = [h for h in self.hours if h.time.date() == now.date() and h.time > now]
+        total_kwh = 0.0
+        for h in remaining:
+            eff = max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (h.panel_temp_c - 25.0))
+            if hourly_bias:
+                eff *= hourly_bias.get(h.time.hour, 1.0)
+            total_kwh += h.ghi_wm2 / 1000.0 * system_peak_kw * eff
+        return round(total_kwh * perf_ratio, 1)
+
     def tomorrow_avg_ghi(self) -> float:
         """Average GHI (W/m²) during solar hours (6 am–7 pm) tomorrow."""
         now = self._local_now()
