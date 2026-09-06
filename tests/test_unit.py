@@ -2908,6 +2908,57 @@ def test_dashboard_refuses_public_bind_without_token(monkeypatch):
     assert "Refusing to bind" in res.output
     assert not called, "uvicorn.run must not be reached on a refused bind"
 
+
+def test_advise_watch_loop_runs_one_cycle_without_crashing(tmp_path, monkeypatch):
+    """Runs cmd_advise (--watch off, so exactly one iteration of the loop
+    body) end to end against a mocked AccountClient — the full success path
+    through _ping_healthcheck, _check_peak_alerts, etc.
+
+    This is the regression guard the ed1279a NameError should have had:
+    that bug (formatter hook silently dropped the _ping_healthcheck import
+    after moving its call site) crash-looped the live advisor in
+    production for several process starts before being caught, because
+    nothing in the suite actually executed this loop body — every other
+    test exercises _alert_* functions or account.py methods directly,
+    never cmd_advise itself. `python -m py_compile` doesn't catch a
+    NameError inside a function body either, only syntax errors — so this
+    is the only thing in the suite that would have caught it."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper.account import AccountClient, Current, Stats, Totals
+
+    fake_stats = Stats(
+        timestamp=datetime.now().isoformat(),
+        gateway_id="gw1",
+        current=Current(
+            solar_production_kw=2.0, generator_production_kw=0.0, generator_enabled=False,
+            battery_use_kw=-1.0, grid_use_kw=0.0, home_load_kw=1.0,
+            battery_soc_pct=60.0, grid_status="normal",
+        ),
+        totals=Totals(
+            battery_charge_kwh=1.0, battery_discharge_kwh=0.0, grid_import_kwh=0.0,
+            grid_export_kwh=0.0, grid_load_kwh=0.0, solar_kwh=5.0, generator_kwh=0.0,
+            home_use_kwh=4.0,
+        ),
+    )
+    monkeypatch.setattr(AccountClient, "get_stats", lambda self, gateway: fake_stats)
+    monkeypatch.setattr(cli_mod, "_fetch_outlook_cached", lambda lat, lon: None)
+
+    cfg = Config(
+        email="a@b.c", password="p", gateway="gw1", lat=32.9, lon=-117.0,
+        output_dir=str(tmp_path), telegram_bot_token="", chat_backend="none",
+        healthcheck_url="",
+    )
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["account", "advise"])
+    assert res.exit_code == 0, res.output
+    assert "Traceback" not in res.output
+    assert "No mode change needed" in res.output or "Switch to" in res.output
+
 def test_bill_record_writes_actual_bill_to_state(tmp_path):
     from unittest.mock import patch
 
