@@ -29,6 +29,7 @@ from .alerts import (
     _get_system_peak_kw,
     _get_vpp_event,
     _load_peak_state,
+    _ping_healthcheck,
     _save_peak_state,
     _state_lock,
 )
