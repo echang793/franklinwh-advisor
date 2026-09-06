@@ -1926,9 +1926,20 @@ def cmd_advise(
                 _now_h = datetime.now().hour
                 if _last_stats is not None and _now_h in (7, 8, 21, 22):
                     try:
+                        # Weather is a separate upstream from the FranklinWH
+                        # gateway that just failed above — hardcoding None
+                        # here silently dropped tomorrow's-solar and the
+                        # precharge plan from the EOD digest whenever a
+                        # transient gateway hiccup landed in the digest's
+                        # hour, even though a fresh (or 30-min-cached)
+                        # outlook was available the whole time.
+                        # fetch_solar_outlook_cached never raises — it
+                        # catches its own fetch errors and serves stale
+                        # cache or None, so this is safe unguarded.
+                        _fallback_outlook = _fetch_outlook_cached(lat, lon)
                         _check_peak_alerts(
                             _last_stats, cfg, outdir,
-                            outlook=None, usage_forecast=None, store=history,
+                            outlook=_fallback_outlook, usage_forecast=None, store=history,
                         )
                     except Exception:
                         pass

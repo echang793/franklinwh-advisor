@@ -2959,6 +2959,97 @@ def test_advise_watch_loop_runs_one_cycle_without_crashing(tmp_path, monkeypatch
     assert "Traceback" not in res.output
     assert "No mode change needed" in res.output or "Switch to" in res.output
 
+
+def test_advise_outage_fallback_still_fetches_weather(tmp_path, monkeypatch):
+    """A gateway hiccup during the EOD-digest hour used to hardcode
+    outlook=None in the fallback alert call, silently dropping tomorrow's-
+    solar and the precharge plan from the digest — even though weather is a
+    separate upstream from the FranklinWH gateway that failed, and was
+    available the whole time (real incident, 2026-09-05: a
+    ConnectionResetError against the gateway one second before the digest's
+    scheduled send dropped both lines from that night's alert).
+
+    Runs two watch-loop iterations: the first succeeds (populates
+    _last_stats), the second raises during the digest hour so the fallback
+    branch fires. Spies on _check_peak_alerts's call to confirm outlook is
+    no longer hardcoded to None."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper.account import AccountClient, Current, Stats, Totals
+
+    fake_now = datetime(2026, 9, 5, 21, 33)
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fake_now
+
+    monkeypatch.setattr(cli_mod, "datetime", _FakeDatetime)
+
+    fake_stats = Stats(
+        timestamp=fake_now.isoformat(), gateway_id="gw1",
+        current=Current(solar_production_kw=2.0, generator_production_kw=0.0,
+                        generator_enabled=False, battery_use_kw=-1.0, grid_use_kw=0.0,
+                        home_load_kw=1.0, battery_soc_pct=60.0, grid_status="normal"),
+        totals=Totals(battery_charge_kwh=1.0, battery_discharge_kwh=0.0, grid_import_kwh=0.0,
+                     grid_export_kwh=0.0, grid_load_kwh=0.0, solar_kwh=5.0,
+                     generator_kwh=0.0, home_use_kwh=4.0),
+    )
+    call_count = {"n": 0}
+
+    def _get_stats(self, gateway):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return fake_stats
+        raise ConnectionError("simulated gateway hiccup")
+
+    monkeypatch.setattr(AccountClient, "get_stats", _get_stats)
+
+    sentinel_outlook = object()  # stands in for a real SolarOutlook
+    monkeypatch.setattr(cli_mod, "_fetch_outlook_cached", lambda lat, lon: sentinel_outlook)
+
+    fallback_calls = []
+    real_check_peak_alerts = cli_mod._check_peak_alerts
+
+    def _spy_check_peak_alerts(*args, **kwargs):
+        fallback_calls.append(kwargs.get("outlook", "MISSING"))
+        return real_check_peak_alerts(*args, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "_check_peak_alerts", _spy_check_peak_alerts)
+
+    sleep_calls = {"n": 0}
+
+    def _fake_sleep(_seconds):
+        sleep_calls["n"] += 1
+        if sleep_calls["n"] >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_mod.time, "sleep", _fake_sleep)
+
+    # --watch acquires a real lock at ~/.franklinwh.pid (shared with the
+    # live advisor daemon, which may genuinely be running right now) —
+    # never let this test touch it.
+    monkeypatch.setattr(cli_mod, "_acquire_pid_lock", lambda: True)
+    monkeypatch.setattr(cli_mod, "_release_pid_lock", lambda: None)
+
+    cfg = Config(
+        email="a@b.c", password="p", gateway="gw1", lat=32.9, lon=-117.0,
+        output_dir=str(tmp_path), telegram_bot_token="", chat_backend="none",
+        healthcheck_url="", watch_interval=1,
+    )
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = runner.invoke(cli_mod.cli, ["account", "advise", "--watch"])
+    assert res.exit_code == 0, res.output
+    # First iteration's own _check_peak_alerts call (success path) plus the
+    # second iteration's fallback call — the fallback's outlook must be the
+    # fetched sentinel, not None.
+    assert sentinel_outlook in fallback_calls
+    assert None not in fallback_calls
+
 def test_bill_record_writes_actual_bill_to_state(tmp_path):
     from unittest.mock import patch
 
