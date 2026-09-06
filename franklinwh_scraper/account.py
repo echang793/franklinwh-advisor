@@ -236,7 +236,14 @@ class AccountClient:
             "hes-gateway/terminal/getDeviceCompositeInfo",
             params={"gatewayId": gateway, "lang": "en_US", "refreshFlag": 1},
         )
-        return js.get("result", {})
+        # `.get("result", {})` only falls back when the key is *missing* —
+        # a rate-limit/error response (429, etc.) can come back with the key
+        # present but explicitly `"result": null`, which that idiom passes
+        # through as None instead of {}. get_stats then crashes on
+        # `info.get(...)` with an AttributeError instead of hitting its own
+        # empty-data retry path. `or {}` catches both cases, same idiom
+        # get_switch_usage already uses below.
+        return js.get("result") or {}
 
     def get_switch_usage(self, gateway: str) -> dict[str, Any]:
         """Get real-time smart-circuit load data via MQTT cmd 353.

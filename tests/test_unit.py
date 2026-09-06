@@ -335,6 +335,29 @@ def test_get_401_does_not_recurse_forever(monkeypatch):
     assert len(calls) == 2  # original + one retry, then raise
 
 
+def test_get_composite_info_handles_explicit_null_result(monkeypatch):
+    """A rate-limit/error response can come back with the "result" key
+    *present* but explicitly null (e.g. a 429), not missing — `.get("result",
+    {})` only falls back on a missing key, so that idiom passed the None
+    straight through and crashed get_stats with an AttributeError instead of
+    hitting its own empty-data retry path (see the 429 in the real advisor
+    log, 2026-09-05)."""
+    from franklinwh_scraper.account import AccountClient
+
+    client = AccountClient("a@b.c", "pw")
+    client._token = "tok"
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"code": 429, "message": "Too Many Requests", "result": None}
+
+    monkeypatch.setattr(client.session, "get", lambda *a, **kw: _Resp())
+    assert client.get_composite_info("gw1") == {}
+
+
 def test_get_stats_rejects_empty_runtime_data(monkeypatch):
     """An empty runtimeData payload (transient gateway glitch) must raise,
     not fabricate a fake all-zero reading that trips false alerts."""
