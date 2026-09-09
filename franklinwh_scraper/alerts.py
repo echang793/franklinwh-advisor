@@ -1162,6 +1162,63 @@ def _eb_switch_time_str(
     return switch_at.strftime("%-I:%M %p")
 
 
+def _compute_eb_target(
+    now: datetime, soc: float, cfg: Config, outlook, store, state: dict,
+) -> dict | None:
+    """Pure calc for the day's Emergency-Backup charge target — no gating,
+    no state mutation, no message text. Shared by _alert_cloudy_eb_target
+    (gated: 7-8am, cloudy only, once/day) and the chatbot's on-demand
+    /ebtarget command (anytime, any sky — see chatbot.py's _send_ebtarget).
+    Returns None if there isn't enough data yet (no system-peak calibration,
+    no store, or no load history for this weekday/hour range).
+
+    See _alert_cloudy_eb_target's docstring for the full methodology
+    (day-of-week load profile, median vs P75, the Sunday dryer-day
+    override, and the known EV-metering caveat) — this function is just
+    the numbers, not the explanation.
+    """
+    if outlook is None or store is None:
+        return None
+    sp = _get_system_peak_kw(state)
+    if sp is None:
+        return None
+    cloudy = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD
+    hb = _get_hourly_bias(state)
+    pr = _get_performance_ratio(state, cloudy=cloudy)
+    remaining_solar_kwh = outlook.remaining_today_generation_kwh(sp, pr, hb)
+
+    dow    = now.weekday()
+    hours  = range(now.hour, 24)
+    med    = store.load_profile(0.5)
+    p75    = store.load_profile(0.75)
+    load_med = sum(v for h in hours if (v := med.get((dow, h))) is not None)
+    load_p75 = sum(v for h in range(now.hour, 24) if (v := p75.get((dow, h))) is not None)
+    if load_med <= 0:
+        return None  # not enough history for this weekday/hour range yet
+
+    cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
+    target_med = min(100.0, max(0.0, (load_med - remaining_solar_kwh) / cap * 100))
+    target_p75 = min(100.0, max(0.0, (load_p75 - remaining_solar_kwh) / cap * 100))
+
+    # Reach-by deadline: start of on-peak, same convention _tou_eb_plan and
+    # _precharge_plan already use — grid-charging past this point is buying
+    # power at the most expensive rate of the day instead of super-off-peak,
+    # defeating the point of front-loading via EB.
+    peak_start, _ = on_peak_window(now)
+
+    switch_med = _eb_switch_time_str(now, soc, target_med, cap, peak_start)
+    switch_p75 = _eb_switch_time_str(now, soc, target_p75, cap, peak_start)
+
+    return {
+        "cloudy": cloudy, "remaining_solar_kwh": remaining_solar_kwh,
+        "load_med": load_med, "load_p75": load_p75,
+        "target_med": target_med, "target_p75": target_p75,
+        "switch_med": switch_med, "switch_p75": switch_p75,
+        "peak_start": peak_start, "is_dryer_day": dow in _HEAVY_LOAD_WEEKDAYS,
+        "cap": cap,
+    }
+
+
 def _alert_cloudy_eb_target(
     state: dict, today: str, now: datetime, c, cfg: Config, outlook, store,
 ) -> str | None:
@@ -1198,44 +1255,21 @@ def _alert_cloudy_eb_target(
     """
     if now.hour not in (7, 8) or state.get("cloudy_eb_alert_date") == today:
         return None
-    if outlook is None or outlook.avg_ghi(12) >= _GHI_CLOUDY_THRESHOLD:
-        return None
-    if store is None:
-        return None
-
-    sp = _get_system_peak_kw(state)
-    if sp is None:
-        return None
-    hb = _get_hourly_bias(state)
-    pr = _get_performance_ratio(state, cloudy=True)
-    remaining_solar_kwh = outlook.remaining_today_generation_kwh(sp, pr, hb)
-
-    dow    = now.weekday()
-    hours  = range(now.hour, 24)
-    med    = store.load_profile(0.5)
-    p75    = store.load_profile(0.75)
-    load_med = sum(v for h in hours if (v := med.get((dow, h))) is not None)
-    load_p75 = sum(v for h in range(now.hour, 24) if (v := p75.get((dow, h))) is not None)
-    if load_med <= 0:
-        return None  # not enough history for this weekday/hour range yet
-
-    cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
-    target_med = min(100.0, max(0.0, (load_med - remaining_solar_kwh) / cap * 100))
-    target_p75 = min(100.0, max(0.0, (load_p75 - remaining_solar_kwh) / cap * 100))
     soc = c.battery_soc_pct
+    calc = _compute_eb_target(now, soc, cfg, outlook, store, state)
+    if calc is None or not calc["cloudy"]:
+        return None
 
-    # Reach-by deadline: start of on-peak, same convention _tou_eb_plan and
-    # _precharge_plan already use — grid-charging past this point is buying
-    # power at the most expensive rate of the day instead of super-off-peak,
-    # defeating the point of front-loading via EB.
-    peak_start, _ = on_peak_window(now)
-
-    switch_med = _eb_switch_time_str(now, soc, target_med, cap, peak_start)
-    switch_p75 = _eb_switch_time_str(now, soc, target_p75, cap, peak_start)
+    remaining_solar_kwh = calc["remaining_solar_kwh"]
+    load_med, load_p75  = calc["load_med"], calc["load_p75"]
+    target_med, target_p75 = calc["target_med"], calc["target_p75"]
+    switch_med, switch_p75 = calc["switch_med"], calc["switch_p75"]
+    peak_start = calc["peak_start"]
+    cap        = calc["cap"]
 
     # Sunday: P75 is the realistic baseline (dryer day, see docstring), not
     # the outlier — swap which target/switch-time is framed as "typical".
-    is_dryer_day = dow in _HEAVY_LOAD_WEEKDAYS
+    is_dryer_day = calc["is_dryer_day"]
     primary_target, secondary_target = (target_p75, target_med) if is_dryer_day else (target_med, target_p75)
     primary_switch, secondary_switch = (switch_p75, switch_med) if is_dryer_day else (switch_med, switch_p75)
     typical_label   = "typical dryer-day Sunday" if is_dryer_day else f"typical {now.strftime('%A')}"
@@ -1859,6 +1893,24 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
                     f"{total_cycles:.0f}{since_note or ' total'}{extra_note} "
                     f"({pct_used:.1f}% of 6000 rated)"
                 )
+
+                # Warranty-cycle ETA, requested 2026-09-09. Lifetime average
+                # rate (db_cycles / days tracked), not this week's — a
+                # single heavy/light week would otherwise swing the ETA
+                # wildly; the lifetime rate is the stable long-horizon
+                # basis _track_battery_cycles's own extrapolation above
+                # already relies on for the same reason.
+                db_days = max(1, (now.date() - db_start.date()).days)
+                overall_rate_per_day = db_cycles / db_days
+                if 0 < pct_used < 100 and overall_rate_per_day > 0:
+                    days_left = (6000 - total_cycles) / overall_rate_per_day
+                    eta = now + timedelta(days=days_left)
+                    eta_str = (
+                        f"~{eta.strftime('%b %Y')}"
+                        if days_left < 3650 else
+                        f"{days_left / 365.25:.0f}+ years out"
+                    )
+                    cycle_str += f"\nAt this pace, rated cycles reached {eta_str}."
         except Exception as e:
             logger.debug("Battery cycle throughput calc failed: %s", e)
             # Fallback to legacy SOC-trough counter
@@ -1960,6 +2012,43 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
         f"  ~${annual:+.0f}/yr at this rate — {direction}</code>"
     )
 
+    # $ driver line — the kWh breakdown above already shows *what* changed,
+    # this converts it into *how much it cost*. Prices the prior cycle's
+    # own readings at today's rates (same "at current rates" honesty
+    # constraint savings.py documents) rather than pretending to know what
+    # rates were in effect back then — a real historical repricing would
+    # need rate-change dates this app doesn't track. Requested 2026-09-09.
+    driver_str = ""
+    try:
+        prev_import_cost = prev_export_credit = 0.0
+        for dt, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(
+            store.weekly_readings(prev_start.strftime("%Y-%m-%d"), prev_end.strftime("%Y-%m-%d"))
+        ):
+            if grid_kw > 0:
+                prev_import_cost   += grid_kw * hours * rate_at(dt)
+            elif grid_kw < 0:
+                prev_export_credit += -grid_kw * hours * export_rate_at(dt)
+        prev_net = prev_import_cost - prev_export_credit + base_service_cost(
+            max(1, (prev_end - prev_start).days + 1))
+        net_delta = net_cycle - prev_net
+        if abs(net_delta) >= 1.0:  # below this, noise isn't worth explaining
+            import_delta_cost = import_cost - prev_import_cost
+            export_delta_cost = export_credit - prev_export_credit  # higher export = more credit = cheaper
+            drivers = sorted(
+                [("import", import_delta_cost), ("export", -export_delta_cost)],
+                key=lambda p: abs(p[1]), reverse=True,
+            )
+            leader, leader_cost = drivers[0]
+            leader_label = "grid import" if leader == "import" else "export credit"
+            leader_dir   = "up" if leader_cost > 0 else "down"
+            driver_str = (
+                f"\n<i>${abs(net_delta):.2f} {'more' if net_delta > 0 else 'less'} than prior cycle at "
+                f"today's rates — mostly {leader_label} running {leader_dir} "
+                f"(${abs(leader_cost):.2f} of the difference).</i>"
+            )
+    except Exception:
+        logger.debug("Bill $ driver line failed", exc_info=True)
+
     # Running total, accumulated a day at a time by the EOD digest. Shown
     # here because this is the message the user compares against the real
     # bill. Priced at current rates — see savings.py.
@@ -1972,6 +2061,31 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
             f"  (~${_cum.get('vs_grid', 0.0) / max(1, _cum['days']):.2f}/day)</code>\n"
             f"<i>At current rates, excluding the base service charge.</i>"
         )
+
+    # Year-over-year: same calendar-day range, one year back. Silently
+    # omitted (not "not enough data yet") until a full year of history
+    # exists — this fires every cycle, so a permanent nag for the first
+    # year would be worse than just not mentioning it. Feb 29 has no
+    # equivalent day the following non-leap year; replace() raises
+    # ValueError for that one date, so skip the same way as no-data.
+    # Requested 2026-09-09; real data won't exist to show this until
+    # ~2027 (history only goes back to 2026-04-26 today).
+    yoy_str = ""
+    try:
+        yoy_start = cycle_start.replace(year=cycle_start.year - 1)
+        yoy_end   = cycle_end.replace(year=cycle_end.year - 1)
+        yoy = store.period_totals(yoy_start.strftime("%Y-%m-%d"), yoy_end.strftime("%Y-%m-%d"))
+        if yoy.days_with_data >= 20:
+            yoy_label = f"{yoy_start.strftime('%b %-d')} – {yoy_end.strftime('%b %-d, %Y')}"
+            yoy_str = (
+                f"\n\nYear-over-year ({yoy_label}):\n"
+                f"<code>  Solar:  {cur.solar_kwh:.1f} kWh{_mdelta(cur.solar_kwh, yoy.solar_kwh)}\n"
+                f"  Import: {cur.grid_import_kwh:.1f} kWh{_mdelta(cur.grid_import_kwh, yoy.grid_import_kwh)}\n"
+                f"  Export: {cur.grid_export_kwh:.1f} kWh{_mdelta(cur.grid_export_kwh, yoy.grid_export_kwh)}\n"
+                f"  Home:   {cur.home_load_kwh:.1f} kWh{_mdelta(cur.home_load_kwh, yoy.home_load_kwh)}</code>"
+            )
+    except (ValueError, AttributeError):
+        pass
 
     state["monthly_summary_date"] = today
     logger.info("Billing-cycle summary sent for %s → %s", cycle_start, cycle_end)
@@ -1990,7 +2104,7 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
         f"Home used:\n"
         f"<code>  This:  {cur.home_load_kwh:.1f} kWh{_mdelta(cur.home_load_kwh, prev.home_load_kwh)}\n"
         f"  Prior: {prev.home_load_kwh:.1f} kWh</code>{sparse_note}"
-        f"{trueup_str}{flip_str}{lifetime_str}"
+        f"{trueup_str}{driver_str}{flip_str}{yoy_str}{lifetime_str}"
     )
 
 

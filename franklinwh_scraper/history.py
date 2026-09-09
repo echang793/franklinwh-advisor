@@ -768,8 +768,20 @@ class HistoryStore:
                 continue
             hours = min(1.0, (t1 - t0).total_seconds() / 3600)
             avg_kw = (rows[i - 1][1] + rows[i][1]) / 2
-            if avg_kw < 0:
-                total += -avg_kw * hours
+            # battery_use_kw > 0 = discharging (see daily_battery_kwh's
+            # docstring, the established convention every other integrator
+            # in this class uses) — this was `< 0`, silently summing
+            # *charge* energy and calling it discharge. Over any long,
+            # roughly-balanced real period charge_kwh and discharge_kwh
+            # land close (round-trip losses aside), so the one caller
+            # (_alert_weekly_summary's lifetime-cycle-count line) wasn't
+            # wildly wrong in magnitude, but it was measuring the wrong
+            # thing — and would diverge for real during any net-charging-
+            # heavy stretch (fresh install, an extended cloudy spell with
+            # lots of grid EB charging and little discharge). Found
+            # 2026-09-09 while adding a warranty-cycle ETA to that same line.
+            if avg_kw > 0:
+                total += avg_kw * hours
         return round(total, 1)
 
     def first_reading_date(self) -> str | None:

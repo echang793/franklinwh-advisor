@@ -343,6 +343,7 @@ class TelegramChatBot:
                             "/until N  — time to reach N% SoC at current rate\n"
                             "/sundown  — projected SoC when today's solar is done\n"
                             "/sundown H — projected SoC in H hours (1-24)\n"
+                            "/ebtarget — Emergency Backup charge target for today\n"
                             "/mute     — snooze non-safety alerts (2h or 8h)\n"
                             "/unmute   — cancel an active mute\n"
                             "/clear    — reset conversation history"
@@ -408,6 +409,13 @@ class TelegramChatBot:
                     if text.lower() == "/summary":
                         threading.Thread(
                             target=self._send_summary,
+                            args=(chat_id,),
+                            daemon=True,
+                        ).start()
+                        continue
+                    if text.lower() == "/ebtarget":
+                        threading.Thread(
+                            target=self._send_ebtarget,
                             args=(chat_id,),
                             daemon=True,
                         ).start()
@@ -1024,6 +1032,81 @@ class TelegramChatBot:
             )
         except Exception as e:
             logger.warning("_send_sundown error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
+    def _send_ebtarget(self, chat_id: str) -> None:
+        """Respond to /ebtarget — on-demand version of _alert_cloudy_eb_target
+        (alerts.py), which only fires once, 7-8am, cloudy days only. Added
+        2026-09-09 after the user asked for this number ad hoc mid-day twice
+        and missed the alert entirely the day it first shipped — same calc
+        (_compute_eb_target), no gating, works any time of day and any sky."""
+        try:
+            with self._lock:
+                stats   = self._stats
+                outlook = self._outlook
+                store   = self._hist_store
+            if stats is None:
+                self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+                return
+            if outlook is None:
+                self._send(chat_id, "No weather forecast available right now.")
+                return
+            if store is None:
+                self._send(chat_id, "No usage history yet.")
+                return
+
+            from pathlib import Path
+
+            from .alerts import (_compute_eb_target,
+                                 _load_peak_state)
+
+            now   = datetime.now()
+            c     = stats.current
+            soc   = c.battery_soc_pct
+            out   = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+            state = _load_peak_state(out)
+
+            calc = _compute_eb_target(now, soc, self._cfg, outlook, store, state)
+            if calc is None:
+                self._send(chat_id,
+                    "Not enough data yet — need solar calibration and "
+                    f"{now.strftime('%A')} usage history to compute a target.")
+                return
+
+            target_med, target_p75 = calc["target_med"], calc["target_p75"]
+            switch_med, switch_p75 = calc["switch_med"], calc["switch_p75"]
+            is_dryer_day = calc["is_dryer_day"]
+
+            primary_target, secondary_target = (
+                (target_p75, target_med) if is_dryer_day else (target_med, target_p75))
+            primary_switch, secondary_switch = (
+                (switch_p75, switch_med) if is_dryer_day else (switch_med, switch_p75))
+            typical_label   = "typical dryer-day Sunday" if is_dryer_day else f"typical {now.strftime('%A')}"
+            secondary_label = "if no dryer today" if is_dryer_day else "if today runs heavier than usual"
+            secondary_switch_label = "no dryer today" if is_dryer_day else "heavier day"
+
+            if primary_switch is None:
+                timing_str = f"⏰ Already at target — no EB needed for a {typical_label}."
+                if secondary_switch is not None:
+                    timing_str += f" ({secondary_switch_label.capitalize()}: switch to EB at {secondary_switch}.)"
+            else:
+                timing_str = (
+                    f"⏰ Reach {primary_target:.0f}% by "
+                    f"{calc['peak_start'].strftime('%-I:%M %p')} — switch to EB at {primary_switch}."
+                )
+                if secondary_switch is not None:
+                    timing_str += f" ({secondary_switch_label.capitalize()}: {secondary_switch}.)"
+
+            sky = "Cloudy" if calc["cloudy"] else "Sunny"
+            self._send(chat_id,
+                f"🔋 <b>EB charge target</b>  ·  {sky} today\n"
+                f"{_soc_bar(soc)}  ·  Remaining solar today: ~{calc['remaining_solar_kwh']:.1f} kWh\n"
+                f"Charge to <b>~{primary_target:.0f}%</b> for a {typical_label} "
+                f"(~{secondary_target:.0f}% {secondary_label})\n"
+                f"{timing_str}"
+            )
+        except Exception as e:
+            logger.warning("_send_ebtarget error: %s", e)
             self._send(chat_id, f"Error: {e}")
 
     def _handle_callback_query(self, cq: dict) -> None:

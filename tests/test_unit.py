@@ -118,6 +118,33 @@ def test_capacity_samples_ignores_charging_data(tmp_path):
     assert db.capacity_samples("2026-05-01", "2026-05-02") == []
 
 
+def test_total_discharge_kwh_sums_discharge_not_charge(tmp_path):
+    """Regression: battery_use_kw > 0 = discharging (same convention
+    daily_battery_kwh documents and every sibling integrator uses) — this
+    method summed `< 0` instead, silently returning charge energy under a
+    "discharge" name. Found 2026-09-09 while adding a warranty-cycle ETA to
+    _alert_weekly_summary, the only real caller."""
+    db = HistoryStore(tmp_path / "h.db")
+    base = datetime(2026, 5, 1, 10, 0)
+
+    def _row(ts, battery_use_kw):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts, 0, 10, 0.5, 0.0, 50.0, 0.0, "normal", 0.0, battery_use_kw),
+        )
+
+    # 1h discharging at 2.0 kW (positive) -> 2.0 kWh discharged.
+    _row(base.isoformat(), 2.0)
+    _row((base + timedelta(hours=1)).isoformat(), 2.0)
+    # Then 1h charging at 3.0 kW (negative) -> must NOT count toward discharge.
+    _row((base + timedelta(hours=2)).isoformat(), -3.0)
+    db._conn.commit()
+
+    assert db.total_discharge_kwh() == 2.0
+
+
 def test_predict_blends_recent_load_over_baseline(tmp_path):
     """A sustained recent load change should pull the forecast toward it,
     not get diluted by months of older, lower baseline readings."""
@@ -1098,6 +1125,153 @@ def test_send_sundown_omits_export_line_when_battery_never_fills(tmp_path):
 
     assert "text" in sent
     assert "Surplus solar to export" not in sent["text"]
+
+
+def test_send_ebtarget_works_any_time_any_sky(tmp_path):
+    """/ebtarget is the on-demand version of _alert_cloudy_eb_target (which
+    only fires once, 7-8am, cloudy days only) — added 2026-09-09 after the
+    user asked for this ad hoc mid-day and missed the morning alert
+    entirely once. Must work regardless of hour or sky, unlike the alert."""
+    import types
+    from franklinwh_scraper import chatbot as chatbot_mod
+    from franklinwh_scraper.alerts import _save_peak_state
+
+    now = datetime(2026, 9, 7, 14, 0, 0)  # 2pm Monday — outside the alert's 7-8am gate
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._outdir = tmp_path
+    bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(battery_soc_pct=51.0))
+    bot._outlook = types.SimpleNamespace(
+        avg_ghi=lambda h: 500.0,  # sunny — outside the alert's cloudy gate too
+        remaining_today_generation_kwh=lambda sp, pr, hb: 5.0,
+    )
+    bot._hist_store = _EbTargetFakeStore(med_kw=1.0, p75_kw=2.0)
+    _save_peak_state(tmp_path, {"solar_cal_samples": [3.5, 3.6, 3.4]})
+
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+
+    real_datetime = chatbot_mod.datetime
+    try:
+        class _FakeDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        chatbot_mod.datetime = _FakeDatetime
+        bot._send_ebtarget("123")
+    finally:
+        chatbot_mod.datetime = real_datetime
+
+    assert "text" in sent
+    assert "EB charge target" in sent["text"]
+    assert "Sunny today" in sent["text"]
+
+
+def test_send_ebtarget_reports_no_data_yet(tmp_path):
+    import types
+    from franklinwh_scraper import chatbot as chatbot_mod
+    from franklinwh_scraper.alerts import _save_peak_state
+
+    now = datetime(2026, 9, 7, 14, 0, 0)
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._outdir = tmp_path
+    bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(battery_soc_pct=51.0))
+    bot._outlook = types.SimpleNamespace(avg_ghi=lambda h: 500.0,
+                                         remaining_today_generation_kwh=lambda sp, pr, hb: 5.0)
+    bot._hist_store = _EbTargetFakeStore()
+    _save_peak_state(tmp_path, {})  # no solar_cal_samples -> no calibration yet
+
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+
+    real_datetime = chatbot_mod.datetime
+    try:
+        class _FakeDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        chatbot_mod.datetime = _FakeDatetime
+        bot._send_ebtarget("123")
+    finally:
+        chatbot_mod.datetime = real_datetime
+
+    assert "text" in sent
+    assert "Not enough data yet" in sent["text"]
+
+
+def test_alert_monthly_summary_includes_dollar_driver_line(tmp_path):
+    """Requested 2026-09-09: the existing prior-cycle kWh breakdown never
+    converted into a $ attribution — a real driver line (which category, how
+    much) on top of the kWh deltas that were already there."""
+    from franklinwh_scraper import alerts
+
+    db = HistoryStore(tmp_path / "h.db")
+
+    def _row(ts, grid_kw, home_kw=1.0, solar_kw=0.0):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts, 0, int(ts[11:13]), home_kw, solar_kw, 50.0, grid_kw, "normal", 0.0, 0.0),
+        )
+
+    # Prior cycle (July): light grid import every 5 days.
+    for day in (5, 10, 15, 20, 25):
+        _row(f"2026-07-{day:02d}T10:00:00", 0.2)
+        _row(f"2026-07-{day:02d}T14:00:00", 0.2)
+    # Current cycle (August): much heavier import — should dominate the delta.
+    for day in (5, 10, 15, 20, 25):
+        _row(f"2026-08-{day:02d}T10:00:00", 3.0)
+        _row(f"2026-08-{day:02d}T14:00:00", 3.0)
+    db._conn.commit()
+
+    now = datetime(2026, 8, 31, 21, 0, 0)  # last day of cycle, start_day=1 -> calendar month
+    cfg = Config(billing_cycle_start_day=1)
+    body = alerts._alert_monthly_summary({}, "2026-08-31", now, db, cfg)
+
+    assert body is not None
+    assert "more than prior cycle" in body
+    assert "grid import running up" in body
+    # No 2025 data in this DB at all -> YoY block must be silently omitted,
+    # not a "not enough data" nag (this fires every cycle for a full year).
+    assert "Year-over-year" not in body
+    db.close()
+
+
+def test_alert_monthly_summary_includes_year_over_year(tmp_path):
+    """Requested 2026-09-09. Real history only goes back to 2026-04-26
+    today, so this can't be verified against production data yet — tests
+    the mechanism with a synthetic prior year instead."""
+    from franklinwh_scraper import alerts
+
+    db = HistoryStore(tmp_path / "h.db")
+
+    def _row(ts, grid_kw, solar_kw=2.0):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts, 0, int(ts[11:13]), 1.0, solar_kw, 50.0, grid_kw, "normal", solar_kw, 0.0),
+        )
+
+    # Prior cycle (July 2026) — required for the function to proceed at all.
+    for day in (5, 10, 15, 20, 25):
+        _row(f"2026-07-{day:02d}T10:00:00", 0.2)
+    # Current cycle (August 2026).
+    for day in (5, 10, 15, 20, 25):
+        _row(f"2026-08-{day:02d}T10:00:00", 1.0)
+    # Same calendar range, one year back — >=20 days needed for the block
+    # to render, so cover most of August 2025.
+    for day in range(1, 26):
+        _row(f"2025-08-{day:02d}T10:00:00", 0.5)
+    db._conn.commit()
+
+    now = datetime(2026, 8, 31, 21, 0, 0)
+    cfg = Config(billing_cycle_start_day=1)
+    body = alerts._alert_monthly_summary({}, "2026-08-31", now, db, cfg)
+
+    assert body is not None
+    assert "Year-over-year (Aug 1 – Aug 31, 2025)" in body
+    db.close()
 
 
 def test_eod_digest_reports_sundown_prediction_accuracy():
@@ -2579,6 +2753,35 @@ def test_weekly_summary_omits_extrapolation_without_install_date(tmp_path):
     if "Battery cycles" in msg:
         assert "tracking start" in msg
         assert "extrapolated" not in msg
+
+
+def test_weekly_summary_includes_warranty_cycle_eta(tmp_path):
+    """Requested 2026-09-09: the lifetime cycle count already shown had no
+    forward projection — when rated cycles would actually be reached at the
+    current pace. Same data-construction as
+    test_weekly_summary_omits_extrapolation_without_install_date (~2.7
+    cycles over 6 days, cap=13.6 default) -> a multi-decade-out ETA, so
+    this exercises the ">=3650 days" branch."""
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime(2026, 7, 26, 21, 30)   # a Sunday evening
+    base = now - timedelta(days=6)
+    for d in range(6):
+        for i in range(9):
+            ts = (base + timedelta(days=d, minutes=30 * i)).isoformat()
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (ts, 0, 18, 1.36, 0.0, 50.0, 0.0, "normal", 0.0, 1.36),
+            )
+    db._conn.commit()
+
+    msg = alerts._alert_weekly_summary({}, now.strftime("%Y-%m-%d"), now, db,
+                                       Config(install_date=""))
+    assert msg is not None
+    assert "Battery cycles" in msg
+    assert "rated cycles reached" in msg
+    assert "years out" in msg
 
 
 def _frozen_dt(fixed):
