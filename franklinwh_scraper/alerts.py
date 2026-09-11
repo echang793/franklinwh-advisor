@@ -1156,11 +1156,17 @@ def _alert_drain_target_reached(
     worked as planned — or a heads-up on the days it doesn't (unexpectedly
     cloudy, drained on a day solar won't actually recover it).
 
-    Daytime window (5am-noon) deliberately excludes the overnight/evening
-    hours the existing critical-SoC alert already owns — this is
-    specifically about the morning "am I clear to head out" check.
+    Window is sunrise to 11am — anchored to real sunrise (same _sunrise_on
+    helper _alert_morning_preview uses, DST-proof by construction) rather
+    than a fixed clock hour, narrowed from 5am-noon to sunrise-11am per
+    explicit request (2026-09-11) right after this shipped. Deliberately
+    excludes the overnight/evening hours the existing critical-SoC alert
+    already owns — this is specifically about the morning "am I clear to
+    head out" check.
     """
-    if now.hour not in range(5, 12) or c.battery_soc_pct > _DRAIN_TARGET_SOC_PCT:
+    sunrise     = _sunrise_on(now.date(), now, outlook)
+    morning_end = now.replace(hour=11, minute=0, second=0, microsecond=0)
+    if not (sunrise <= now < morning_end) or c.battery_soc_pct > _DRAIN_TARGET_SOC_PCT:
         return None
     if state.get("drain_target_alerted_date") == today:
         return None

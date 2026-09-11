@@ -5362,6 +5362,10 @@ def _eb_target_outlook(cloudy=True, remaining_kwh=5.0):
     return types.SimpleNamespace(
         avg_ghi=lambda h: (200.0 if cloudy else 500.0),
         remaining_today_generation_kwh=lambda sp, pr, hb: remaining_kwh,
+        # 6:30am sunrise — used by _sunrise_on for the drain-target alert's
+        # window gate; other callers of this fixture don't touch it.
+        sunrise_on=lambda d: datetime.combine(
+            d.date() if isinstance(d, datetime) else d, datetime.min.time()) + timedelta(hours=6, minutes=30),
     )
 
 
@@ -5407,7 +5411,17 @@ def test_alert_drain_target_reached_silent_above_threshold():
 
 def test_alert_drain_target_reached_silent_outside_daytime_window():
     import types
-    now = datetime(2026, 9, 11, 13, 0)  # 1pm — outside the 5am-noon window
+    now = datetime(2026, 9, 11, 13, 0)  # 1pm — outside the sunrise-11am window
+    outlook = _eb_target_outlook(cloudy=False)
+    c = types.SimpleNamespace(battery_soc_pct=6.5)
+    assert alerts._alert_drain_target_reached({}, "2026-09-11", now, c, Config(), outlook) is None
+
+
+def test_alert_drain_target_reached_silent_before_sunrise():
+    """Requested 2026-09-11: sunrise-anchored, not a fixed 5am clock hour —
+    5:15am is before the fixture's 6:30am sunrise."""
+    import types
+    now = datetime(2026, 9, 11, 5, 15)
     outlook = _eb_target_outlook(cloudy=False)
     c = types.SimpleNamespace(battery_soc_pct=6.5)
     assert alerts._alert_drain_target_reached({}, "2026-09-11", now, c, Config(), outlook) is None
