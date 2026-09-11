@@ -5365,6 +5365,54 @@ def _eb_target_outlook(cloudy=True, remaining_kwh=5.0):
     )
 
 
+def test_alert_drain_target_reached_sunny():
+    """Requested 2026-09-11: confirms the deliberate morning drain-to-~5%
+    strategy worked as planned on a sunny day, rather than staying silent
+    (recommend() already defers EB here, but only notifies on a mode
+    *change* — staying in Self-Consumption sends nothing)."""
+    import types
+    now = datetime(2026, 9, 11, 8, 0)
+    state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
+    outlook = _eb_target_outlook(cloudy=False, remaining_kwh=12.0)
+    c = types.SimpleNamespace(battery_soc_pct=6.5)
+    body = alerts._alert_drain_target_reached(state, "2026-09-11", now, c, Config(), outlook)
+    assert body is not None
+    assert "drain target hit" in body
+    assert "Sunny today" in body
+    assert "12.0 kWh" in body
+    assert state["drain_target_alerted_date"] == "2026-09-11"
+    # Dedup: no re-fire same day.
+    assert alerts._alert_drain_target_reached(state, "2026-09-11", now, c, Config(), outlook) is None
+
+
+def test_alert_drain_target_reached_cloudy_warns_instead():
+    import types
+    now = datetime(2026, 9, 11, 8, 0)
+    state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
+    outlook = _eb_target_outlook(cloudy=True, remaining_kwh=2.0)
+    c = types.SimpleNamespace(battery_soc_pct=6.5)
+    body = alerts._alert_drain_target_reached(state, "2026-09-11", now, c, Config(), outlook)
+    assert body is not None
+    assert "but today's cloudy" in body
+    assert "drain target hit" not in body
+
+
+def test_alert_drain_target_reached_silent_above_threshold():
+    import types
+    now = datetime(2026, 9, 11, 8, 0)
+    outlook = _eb_target_outlook(cloudy=False)
+    c = types.SimpleNamespace(battery_soc_pct=8.0)
+    assert alerts._alert_drain_target_reached({}, "2026-09-11", now, c, Config(), outlook) is None
+
+
+def test_alert_drain_target_reached_silent_outside_daytime_window():
+    import types
+    now = datetime(2026, 9, 11, 13, 0)  # 1pm — outside the 5am-noon window
+    outlook = _eb_target_outlook(cloudy=False)
+    c = types.SimpleNamespace(battery_soc_pct=6.5)
+    assert alerts._alert_drain_target_reached({}, "2026-09-11", now, c, Config(), outlook) is None
+
+
 def test_alert_cloudy_eb_target_fires_with_median_and_p75():
     import types
     now = datetime(2026, 9, 7, 7, 30)  # a Monday — not a _HEAVY_LOAD_WEEKDAYS day

@@ -1135,6 +1135,61 @@ def _alert_solar_stopped(state: dict, today: str, now: datetime, c) -> str | Non
     )
 
 
+_DRAIN_TARGET_SOC_PCT = 7.0  # user's deliberate morning drain target, confirmed 2026-09-11
+
+
+def _alert_drain_target_reached(
+    state: dict, today: str, now: datetime, c, cfg: Config, outlook,
+) -> str | None:
+    """Once/day, daytime only: fires when SoC drops to _DRAIN_TARGET_SOC_PCT
+    or below. Requested 2026-09-11 — the user deliberately drains close to
+    5% before heading to work on a sunny day to maximize how much solar
+    headroom the battery has left to charge into, rather than treating a
+    low reading as a problem. recommend() (advisor.py) already has this
+    exact reasoning built in — at SoC < _SOC_CRITICAL it defers Emergency
+    Backup when the forecast confidently shows solar will recover it, so
+    it never buys grid power that solar is about to supply for free — but
+    that only changes what the *recommendation* says, and only fires a
+    notification on a mode *change*. Staying in Self-Consumption while
+    already in Self-Consumption (the normal case for this) sends nothing,
+    so there was no confirmation that today's drain-to-recharge actually
+    worked as planned — or a heads-up on the days it doesn't (unexpectedly
+    cloudy, drained on a day solar won't actually recover it).
+
+    Daytime window (5am-noon) deliberately excludes the overnight/evening
+    hours the existing critical-SoC alert already owns — this is
+    specifically about the morning "am I clear to head out" check.
+    """
+    if now.hour not in range(5, 12) or c.battery_soc_pct > _DRAIN_TARGET_SOC_PCT:
+        return None
+    if state.get("drain_target_alerted_date") == today:
+        return None
+    state["drain_target_alerted_date"] = today
+
+    solar_str = ""
+    sunny = None
+    if outlook is not None:
+        sunny = outlook.avg_ghi(12) >= _GHI_CLOUDY_THRESHOLD
+        sp = _get_system_peak_kw(state)
+        if sp is not None:
+            hb = _get_hourly_bias(state)
+            pr = _get_performance_ratio(state, cloudy=not sunny)
+            remaining_kwh = outlook.remaining_today_generation_kwh(sp, pr, hb)
+            solar_str = f" (~{remaining_kwh:.1f} kWh solar still forecast today)"
+
+    logger.info("Drain-target alert sent for %s: soc=%.0f%% sunny=%s", today, c.battery_soc_pct, sunny)
+    if sunny is False:  # explicit False, not "unknown" (None) — only warn on a real mismatch
+        return (
+            f"🌥️ <b>FranklinWH: {c.battery_soc_pct:.0f}% SoC — but today's cloudy</b>\n"
+            f"Solar may not fully recover this before tonight{solar_str}. "
+            "Worth checking before you head out, not the usual sunny-day drain."
+        )
+    return (
+        f"🔋 <b>FranklinWH: {c.battery_soc_pct:.0f}% SoC — drain target hit</b>\n"
+        f"Sunny today{solar_str} — should recharge through the day as usual."
+    )
+
+
 # datetime.weekday(): Monday=0 .. Sunday=6. Days where P75 (not median) is
 # the realistic "typical" baseline — see _alert_cloudy_eb_target's docstring.
 _HEAVY_LOAD_WEEKDAYS = {6}  # Sunday: recurring dryer day, confirmed 2026-09-06
@@ -3390,6 +3445,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("solar_stopped",     lambda: _alert_solar_stopped(state, today, now, c)),
             ("low_noon_soc",      lambda: _alert_low_noon_soc(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("cloudy_eb_target",  lambda: _alert_cloudy_eb_target(state, today, now, c, cfg, outlook, store)),
+            ("drain_target",      lambda: _alert_drain_target_reached(state, today, now, c, cfg, outlook)),
             ("export_arbitrage",  lambda: _alert_export_arbitrage(state, today, now, c, cfg, usage_forecast)),
             ("eod_digest",        lambda: _alert_eod_digest(state, today, now, stats, cfg, outlook, usage_forecast, store)),
             ("weekly_summary",    lambda: _alert_weekly_summary(state, today, now, store, cfg)),
