@@ -36,6 +36,20 @@ def _safe_json(resp) -> dict:
         raise RuntimeError(f"Unexpected non-JSON response from FranklinWH API: {e}") from e
 
 
+def _num(data: dict, key: str, default: float = 0.0) -> float:
+    """data.get(key, default), but also substitutes default for an explicit
+    JSON null.
+
+    dict.get(key, default) only falls back to default when the key is
+    *missing* — if the gateway API ever returns the key with a JSON null
+    value (e.g. `"p_sun": null`), .get() happily returns None, and every
+    downstream comparison/arithmetic op in alerts.py (`c.solar_production_kw
+    < 0.3`, etc.) then raises TypeError instead of degrading gracefully.
+    """
+    value = data.get(key)
+    return default if value is None else value
+
+
 # ------------------------------------------------------------------ #
 # Data classes                                                         #
 # ------------------------------------------------------------------ #
@@ -60,7 +74,6 @@ class Totals:
     grid_export_kwh: float        # soOutGrid — solar exported to grid (matches app)
     grid_load_kwh: float          # kwhGridLoad/1000 — grid consumed by home (matches app)
     solar_kwh: float              # kwh_sun
-    generator_kwh: float          # kwh_gen
     home_use_kwh: float           # (kwhFhpLoad+kwhSolarLoad+kwhGridLoad)/1000 — matches app
     # The three paths that make up home_use_kwh. The API has always returned
     # these separately; they used to be summed and the split discarded.
@@ -298,26 +311,25 @@ class AccountClient:
             grid_status = "off"
 
         current = Current(
-            solar_production_kw=data.get("p_sun", 0.0),
-            generator_production_kw=data.get("p_gen", 0.0),
-            generator_enabled=bool(data.get("genStat", 0) > 1),
-            battery_use_kw=data.get("p_fhp", 0.0),
-            grid_use_kw=data.get("p_uti", 0.0),
-            home_load_kw=data.get("p_load", 0.0),
-            battery_soc_pct=data.get("soc", 0.0),
+            solar_production_kw=_num(data, "p_sun"),
+            generator_production_kw=_num(data, "p_gen"),
+            generator_enabled=bool(_num(data, "genStat") > 1),
+            battery_use_kw=_num(data, "p_fhp"),
+            grid_use_kw=_num(data, "p_uti"),
+            home_load_kw=_num(data, "p_load"),
+            battery_soc_pct=_num(data, "soc"),
             grid_status=grid_status,
         )
         totals = Totals(
-            battery_charge_kwh=data.get("kwh_fhp_chg", 0.0),
-            battery_discharge_kwh=data.get("kwh_fhp_di", 0.0),
-            grid_import_kwh=data.get("kwh_uti_in", 0.0),
-            grid_export_kwh=data.get("soOutGrid", 0.0),
-            grid_load_kwh=data.get("kwhGridLoad", 0.0) / 1000.0,
-            solar_kwh=data.get("kwh_sun", 0.0),
-            generator_kwh=data.get("kwh_gen", 0.0),
-            home_use_kwh=(data.get("kwhFhpLoad", 0) + data.get("kwhSolarLoad", 0) + data.get("kwhGridLoad", 0)) / 1000.0,
-            battery_load_kwh=data.get("kwhFhpLoad", 0) / 1000.0,
-            solar_load_kwh=data.get("kwhSolarLoad", 0) / 1000.0,
+            battery_charge_kwh=_num(data, "kwh_fhp_chg"),
+            battery_discharge_kwh=_num(data, "kwh_fhp_di"),
+            grid_import_kwh=_num(data, "kwh_uti_in"),
+            grid_export_kwh=_num(data, "soOutGrid"),
+            grid_load_kwh=_num(data, "kwhGridLoad") / 1000.0,
+            solar_kwh=_num(data, "kwh_sun"),
+            home_use_kwh=(_num(data, "kwhFhpLoad") + _num(data, "kwhSolarLoad") + _num(data, "kwhGridLoad")) / 1000.0,
+            battery_load_kwh=_num(data, "kwhFhpLoad") / 1000.0,
+            solar_load_kwh=_num(data, "kwhSolarLoad") / 1000.0,
         )
         return Stats(
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),

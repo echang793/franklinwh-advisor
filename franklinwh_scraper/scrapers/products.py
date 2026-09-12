@@ -68,7 +68,7 @@ class ProductsScraper:
         description = self._extract_description(soup)
         specs = self._extract_specs(soup)
         features = self._extract_features(soup)
-        images = self._extract_images(soup, path)
+        images = self._extract_images(soup)
 
         return {
             "url": url,
@@ -194,7 +194,7 @@ class ProductsScraper:
 
         return features[:30]
 
-    def _extract_images(self, soup, base_path: str) -> list[str]:
+    def _extract_images(self, soup) -> list[str]:
         images: list[str] = []
         for img in soup.select("img[src]"):
             src = img.get("src", "")

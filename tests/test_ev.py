@@ -35,7 +35,7 @@ def _inputs(**kw) -> EvInputs:
         now=datetime(2026, 7, 15, 12, 0),          # Wed noon, July
         tou_period=TouPeriod.OFF_PEAK,
         solar_kw=6.0, home_load_kw=4.6,
-        fwh_battery_soc=90.0, fwh_battery_kw=-0.5,
+        fwh_battery_soc=90.0,
         vehicle=_vehicle(),
         at_home=True, session_active=True,
         last_commanded_amps=15, minutes_since_last_command=15.0,
@@ -315,6 +315,72 @@ def test_controller_spend_meter_prices_calls(tmp_path, monkeypatch):
     ctl._record_spend("wake")
     # 10 x $0.002 + 1 x $0.02 = $0.04
     assert abs(ctl.month_spend_usd() - 0.04) < 1e-9
+
+
+def test_poll_vehicle_wakes_when_wake_worthy(tmp_path, monkeypatch):
+    """A car that fell asleep during the overnight guaranteed-charge window
+    (or a sustained daytime surplus) is worth the extra $0.02 wake call —
+    a plain poll never wakes it, so without this the controller silently
+    did nothing for as long as the car stayed asleep."""
+    from franklinwh_scraper import ev_controller as evc
+    from franklinwh_scraper.config import Config
+    from franklinwh_scraper.tesla import VehicleAsleep
+
+    calls = []
+
+    class StubClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def wake(self):
+            calls.append("wake")
+
+        def get_charge_state(self):
+            if "wake" not in calls:
+                raise VehicleAsleep("asleep")
+            calls.append("poll")
+            return _vehicle(charging=False, actual_current_a=0.0)
+
+    monkeypatch.setattr(evc, "TeslaClient", StubClient)
+    cfg = Config(ev_control_enabled=True, tesla_vin="v", tesla_client_id="c")
+    ctl = evc.EvController(cfg, tmp_path)
+    now = datetime(2026, 7, 15, 3, 0)  # overnight super-off-peak window
+
+    v = ctl._poll_vehicle(now, wake_if_asleep=True)
+
+    assert calls == ["wake", "poll"]
+    assert v is not None
+
+
+def test_poll_vehicle_does_not_wake_when_not_worth_it(tmp_path, monkeypatch):
+    """Outside the overnight/sustained-surplus windows, an asleep car is
+    left alone — waking it every tick regardless of whether we'd act on the
+    result would spend real money for nothing."""
+    from franklinwh_scraper import ev_controller as evc
+    from franklinwh_scraper.config import Config
+    from franklinwh_scraper.tesla import VehicleAsleep
+
+    calls = []
+
+    class StubClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def wake(self):
+            calls.append("wake")
+
+        def get_charge_state(self):
+            raise VehicleAsleep("asleep")
+
+    monkeypatch.setattr(evc, "TeslaClient", StubClient)
+    cfg = Config(ev_control_enabled=True, tesla_vin="v", tesla_client_id="c")
+    ctl = evc.EvController(cfg, tmp_path)
+    now = datetime(2026, 7, 15, 12, 0)  # midday, no surplus tracked yet
+
+    v = ctl._poll_vehicle(now, wake_if_asleep=False)
+
+    assert calls == []
+    assert v is None
 
 
 def test_decision_is_frozen_dataclass():

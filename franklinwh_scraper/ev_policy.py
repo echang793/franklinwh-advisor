@@ -84,7 +84,6 @@ class EvInputs:
     solar_kw: float
     home_load_kw: float          # INCLUDES the EV's own draw
     fwh_battery_soc: float
-    fwh_battery_kw: float        # negative = charging
     vehicle: VehicleChargeState | None  # None = not polled / asleep this tick
     at_home: bool
     session_active: bool         # a session WE started is in progress

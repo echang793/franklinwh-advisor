@@ -100,7 +100,6 @@ def integrate_intervals(
 
 @dataclass
 class MonthlyTotals:
-    year_month: str       # "2026-05"
     solar_kwh: float      # sum of MAX(solar_total_kwh) per day (API running total)
     grid_import_kwh: float
     grid_export_kwh: float
@@ -649,7 +648,6 @@ class HistoryStore:
         home_load_kwh   = round(home_load_kwh, 1)
 
         return MonthlyTotals(
-            year_month=f"{start_date}:{end_date}",
             solar_kwh=solar_kwh,
             grid_import_kwh=grid_import_kwh,
             grid_export_kwh=grid_export_kwh,

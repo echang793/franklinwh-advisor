@@ -30,7 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
-from .tou import (_NEM3_DEFAULT_EXPORT_RATE, _RATES_EFFECTIVE_DATE, TouPeriod,
+from .tou import (_RATES_EFFECTIVE_DATE, TouPeriod,
                   drses_rate_at, export_rate_at, period_at, rate_at)
 
 
@@ -65,7 +65,6 @@ class SavingsBreakdown:
     saved_super_off_peak: float
 
     priced_at: str               # tou rates' effective date
-    export_days_at_assumed_rate: int
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -84,7 +83,6 @@ def compute(intervals, start: str = "", end: str = "") -> SavingsBreakdown:
     grid_only_cost = 0.0
     solar_only_import_cost = solar_only_export_credit = 0.0
     saved_on_peak = saved_off_peak = saved_super_off_peak = 0.0
-    assumed_rate_days: set[str] = set()
     seen_days: set[str] = set()
 
     for dt0, hours, grid_avg, home_avg, solar_avg in intervals:
@@ -123,11 +121,6 @@ def compute(intervals, start: str = "", end: str = "") -> SavingsBreakdown:
         else:
             saved_off_peak += avoided
 
-        # Track exports priced at the assumed avoided-cost floor rather than a
-        # published hourly rate, so the caller can footnote it honestly.
-        if exp_kw > 0 and abs(exp_rate - _NEM3_DEFAULT_EXPORT_RATE) < 1e-9:
-            assumed_rate_days.add(dt0.strftime("%Y-%m-%d"))
-
     actual_net = actual_import_cost - actual_export_credit
     solar_only_net = solar_only_import_cost - solar_only_export_credit
 
@@ -150,7 +143,6 @@ def compute(intervals, start: str = "", end: str = "") -> SavingsBreakdown:
         saved_off_peak=round(saved_off_peak, 2),
         saved_super_off_peak=round(saved_super_off_peak, 2),
         priced_at=_RATES_EFFECTIVE_DATE.strftime("%Y-%m-%d"),
-        export_days_at_assumed_rate=len(assumed_rate_days),
     )
 
 

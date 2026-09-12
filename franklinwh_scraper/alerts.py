@@ -516,6 +516,18 @@ def _alert_enabled(cfg: Config, name: str, state: dict, now: datetime) -> bool:
     return not _alerts_muted(state, now)
 
 
+def _already_alerted(state: dict, key: str, period: str) -> bool:
+    """Has this once-per-day/week alert already fired for `period` (a
+    "%Y-%m-%d" date or "%G-W%V" week string)? Pair with _mark_alerted at
+    the point the alert actually sends — not here, since most callers still
+    have other trigger conditions to check first."""
+    return state.get(key) == period
+
+
+def _mark_alerted(state: dict, key: str, period: str) -> None:
+    """Record that a once-per-day/week alert fired for `period`, so
+    _already_alerted gates the next call. See _already_alerted."""
+    state[key] = period
 
 
 def _precharge_plan(now: datetime, soc: float, tmrw_solar_kwh: float,
@@ -832,7 +844,7 @@ def _alert_morning_preview(
     # just anchored at sunrise instead of 30min after a hardcoded 7am.
     sunrise = _sunrise_on(now.date(), now, outlook)
     in_window = sunrise <= now < sunrise + timedelta(minutes=90)
-    if not in_window or state.get("morning_preview_date") == today:
+    if not in_window or _already_alerted(state, "morning_preview_date", today):
         return None
 
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1013,7 +1025,7 @@ def _alert_morning_preview(
         solar_est       = "Solar forecast unavailable"
         peak_window_str = ""
 
-    state["morning_preview_date"] = today
+    _mark_alerted(state, "morning_preview_date", today)
     logger.info("Morning preview alert sent for %s", today)
     return (
         f"☀️ <b>FranklinWH: {_morning_greeting(now)}</b>\n"
@@ -1025,9 +1037,9 @@ def _alert_morning_preview(
 def _alert_grid_import(state: dict, today: str, now: datetime, c) -> str | None:
     if not (16 <= now.hour < 21) or c.grid_use_kw <= 0.3:
         return None
-    if state.get("grid_import_alerted_date") == today:
+    if _already_alerted(state, "grid_import_alerted_date", today):
         return None
-    state["grid_import_alerted_date"] = today
+    _mark_alerted(state, "grid_import_alerted_date", today)
     logger.info("Peak grid-import alert sent for %s", today)
     return (
         f"⚠️ <b>FranklinWH: Grid import during peak (4–9 pm)</b>\n"
@@ -1044,9 +1056,9 @@ def _alert_low_soc_1pm(
     in_window = now.hour == 13
     if not in_window or c.battery_soc_pct >= 40.0:
         return None
-    if state.get("low_soc_1pm_alerted_date") == today:
+    if _already_alerted(state, "low_soc_1pm_alerted_date", today):
         return None
-    state["low_soc_1pm_alerted_date"] = today
+    _mark_alerted(state, "low_soc_1pm_alerted_date", today)
     logger.info("Low 1 pm SoC alert sent for %s (%.0f%%)", today, c.battery_soc_pct)
     # cfg, not the module constant — the constant is only a fallback default,
     # so a user with a 30 kWh system used to get a time-to-empty computed
@@ -1088,9 +1100,9 @@ def _alert_eb_ready(state: dict, today: str, now: datetime, c) -> str | None:
     )
     if not charging_at_eb_rate or c.battery_soc_pct < 80.0:
         return None
-    if state.get("eb_80pct_alerted_date") == today:
+    if _already_alerted(state, "eb_80pct_alerted_date", today):
         return None
-    state["eb_80pct_alerted_date"] = today
+    _mark_alerted(state, "eb_80pct_alerted_date", today)
     logger.info("EB 80%% SoC alert sent for %s (%.0f%%, charging %.2f kW)",
                 today, c.battery_soc_pct, c.battery_use_kw)
     return (
@@ -1106,9 +1118,9 @@ def _alert_low_morning_solar(state: dict, today: str, now: datetime, c) -> str |
     in_window = now.hour in (9, 10)
     if not in_window or c.solar_production_kw >= 0.5:
         return None
-    if state.get("low_solar_morning_date") == today:
+    if _already_alerted(state, "low_solar_morning_date", today):
         return None
-    state["low_solar_morning_date"] = today
+    _mark_alerted(state, "low_solar_morning_date", today)
     logger.info("Low morning solar alert sent for %s (%.2f kW)", today, c.solar_production_kw)
     return (
         f"☁️ <b>FranklinWH: Low solar at {now.strftime('%-I:%M %p')} — cloudy day ahead</b>\n"
@@ -1123,9 +1135,9 @@ def _alert_solar_stopped(state: dict, today: str, now: datetime, c) -> str | Non
         return None
     last_solar = state.get("last_midday_solar_kw", 0.0)
     state["last_midday_solar_kw"] = c.solar_production_kw
-    if last_solar < 0.5 or c.solar_production_kw >= 0.3 or state.get("solar_stopped_date") == today:
+    if last_solar < 0.5 or c.solar_production_kw >= 0.3 or _already_alerted(state, "solar_stopped_date", today):
         return None
-    state["solar_stopped_date"] = today
+    _mark_alerted(state, "solar_stopped_date", today)
     logger.info("Solar stopped alert sent for %s (%.2f→%.2f kW)", today, last_solar, c.solar_production_kw)
     return (
         f"🔴 <b>FranklinWH: Solar dropped mid-day — possible issue</b>\n"
@@ -1168,9 +1180,9 @@ def _alert_drain_target_reached(
     morning_end = now.replace(hour=11, minute=0, second=0, microsecond=0)
     if not (sunrise <= now < morning_end) or c.battery_soc_pct > _DRAIN_TARGET_SOC_PCT:
         return None
-    if state.get("drain_target_alerted_date") == today:
+    if _already_alerted(state, "drain_target_alerted_date", today):
         return None
-    state["drain_target_alerted_date"] = today
+    _mark_alerted(state, "drain_target_alerted_date", today)
 
     solar_str = ""
     sunny = None
@@ -1314,7 +1326,7 @@ def _alert_cloudy_eb_target(
     rather than a general habit-detection feature; revisit if other
     days/appliances turn out to need the same treatment.
     """
-    if now.hour not in (7, 8) or state.get("cloudy_eb_alert_date") == today:
+    if now.hour not in (7, 8) or _already_alerted(state, "cloudy_eb_alert_date", today):
         return None
     soc = c.battery_soc_pct
     calc = _compute_eb_target(now, soc, cfg, outlook, store, state)
@@ -1346,7 +1358,7 @@ def _alert_cloudy_eb_target(
         if secondary_switch is not None:
             timing_str += f" ({secondary_switch_label.capitalize()}: {secondary_switch}.)"
 
-    state["cloudy_eb_alert_date"] = today
+    _mark_alerted(state, "cloudy_eb_alert_date", today)
     logger.info(
         "Cloudy EB target alert sent for %s: soc=%.0f%% target_med=%.0f%% target_p75=%.0f%% "
         "dryer_day=%s remaining_solar=%.1fkWh load_med=%.1fkWh load_p75=%.1fkWh "
@@ -1371,9 +1383,9 @@ def _alert_low_noon_soc(
     in_window = now.hour in (11, 12)
     if not in_window or c.battery_soc_pct >= 30.0 or c.solar_production_kw <= 0.5:
         return None
-    if state.get("low_noon_soc_date") == today:
+    if _already_alerted(state, "low_noon_soc_date", today):
         return None
-    state["low_noon_soc_date"] = today
+    _mark_alerted(state, "low_noon_soc_date", today)
     logger.info("Low noon SoC alert sent for %s (%.0f%%)", today, c.battery_soc_pct)
     cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
     sundown_str = _sundown_projection_line(state, now, c, cap, outlook, usage_forecast, store)
@@ -1403,7 +1415,7 @@ def _alert_export_arbitrage(
     # the export hour, once solar has had a chance to fill the battery. Window
     # extends to 3 pm to catch SoC crossing 85% late (e.g. cloudy morning that
     # clears by early afternoon) — still once-per-day gated.
-    if now.hour not in (11, 12, 13, 14, 15) or state.get("export_arb_date") == today:
+    if now.hour not in (11, 12, 13, 14, 15) or _already_alerted(state, "export_arb_date", today):
         return None
 
     soc = c.battery_soc_pct
@@ -1436,7 +1448,7 @@ def _alert_export_arbitrage(
         # real flat rate (tou._NEM3_DEFAULT_EXPORT_RATE).
         return None
     hour_label = datetime(now.year, now.month, now.day, peak_hour).strftime("%-I %p")
-    state["export_arb_date"] = today
+    _mark_alerted(state, "export_arb_date", today)
     logger.info("Export arbitrage alert: %.1f kWh @ $%.3f = $%.2f at %s",
                 exportable_kwh, peak_rate, credit, hour_label)
     return (
@@ -1602,7 +1614,7 @@ def _alert_eod_digest(
     state: dict, today: str, now: datetime, stats, cfg: Config,
     outlook, usage_forecast, store=None,
 ) -> str | None:
-    if now.hour not in (21, 22) or state.get("eod_digest_date") == today:
+    if now.hour not in (21, 22) or _already_alerted(state, "eod_digest_date", today):
         return None
 
     t       = stats.totals
@@ -1837,7 +1849,7 @@ def _alert_eod_digest(
                 }
                 state["savings_cumulative"] = _cum
 
-    state["eod_digest_date"] = today
+    _mark_alerted(state, "eod_digest_date", today)
     logger.info("End-of-day digest sent for %s", today)
     return (
         f"📊 <b>FranklinWH Daily Summary — {now.strftime('%a %b %-d')}</b>\n"
@@ -1856,7 +1868,7 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
     """Sunday evening: TOU-weighted import/export cost + peak savings for the week."""
     if store is None or now.weekday() != 6 or now.hour not in (21, 22):
         return None
-    if state.get("weekly_summary_sent") == today:
+    if _already_alerted(state, "weekly_summary_sent", today):
         return None
 
     week_end   = now.date()
@@ -1928,7 +1940,7 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
                 since_note   = ""
                 if first_date:
                     db_start    = datetime.strptime(first_date, "%Y-%m-%d")
-                    install_str = getattr(cfg, "install_date", "") or state.get("install_date") or ""
+                    install_str = getattr(cfg, "install_date", "") or ""
                     install_est = None
                     if install_str:
                         try:
@@ -1985,7 +1997,7 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
     if rates_are_stale():
         stale_note = "\n⚠️ TOU rates may be outdated (>180 days) — check tou.py."
 
-    state["weekly_summary_sent"] = today
+    _mark_alerted(state, "weekly_summary_sent", today)
     logger.info("Weekly TOU summary sent for week ending %s", today)
     return (
         f"📊 FranklinWH Weekly Summary — {week_label}\n\n"
@@ -2013,7 +2025,7 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
     # rather than a hardcoded 19th — see tou.cycle_bounds.
     start_day = getattr(cfg, "billing_cycle_start_day", 20)
     cycle_start, cycle_end = cycle_bounds(now.date(), start_day)
-    if now.date() != cycle_end or state.get("monthly_summary_date") == today:
+    if now.date() != cycle_end or _already_alerted(state, "monthly_summary_date", today):
         return None
 
     prev_start, prev_end = cycle_bounds(cycle_start - timedelta(days=1), start_day)
@@ -2148,7 +2160,7 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
     except (ValueError, AttributeError):
         pass
 
-    state["monthly_summary_date"] = today
+    _mark_alerted(state, "monthly_summary_date", today)
     logger.info("Billing-cycle summary sent for %s → %s", cycle_start, cycle_end)
     return (
         f"📅 FranklinWH Billing Cycle — {cur_label}\n"
@@ -2201,7 +2213,7 @@ def _alert_rate_plan_optimality(state: dict, today: str, now: datetime, store) -
     if len(rows) < 100:
         return None  # not enough data for a meaningful 60-day comparison yet
 
-    state["rate_plan_check_date"] = today
+    _mark_alerted(state, "rate_plan_check_date", today)
     cmp = compare_rate_plans(integrate_intervals(rows))
     if cmp.days < 30:
         return None  # sparse data even though rows passed the count gate — skip a noisy verdict
@@ -2245,9 +2257,9 @@ def _conservation_advice(soc: float, load_kw: float, bat_cap: float) -> str:
 
 
 def _alert_grid_down(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
-    if c.grid_status != "down" or state.get("grid_down_alerted_date") == today:
+    if c.grid_status != "down" or _already_alerted(state, "grid_down_alerted_date", today):
         return None
-    state["grid_down_alerted_date"] = today
+    _mark_alerted(state, "grid_down_alerted_date", today)
     state["grid_down_start"]        = now.isoformat()
     state["grid_down_soc"]          = c.battery_soc_pct
     logger.info("Grid-down alert sent for %s", today)
@@ -2350,7 +2362,7 @@ def _alert_fast_drain(
                 drain_rate = (prev_soc - c.battery_soc_pct) / elapsed_h
                 cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
                 if drain_rate >= 8.0 and c.battery_soc_pct < 35.0 and state.get("fast_drain_alerted_date") != today:
-                    state["fast_drain_alerted_date"] = today
+                    _mark_alerted(state, "fast_drain_alerted_date", today)
                     state.pop("unusual_drain_streak", None)
                     logger.info("Fast drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
                     _tte_fd = _time_to_pct(c.battery_soc_pct, 0.0, cap, c.battery_use_kw)
@@ -2369,7 +2381,7 @@ def _alert_fast_drain(
                     streak = state.get("unusual_drain_streak", 0) + 1
                     state["unusual_drain_streak"] = streak
                     if streak >= 2 and state.get("unusual_drain_alerted_date") != today:
-                        state["unusual_drain_alerted_date"] = today
+                        _mark_alerted(state, "unusual_drain_alerted_date", today)
                         logger.info("Unusual drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
                         sundown_str = _sundown_projection_line(state, now, c, cap, outlook, usage_forecast, store)
                         body = (
@@ -2393,14 +2405,14 @@ def _alert_not_charging(state: dict, today: str, now: datetime, c) -> str | None
         return None
     if c.solar_production_kw <= 1.5 or c.battery_soc_pct >= 80.0 or c.battery_use_kw <= -0.2:
         return None
-    if state.get("not_charging_date") == today:
+    if _already_alerted(state, "not_charging_date", today):
         return None
     # Suppress when home load absorbs most of solar — EV charging or heavy AC
     # explains why battery isn't getting much; this isn't a fault worth alerting.
     solar_surplus_kw = c.solar_production_kw - c.home_load_kw
     if solar_surplus_kw < 0.8:
         return None
-    state["not_charging_date"] = today
+    _mark_alerted(state, "not_charging_date", today)
     logger.info("Not-charging alert sent for %s (solar=%.2f kW, load=%.2f kW, batt=%.2f kW)", today, c.solar_production_kw, c.home_load_kw, c.battery_use_kw)
     return (
         f"⚠️ <b>FranklinWH: Battery not charging despite strong solar</b>\n"
@@ -2440,7 +2452,7 @@ def _alert_prediction_drift(state: dict, today: str, now: datetime) -> str | Non
     if 0.90 <= mean <= 1.10:
         return None
 
-    state["prediction_drift_alert_date"] = today
+    _mark_alerted(state, "prediction_drift_alert_date", today)
     pct = (mean - 1.0) * 100
     direction = "low" if mean > 1.0 else "high"
     logger.info("Prediction drift alert: 14-day mean PR=%.3f (%d days)", mean, len(ratios))
@@ -2471,7 +2483,7 @@ _PR_BIAS_FIX_DATE = "2026-08-24"
 def _alert_solar_degradation(state: dict, today: str, now: datetime) -> str | None:
     """Morning check: 7-day rolling PR median drops >5% vs 30-day baseline → possible degradation."""
     week_key = now.strftime("%G-W%V")  # ISO year-week, e.g. 2026-W23
-    if now.hour not in (8, 9) or state.get("solar_degradation_alerted_week") == week_key:
+    if now.hour not in (8, 9) or _already_alerted(state, "solar_degradation_alerted_week", week_key):
         return None
 
     cutoff_30 = max((now - timedelta(days=30)).strftime("%Y-%m-%d"), _PR_BIAS_FIX_DATE)
@@ -2506,7 +2518,7 @@ def _alert_solar_degradation(state: dict, today: str, now: datetime) -> str | No
         return None
 
     drop_pct = (baseline - recent) / baseline * 100
-    state["solar_degradation_alerted_week"] = week_key
+    _mark_alerted(state, "solar_degradation_alerted_week", week_key)
 
     # Translate the % drop into an estimated $/month cost — a raw percentage
     # doesn't tell a homeowner whether to bother investigating; a dollar
@@ -2536,7 +2548,7 @@ def _alert_solar_degradation(state: dict, today: str, now: datetime) -> str | No
     else:
         streak = 1
     state["solar_degradation_streak"]      = streak
-    state["solar_degradation_streak_week"] = week_key
+    _mark_alerted(state, "solar_degradation_streak_week", week_key)
 
     logger.info("Solar degradation alert: baseline PR=%.3f recent PR=%.3f drop=%.1f%% streak=%d",
                 baseline, recent, drop_pct, streak)
@@ -2596,7 +2608,7 @@ def _alert_baseline_load_drift(state: dict, today: str, now: datetime, store, cf
     if now.hour not in (8, 9) or store is None:
         return None
     week_key = now.strftime("%G-W%V")
-    if state.get("baseline_load_drift_alerted_week") == week_key:
+    if _already_alerted(state, "baseline_load_drift_alerted_week", week_key):
         return None
 
     today_str    = now.date().strftime("%Y-%m-%d")
@@ -2637,7 +2649,7 @@ def _alert_baseline_load_drift(state: dict, today: str, now: datetime, store, cf
     sop_rate = rate_at(now.replace(hour=2, minute=0, second=0, microsecond=0))
     monthly_floor = delta * 24 * 30 * sop_rate
 
-    state["baseline_load_drift_alerted_week"] = week_key
+    _mark_alerted(state, "baseline_load_drift_alerted_week", week_key)
     logger.info("Baseline load drift alert: %.3f -> %.3f kW (+%.0f%%)",
                 base_med, recent_med, (recent_med / base_med - 1) * 100)
     return (
@@ -2660,7 +2672,7 @@ def _alert_capacity_fade(state: dict, today: str, now: datetime, store) -> str |
     if now.hour not in (8, 9) or store is None:
         return None
     week_key = now.strftime("%G-W%V")
-    if state.get("capacity_fade_alerted_week") == week_key:
+    if _already_alerted(state, "capacity_fade_alerted_week", week_key):
         return None
 
     today_str    = now.date().strftime("%Y-%m-%d")
@@ -2681,7 +2693,7 @@ def _alert_capacity_fade(state: dict, today: str, now: datetime, store) -> str |
     if fade_pct < 8.0:
         return None
 
-    state["capacity_fade_alerted_week"] = week_key
+    _mark_alerted(state, "capacity_fade_alerted_week", week_key)
     logger.info("Capacity-fade alert: recent %.1f kWh vs baseline %.1f kWh (%.0f%%)",
                 recent_cap, base_cap, fade_pct)
 
@@ -2716,7 +2728,7 @@ def _alert_round_trip_efficiency(state: dict, today: str, now: datetime, store) 
     if now.hour not in (8, 9) or store is None:
         return None
     week_key = now.strftime("%G-W%V")
-    if state.get("rt_efficiency_alerted_week") == week_key:
+    if _already_alerted(state, "rt_efficiency_alerted_week", week_key):
         return None
 
     today_str    = now.date().strftime("%Y-%m-%d")
@@ -2737,7 +2749,7 @@ def _alert_round_trip_efficiency(state: dict, today: str, now: datetime, store) 
     if drop_pts < 8.0:
         return None
 
-    state["rt_efficiency_alerted_week"] = week_key
+    _mark_alerted(state, "rt_efficiency_alerted_week", week_key)
     logger.info("Round-trip efficiency alert: recent %.0f%% vs baseline %.0f%% (-%.0fpt)",
                 recent_eff * 100, base_eff * 100, drop_pts)
 
@@ -2754,7 +2766,7 @@ def _alert_round_trip_efficiency(state: dict, today: str, now: datetime, store) 
 def _alert_peak_streak(state: dict, today: str, now: datetime) -> str | None:
     """Evening check: last 3 consecutive days all <50% peak coverage → battery under-sized or depleting early."""
     week_key = now.strftime("%G-W%V")  # ISO year-week, e.g. 2026-W23
-    if now.hour not in (21, 22) or state.get("peak_streak_alerted_week") == week_key:
+    if now.hour not in (21, 22) or _already_alerted(state, "peak_streak_alerted_week", week_key):
         return None
 
     low_days = []
@@ -2769,7 +2781,7 @@ def _alert_peak_streak(state: dict, today: str, now: datetime) -> str | None:
         low_days.append((date_str, pct))
         check_date -= timedelta(days=1)
 
-    state["peak_streak_alerted_week"] = week_key
+    _mark_alerted(state, "peak_streak_alerted_week", week_key)
     logger.info("Peak-coverage streak alert: 3 consecutive days under 50%%")
     lines = "\n".join(f"  {d}: {p:.0f}%" for d, p in reversed(low_days))
     return (
@@ -2786,7 +2798,7 @@ def _alert_peak_streak_good(state: dict, today: str, now: datetime) -> str | Non
     peak_cov_{date} state that's already tracked daily by _alert_eod_digest.
     """
     week_key = now.strftime("%G-W%V")
-    if now.hour not in (21, 22) or state.get("peak_streak_good_alerted_week") == week_key:
+    if now.hour not in (21, 22) or _already_alerted(state, "peak_streak_good_alerted_week", week_key):
         return None
 
     good_days = []
@@ -2799,7 +2811,7 @@ def _alert_peak_streak_good(state: dict, today: str, now: datetime) -> str | Non
         good_days.append(date_str)
         check_date -= timedelta(days=1)
 
-    state["peak_streak_good_alerted_week"] = week_key
+    _mark_alerted(state, "peak_streak_good_alerted_week", week_key)
     logger.info("Peak-coverage good streak alert: 7 consecutive days >=95%%")
     return (
         "🟢 <b>FranklinWH: 7 days straight covering peak</b>\n"
@@ -2819,7 +2831,7 @@ def _alert_self_sufficiency_streak(state: dict, today: str, now: datetime, store
     key, since attribution isn't cached in state the way peak_cov_ is.
     """
     week_key = now.strftime("%G-W%V")
-    if now.hour not in (21, 22) or state.get("self_sufficiency_streak_alerted_week") == week_key:
+    if now.hour not in (21, 22) or _already_alerted(state, "self_sufficiency_streak_alerted_week", week_key):
         return None
     if store is None:
         return None
@@ -2842,7 +2854,7 @@ def _alert_self_sufficiency_streak(state: dict, today: str, now: datetime, store
             return None  # streak broken
         check_date -= timedelta(days=1)
 
-    state["self_sufficiency_streak_alerted_week"] = week_key
+    _mark_alerted(state, "self_sufficiency_streak_alerted_week", week_key)
     logger.info("Self-sufficiency good streak alert: 7 consecutive days >=%.0f%%", _SELF_SUFF_STREAK_THRESHOLD)
     return (
         "🟢 <b>FranklinWH: 7 days straight ≥90% self-sufficient</b>\n"
@@ -2857,7 +2869,7 @@ def _alert_bill_projection(
     """5th of each month: project full-cycle bill from partial billing cycle data."""
     if store is None or now.day != 5 or now.hour not in (8, 9):
         return None
-    if state.get("bill_projection_date") == today:
+    if _already_alerted(state, "bill_projection_date", today):
         return None
 
     cycle_start, cycle_end = cycle_bounds(
@@ -2890,7 +2902,7 @@ def _alert_bill_projection(
     projected_base = base_service_cost(cycle_days)
     cycle_label    = f"{cycle_start.strftime('%b %-d')} – {now.date().strftime('%b %-d')}"
 
-    state["bill_projection_date"] = today
+    _mark_alerted(state, "bill_projection_date", today)
     logger.info("Bill projection alert: %d days, net $%.2f/day → $%.2f projected",
                 days_so_far, daily_net, projected_net)
     return (
@@ -2973,7 +2985,7 @@ def _alert_heat_wave_prep(state: dict, today: str, now: datetime, c, outlook) ->
     """Evening alert when tomorrow's forecast exceeds 95°F — AC load spike risk."""
     if now.hour not in (21, 22) or outlook is None:
         return None
-    if state.get("heat_wave_prep_date") == today:
+    if _already_alerted(state, "heat_wave_prep_date", today):
         return None
     tomorrow = (now + timedelta(days=1)).date()
     tmrw_hours = [h for h in outlook.hours if h.time.date() == tomorrow]
@@ -2983,7 +2995,7 @@ def _alert_heat_wave_prep(state: dict, today: str, now: datetime, c, outlook) ->
     if max_temp_c < 35.0:  # 95°F
         return None
     max_temp_f = max_temp_c * 9 / 5 + 32
-    state["heat_wave_prep_date"] = today
+    _mark_alerted(state, "heat_wave_prep_date", today)
     logger.info("Heat wave prep alert: tomorrow max %.1f°C (%.0f°F)", max_temp_c, max_temp_f)
     soc = c.battery_soc_pct
     action = (
@@ -3012,9 +3024,9 @@ def _alert_ev_charge_window(
     """
     if not getattr(cfg, "ev_charging", False):
         return None
-    if now.hour not in (20, 21) or state.get("ev_charge_window_date") == today:
+    if now.hour not in (20, 21) or _already_alerted(state, "ev_charge_window_date", today):
         return None
-    state["ev_charge_window_date"] = today
+    _mark_alerted(state, "ev_charge_window_date", today)
     kwh = getattr(cfg, "ev_kwh_per_session", 0.0) or 0.0
 
     sop = rate_at(now.replace(hour=1, minute=0, second=0, microsecond=0))
@@ -3055,7 +3067,7 @@ def _alert_ev_still_charging(
     """
     if not getattr(cfg, "ev_charging", False) or store is None:
         return None
-    if state.get("ev_still_charging_date") == today:
+    if _already_alerted(state, "ev_still_charging_date", today):
         return None
     if period_at(now) == TouPeriod.SUPER_OFF_PEAK:
         return None
@@ -3078,7 +3090,7 @@ def _alert_ev_still_charging(
     if elevated < len(rows) * 0.5:
         return None  # not sustained -- probably not an EV charging session
 
-    state["ev_still_charging_date"] = today
+    _mark_alerted(state, "ev_still_charging_date", today)
     new_period  = period_at(now)
     new_rate    = rate_at(now)
     sop_rate    = rate_at(now - timedelta(minutes=10))
@@ -3096,7 +3108,7 @@ def _alert_storm_prep(state: dict, today: str, now: datetime, c, cfg: Config) ->
     """Evening: if an NWS storm/wind/flood alert is active and SoC < 90%, advise
     charging to 100% tonight so the battery is ready for a possible outage.
     """
-    if now.hour not in (21, 22) or state.get("storm_prep_date") == today:
+    if now.hour not in (21, 22) or _already_alerted(state, "storm_prep_date", today):
         return None
     if c.battery_soc_pct >= 90.0:
         return None
@@ -3106,7 +3118,7 @@ def _alert_storm_prep(state: dict, today: str, now: datetime, c, cfg: Config) ->
         events = []
     if not events:
         return None
-    state["storm_prep_date"] = today
+    _mark_alerted(state, "storm_prep_date", today)
     logger.info("Storm prep alert: %s", ", ".join(events))
     return (
         f"⛈️ <b>FranklinWH: Weather alert — {events[0]}</b>\n"
@@ -3126,9 +3138,9 @@ def _alert_area_power_outage(state: dict, today: str, now: datetime, c, cfg: Con
         source      = data.get("source", "CMR News")
     except Exception:
         return None
-    if state.get("cmr_outage_alerted_date") == today:
+    if _already_alerted(state, "cmr_outage_alerted_date", today):
         return None
-    state["cmr_outage_alerted_date"] = today
+    _mark_alerted(state, "cmr_outage_alerted_date", today)
     logger.info("CMR area power outage alert bridged from %s", source)
     ts = detected_at[:16].replace("T", " ")
     # If we're actually on battery, add conservation runtime guidance.
@@ -3156,7 +3168,7 @@ def _alert_multiday_cloudy_precharge(
     if now.hour not in (7, 8, 9):
         return None
     week_key = now.strftime("%G-W%V")
-    if state.get("multiday_cloudy_week") == week_key:
+    if _already_alerted(state, "multiday_cloudy_week", week_key):
         return None
     if outlook is None:
         return None
@@ -3194,7 +3206,7 @@ def _alert_multiday_cloudy_precharge(
         return None
 
     sop = rate_at(now.replace(hour=1, minute=0, second=0, microsecond=0))
-    state["multiday_cloudy_week"] = week_key
+    _mark_alerted(state, "multiday_cloudy_week", week_key)
     logger.info("Multi-day cloudy pre-charge alert: 2-day solar=%.1f kWh, SoC=%.0f%%",
                 two_day_solar, soc)
     return (
@@ -3364,7 +3376,7 @@ def _alert_solar_back_to_baseline(
         return None  # still degraded or not enough recovery
 
     week_key = now.strftime("%G-W%V")
-    state["solar_recovery_alerted_week"] = week_key
+    _mark_alerted(state, "solar_recovery_alerted_week", week_key)
     logger.info("Solar back-to-baseline: recent PR=%.3f baseline=%.3f", recent, baseline)
     return (
         f"✅ <b>FranklinWH: Solar output back to normal</b>\n"
@@ -3381,7 +3393,7 @@ def _alert_tou_rates_stale(state: dict, today: str, now: datetime) -> str | None
         return None
     if state.get("tou_stale_alerted"):
         return None
-    state["tou_stale_alerted"] = today
+    _mark_alerted(state, "tou_stale_alerted", today)
     logger.info("TOU rates stale alert sent for %s", today)
     return (
         "⚠️ <b>FranklinWH: TOU rates may be outdated</b>\n"
@@ -3493,7 +3505,16 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
         to_send: list[tuple[str, bool, str]] = []
         for _name, _fn in _candidates:
             if _alert_enabled(cfg, _name, state, now):
-                _body = _fn()
+                # Isolate each candidate: a bug in one alert (bad state,
+                # a None field slipping through, etc.) used to raise out
+                # of this whole loop, silently killing every other alert
+                # that cycle AND getting mis-recorded by the caller as a
+                # FranklinWH poll/connectivity error instead of a code bug.
+                try:
+                    _body = _fn()
+                except Exception:
+                    logger.exception("Alert candidate '%s' raised; skipping it this cycle", _name)
+                    continue
                 if _body:
                     to_send.append((_body, _name in _URGENT_ALERTS, _name))
         _save_peak_state(out, state)

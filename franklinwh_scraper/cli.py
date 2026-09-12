@@ -31,6 +31,7 @@ from .alerts import (
     _load_peak_state,
     _ping_healthcheck,
     _save_peak_state,
+    _send_alert,
     _state_lock,
 )
 from .chatbot import TelegramChatBot
@@ -201,14 +202,7 @@ def _check_crash_loop(out: Path, cfg: Config) -> None:
         f"{len(recent)} process starts in the last {_CRASH_LOOP_WINDOW_MIN} min — "
         f"something is dying immediately on startup. Check advisor.log."
     )
-    if cfg.telegram_bot_token and cfg.telegram_chat_id:
-        notify_telegram(msg, cfg.telegram_bot_token, cfg.telegram_chat_id)
-    if cfg.smtp_host and cfg.email_to:
-        notify_email(msg, cfg)
-    if cfg.webhook_url:
-        notify_webhook(msg, True, cfg)
-    if getattr(cfg, "ntfy_topic", ""):
-        notify_ntfy(msg, cfg)
+    _send_alert(msg, cfg, urgent=True)
     try:
         marker.write_text(now.isoformat())
     except OSError:
@@ -1758,14 +1752,7 @@ def cmd_advise(
                 if _lic.state == "invalid":
                     _err(f"License check failed: {_lic.message}")
                     _lic_msg = f"🔒 FranklinWH Advisor stopped: {_lic.message}"
-                    if cfg.telegram_bot_token and cfg.telegram_chat_id:
-                        notify_telegram(_lic_msg, cfg.telegram_bot_token, cfg.telegram_chat_id)
-                    if cfg.smtp_host and cfg.email_to:
-                        notify_email(_lic_msg, cfg)
-                    if cfg.webhook_url:
-                        notify_webhook(_lic_msg, True, cfg)
-                    if getattr(cfg, "ntfy_topic", ""):
-                        notify_ntfy(_lic_msg, cfg)
+                    _send_alert(_lic_msg, cfg, urgent=True)
                     break
                 if _lic.state == "grace":
                     _today_str = datetime.now().strftime("%Y-%m-%d")
@@ -1773,17 +1760,7 @@ def cmd_advise(
                         _lic_warn_date = _today_str
                         _warn(_lic.message)
                         _lic_msg = f"🔒 {_lic.message}"
-                        # License grace warnings previously only reached Telegram,
-                        # despite email/webhook being fully supported channels
-                        # elsewhere (same gap as the mode-change notification fix).
-                        if cfg.telegram_bot_token and cfg.telegram_chat_id:
-                            notify_telegram(_lic_msg, cfg.telegram_bot_token, cfg.telegram_chat_id)
-                        if cfg.smtp_host and cfg.email_to:
-                            notify_email(_lic_msg, cfg)
-                        if cfg.webhook_url:
-                            notify_webhook(_lic_msg, False, cfg)
-                        if getattr(cfg, "ntfy_topic", ""):
-                            notify_ntfy(_lic_msg, cfg)
+                        _send_alert(_lic_msg, cfg, urgent=False)
             try:
                 stats = client.get_stats(gateway)
                 _last_stats = stats
@@ -1900,18 +1877,8 @@ def cmd_advise(
                 _save_last_mode(outdir, last_mode)
 
                 if _consec_errors >= _ERROR_THRESHOLD:
-                    # Channel parity with the license-grace-warning block
-                    # above (~line 1540) — that one already fans out to
-                    # Telegram+email+webhook; this one only had Telegram.
                     _recovered_msg = "✅ FranklinWH Advisor: poll errors resolved — alerts resuming."
-                    if cfg.telegram_bot_token and cfg.telegram_chat_id:
-                        notify_telegram(_recovered_msg, cfg.telegram_bot_token, cfg.telegram_chat_id)
-                    if cfg.smtp_host and cfg.email_to:
-                        notify_email(_recovered_msg, cfg)
-                    if cfg.webhook_url:
-                        notify_webhook(_recovered_msg, False, cfg)
-                    if getattr(cfg, "ntfy_topic", ""):
-                        notify_ntfy(_recovered_msg, cfg)
+                    _send_alert(_recovered_msg, cfg, urgent=False)
                 _consec_errors = 0
                 _write_health_marker(outdir, 0, None)
 
@@ -1949,14 +1916,7 @@ def cmd_advise(
                         f"Error: {e}\n"
                         f"Alerts paused until fixed. Check advisor log for details."
                     )
-                    if cfg.telegram_bot_token and cfg.telegram_chat_id:
-                        notify_telegram(_err_msg, cfg.telegram_bot_token, cfg.telegram_chat_id)
-                    if cfg.smtp_host and cfg.email_to:
-                        notify_email(_err_msg, cfg)
-                    if cfg.webhook_url:
-                        notify_webhook(_err_msg, True, cfg)
-                    if getattr(cfg, "ntfy_topic", ""):
-                        notify_ntfy(_err_msg, cfg)
+                    _send_alert(_err_msg, cfg, urgent=True)
 
             # Unconditional — fires whether this cycle's gateway call
             # succeeded or not. Was inside the try block's success path
@@ -2110,8 +2070,7 @@ def cmd_savings(ctx: click.Context, days: int, out: str | None) -> None:
     _info("(it is incurred either way, so counting it would inflate savings).")
     # Export credit is a single flat real rate now (see
     # tou._NEM3_DEFAULT_EXPORT_RATE's docstring) — no more boosted-vs-floor
-    # distinction to caveat, so export_days_at_assumed_rate (still populated,
-    # now always == every export day) no longer needs its own footnote.
+    # distinction to caveat here.
 
 
 @grp_account.command("ev-status")

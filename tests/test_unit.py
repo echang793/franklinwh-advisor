@@ -412,6 +412,31 @@ def test_get_stats_retries_through_transient_empty_runtime_data(monkeypatch):
     assert stats.current.solar_production_kw == 1.5
 
 
+def test_get_stats_treats_explicit_null_field_as_zero(monkeypatch):
+    """A field can be present in runtimeData but explicitly null (e.g.
+    "p_sun": null) rather than missing - dict.get(key, 0.0) only falls back
+    on a missing key, so a null value used to propagate straight through as
+    None and crash the first alerts.py comparison with TypeError instead of
+    degrading to 0.0 like a missing field does."""
+    from franklinwh_scraper.account import AccountClient
+
+    client = AccountClient("a@b.c", "pw")
+    data = {
+        "p_sun": None, "p_gen": None, "genStat": None, "p_fhp": None,
+        "p_uti": None, "p_load": None, "soc": None,
+        "kwh_fhp_chg": None, "kwh_fhp_di": None, "kwh_uti_in": None,
+        "soOutGrid": None, "kwhGridLoad": None, "kwh_sun": None,
+        "kwh_gen": None, "kwhFhpLoad": None, "kwhSolarLoad": None,
+    }
+    monkeypatch.setattr(client, "get_composite_info", lambda gateway: {"runtimeData": data})
+    stats = client.get_stats("gw1")
+    assert stats.current.solar_production_kw == 0.0
+    assert stats.current.generator_enabled is False
+    assert stats.current.battery_soc_pct == 0.0
+    assert stats.totals.grid_load_kwh == 0.0
+    assert stats.totals.home_use_kwh == 0.0
+
+
 def test_precharge_plan():
     # dim tomorrow + low SoC + morning → recommend
     out = alerts._precharge_plan(datetime(2026, 1, 15, 10), 40.0, 2.0, 13.6)
@@ -1580,7 +1605,7 @@ def test_check_crash_loop_fires_after_threshold_starts(tmp_path, monkeypatch):
     from franklinwh_scraper import cli
 
     sent = []
-    monkeypatch.setattr(cli, "notify_telegram", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(cli, "_send_alert", lambda body, cfg, urgent=False, alert_name=None: sent.append(body))
     cfg = Config(telegram_bot_token="t", telegram_chat_id="c")
 
     # 4 starts within the 10-min window (fake clock via pre-seeded file).
@@ -1590,7 +1615,7 @@ def test_check_crash_loop_fires_after_threshold_starts(tmp_path, monkeypatch):
 
     cli._check_crash_loop(tmp_path, cfg)
     assert len(sent) == 1
-    assert "crash-looping" in sent[0][0]
+    assert "crash-looping" in sent[0]
     assert (tmp_path / cli._CRASH_LOOP_ALERT_MARKER).exists()
 
 
@@ -1598,7 +1623,7 @@ def test_check_crash_loop_silent_under_threshold(tmp_path, monkeypatch):
     from franklinwh_scraper import cli
 
     sent = []
-    monkeypatch.setattr(cli, "notify_telegram", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(cli, "_send_alert", lambda body, cfg, urgent=False, alert_name=None: sent.append(body))
     cfg = Config(telegram_bot_token="t", telegram_chat_id="c")
 
     now = datetime.now()
@@ -2457,6 +2482,43 @@ def test_urgent_alerts_excludes_the_all_clear():
     assert alerts._URGENT_ALERTS <= alerts._ALWAYS_ON_ALERTS
 
 
+def test_check_peak_alerts_survives_one_candidate_raising(tmp_path, monkeypatch):
+    """One buggy alert (bad state, a None field slipping through, etc.) must
+    not kill every other alert that cycle. Before this fix, an unguarded
+    _fn() call in the dispatch loop let any single candidate's exception
+    propagate out of the whole loop - silently dropping every other alert
+    and getting the failure mis-recorded upstream as a poll/connectivity
+    error instead of a code bug."""
+    import types
+    sent = []
+    monkeypatch.setattr(alerts, "_send_alert",
+                        lambda body, cfg, urgent=False, alert_name=None: sent.append((body, alert_name)))
+    monkeypatch.setattr(alerts, "_alert_morning_preview",
+                        lambda *a, **kw: (_ for _ in ()).throw(ValueError("boom")))
+
+    c = types.SimpleNamespace(
+        battery_soc_pct=80.0, home_load_kw=1.0, solar_production_kw=0.0,
+        battery_use_kw=1.0, grid_use_kw=0.0, grid_status="down",
+        generator_production_kw=0.0, generator_enabled=False,
+    )
+    stats = types.SimpleNamespace(
+        current=c,
+        totals=types.SimpleNamespace(
+            solar_kwh=0.0, battery_charge_kwh=0.0, battery_discharge_kwh=0.0,
+            grid_load_kwh=0.0, grid_export_kwh=0.0, home_use_kwh=0.0,
+            grid_import_kwh=0.0, generator_kwh=0.0,
+            battery_load_kwh=0.0, solar_load_kwh=0.0,
+        ),
+    )
+    cfg = Config(telegram_bot_token="t", telegram_chat_id="c")
+    # Must not raise, despite morning_preview blowing up above.
+    alerts._check_peak_alerts(stats, cfg, tmp_path)
+
+    names = [name for _, name in sent]
+    assert "grid_down" in names, f"grid_down must still fire; got {names}"
+    assert "morning_preview" not in names
+
+
 def test_grid_down_dispatches_as_urgent(tmp_path, monkeypatch):
     """Regression: _check_peak_alerts never passed `urgent` at all, so
     notify_webhook's urgent flag was dead and every alerts_log.jsonl entry
@@ -3143,7 +3205,7 @@ def test_advise_watch_loop_runs_one_cycle_without_crashing(tmp_path, monkeypatch
         ),
         totals=Totals(
             battery_charge_kwh=1.0, battery_discharge_kwh=0.0, grid_import_kwh=0.0,
-            grid_export_kwh=0.0, grid_load_kwh=0.0, solar_kwh=5.0, generator_kwh=0.0,
+            grid_export_kwh=0.0, grid_load_kwh=0.0, solar_kwh=5.0,
             home_use_kwh=4.0,
         ),
     )
@@ -3199,7 +3261,7 @@ def test_advise_outage_fallback_still_fetches_weather(tmp_path, monkeypatch):
                         home_load_kw=1.0, battery_soc_pct=60.0, grid_status="normal"),
         totals=Totals(battery_charge_kwh=1.0, battery_discharge_kwh=0.0, grid_import_kwh=0.0,
                      grid_export_kwh=0.0, grid_load_kwh=0.0, solar_kwh=5.0,
-                     generator_kwh=0.0, home_use_kwh=4.0),
+                     home_use_kwh=4.0),
     )
     call_count = {"n": 0}
 

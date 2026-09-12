@@ -147,12 +147,28 @@ class EvController:
         except (KeyError, TypeError, ValueError):
             return None
 
-    def _poll_vehicle(self, now: datetime) -> VehicleChargeState | None:
+    def _poll_vehicle(self, now: datetime, wake_if_asleep: bool = False) -> VehicleChargeState | None:
         try:
             v = self.client.get_charge_state()
         except VehicleAsleep:
-            self.state["consec_tesla_errors"] = 0
-            return None  # asleep car is not charging; nothing to control
+            if not wake_if_asleep:
+                self.state["consec_tesla_errors"] = 0
+                return None  # asleep car is not charging; nothing to control
+            # Worth the extra $0.02: overnight guaranteed-charge window or a
+            # sustained daytime surplus means we'd actually command something
+            # if the car answered. A plain get_charge_state poll never wakes
+            # it (wake costs 10x a poll) — without this, a car that fell
+            # asleep plugged in during either window just never got charged
+            # until something else (the Tesla app, a door unlock) woke it.
+            try:
+                self.client.wake()
+                v = self.client.get_charge_state()
+            except VehicleAsleep:
+                self.state["consec_tesla_errors"] = 0
+                return None  # still unreachable after waking; give up this tick
+            except (NotAuthorized, TeslaError) as e:
+                self._bump_error(now, str(e))
+                return None
         except (NotAuthorized, TeslaError) as e:
             self._bump_error(now, str(e))
             return None
@@ -379,7 +395,11 @@ class EvController:
         vehicle = cached
         if self._should_poll(now, surplus, budget):
             self.state["last_poll_iso"] = _now_iso(now)
-            vehicle = self._poll_vehicle(now) or cached
+            overnight = (period == tou.TouPeriod.SUPER_OFF_PEAK
+                        and now.hour < ev_policy._OVERNIGHT_END_HOUR)
+            wake_worthy = (overnight
+                          or self.state.get("high_surplus_ticks", 0) >= ev_policy._START_TICKS)
+            vehicle = self._poll_vehicle(now, wake_if_asleep=wake_worthy) or cached
 
         if vehicle is not None:
             self._detect_override(now, vehicle)
@@ -401,7 +421,7 @@ class EvController:
         inp = EvInputs(
             now=now, tou_period=period,
             solar_kw=c.solar_production_kw, home_load_kw=c.home_load_kw,
-            fwh_battery_soc=c.battery_soc_pct, fwh_battery_kw=c.battery_use_kw,
+            fwh_battery_soc=c.battery_soc_pct,
             vehicle=vehicle,
             at_home=vehicle is not None and self._at_home(vehicle, c.home_load_kw),
             session_active=self.state.get("session", "none") != "none",
