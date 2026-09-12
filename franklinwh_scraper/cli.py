@@ -61,6 +61,21 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
+def _escalate_watch_logging() -> None:
+    """Bump the root logger to at least INFO for the long-running watch loop.
+
+    The installed LaunchAgent runs `scrape.py start` with no -v, so this
+    production loop otherwise sits at the group's default WARNING level —
+    meaning almost none of the diagnostic trail (login events, calibration
+    updates, alert-sent confirmations, etc., all logger.info) ever reaches
+    advisor.log, making "why didn't alert X fire yesterday" nearly
+    undebuggable after the fact. Only escalates, never downgrades an
+    explicit -v/DEBUG.
+    """
+    if logging.getLogger().getEffectiveLevel() > logging.INFO:
+        logging.getLogger().setLevel(logging.INFO)
+
+
 def _ok(msg: str)   -> None: click.echo(click.style(f"  ✓  {msg}", fg="green"))
 def _warn(msg: str) -> None: click.echo(click.style(f"  ⚠  {msg}", fg="yellow"))
 def _err(msg: str)  -> None: click.echo(click.style(f"  ✗  {msg}", fg="red"))
@@ -1664,6 +1679,9 @@ def cmd_advise(
     log_path  = outdir / "advisor_log.jsonl"
     db_path   = outdir / "history.db"
     last_mode = _load_last_mode(outdir)   # persists across cron runs
+
+    if watch:
+        _escalate_watch_logging()
 
     if watch and not _acquire_pid_lock():
         raise click.ClickException(

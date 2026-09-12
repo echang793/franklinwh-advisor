@@ -1634,6 +1634,38 @@ def test_check_crash_loop_silent_under_threshold(tmp_path, monkeypatch):
     assert sent == []
 
 
+def test_escalate_watch_logging_raises_default_warning_to_info():
+    """The installed LaunchAgent runs with no -v, so the watch loop's
+    diagnostic trail (logger.info) otherwise never reaches advisor.log."""
+    import logging
+    from franklinwh_scraper import cli
+
+    root = logging.getLogger()
+    original = root.level
+    try:
+        root.setLevel(logging.WARNING)
+        cli._escalate_watch_logging()
+        assert root.getEffectiveLevel() == logging.INFO
+    finally:
+        root.setLevel(original)
+
+
+def test_escalate_watch_logging_never_downgrades_explicit_verbose():
+    """-v/--verbose asked for DEBUG; the watch-loop escalation must not
+    quietly downgrade that back down to INFO."""
+    import logging
+    from franklinwh_scraper import cli
+
+    root = logging.getLogger()
+    original = root.level
+    try:
+        root.setLevel(logging.DEBUG)
+        cli._escalate_watch_logging()
+        assert root.getEffectiveLevel() == logging.DEBUG
+    finally:
+        root.setLevel(original)
+
+
 def test_check_crash_loop_dedup_within_alert_gap(tmp_path, monkeypatch):
     """A second crash-loop check shortly after the first shouldn't re-alert
     even if starts keep accumulating past the threshold."""
