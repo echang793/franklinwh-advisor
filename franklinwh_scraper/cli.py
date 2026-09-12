@@ -130,17 +130,34 @@ def _save_last_mode(out: Path, mode: str) -> None:
     (out / ".last_recommendation.json").write_text(json.dumps({"mode": mode}))
 
 
-def _write_health_marker(out: Path, consec_errors: int, last_error: str | None) -> None:
+def _write_health_marker(out: Path, consec_errors: int, last_error: str | None,
+                         success: bool = False) -> None:
     """Persist the watch loop's own error-streak tracking so webapi.py's
     dashboard can show FranklinWH API outage status without needing to
     check advisor.log — the CLI already detects and reports this over
-    Telegram, this just makes the same signal visible on the dashboard."""
+    Telegram, this just makes the same signal visible on the dashboard.
+
+    `updated` is written every cycle regardless of outcome, so it only ever
+    answers "is this process alive" — not "did the FranklinWH API last
+    actually respond". `success=True` (only on the success path) bumps
+    `last_success` to now; a failing cycle carries the previous value
+    forward instead of leaving it stale-null, so the dashboard can tell
+    "last time the FranklinWH API actually answered" apart from "last poll
+    attempt", without a second file to cross-reference.
+    """
     try:
+        last_success = None
+        if not success:
+            try:
+                last_success = json.loads((out / ".health.json").read_text()).get("last_success")
+            except (OSError, json.JSONDecodeError):
+                pass
         out.mkdir(parents=True, exist_ok=True)
         (out / ".health.json").write_text(json.dumps({
             "consec_errors": consec_errors,
             "last_error": last_error,
             "updated": datetime.now().isoformat(),
+            "last_success": datetime.now().isoformat() if success else last_success,
         }))
     except OSError:
         pass
@@ -1898,7 +1915,7 @@ def cmd_advise(
                     _recovered_msg = "✅ FranklinWH Advisor: poll errors resolved — alerts resuming."
                     _send_alert(_recovered_msg, cfg, urgent=False)
                 _consec_errors = 0
-                _write_health_marker(outdir, 0, None)
+                _write_health_marker(outdir, 0, None, success=True)
 
             except Exception as e:
                 _consec_errors += 1

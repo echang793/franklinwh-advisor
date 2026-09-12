@@ -25,12 +25,14 @@ from fastapi.staticfiles import StaticFiles
 
 from .alerts import (
     _get_hourly_bias,
+    _get_no_ev_hourly_load,
     _get_performance_ratio,
     _get_system_peak_kw,
     _get_vpp_event,
     _GHI_CLOUDY_THRESHOLD,
     _load_peak_state,
     _next_sunrise_after,
+    _NO_EV_LOAD_MIN_SAMPLES,
     _predict_overnight_soc_flat,
     _PR_BIAS_FIX_DATE,
 )
@@ -700,8 +702,33 @@ def api_health():
     try:
         data = json.loads((_OUT / ".health.json").read_text())
     except (OSError, json.JSONDecodeError):
-        return {"consec_errors": 0, "last_error": None, "updated": None}
+        return {"consec_errors": 0, "last_error": None, "updated": None, "last_success": None}
     return data
+
+
+@app.get("/api/baseline-load", dependencies=_authed)
+def api_baseline_load():
+    """True household baseline load (fridge, standby, networking gear —
+    whatever's left running overnight) with EV charging nights excluded.
+
+    _classify_and_record_no_ev_night runs every morning and accumulates
+    real confirmed-no-EV-night samples per hour into peak-alert state, but
+    until now nothing ever read them back out except predict()'s optional
+    ground-truth override (_apply_no_ev_overrides) — this surfaces the same
+    data as its own trended dashboard view instead of only ever influencing
+    a forecast number silently in the background.
+    """
+    state = _load_peak_state(_OUT)
+    hourly = _get_no_ev_hourly_load(state)
+    hours = [
+        {
+            "hour": h,
+            "kw": round(hourly[h], 2) if h in hourly else None,
+            "samples": len(state.get(f"no_ev_load_h{h}", [])),
+        }
+        for h in range(24)
+    ]
+    return {"hours": hours, "min_samples": _NO_EV_LOAD_MIN_SAMPLES}
 
 
 app.mount("/", StaticFiles(directory=_STATIC, html=True), name="static")

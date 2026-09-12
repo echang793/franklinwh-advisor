@@ -1821,6 +1821,29 @@ def test_read_consec_errors_persists_across_process_restart(tmp_path):
     assert cli._read_consec_errors(tmp_path) == 0  # corrupt marker -> safe default
 
 
+def test_write_health_marker_last_success_only_bumps_on_success(tmp_path):
+    """`updated` writes every cycle regardless of outcome, so it only ever
+    answers 'is this process alive'. `last_success` must answer the
+    different question 'did the FranklinWH API last actually respond' —
+    bumping on a successful cycle, carried forward (not nulled) on a
+    failing one."""
+    import json as _json
+    from franklinwh_scraper import cli
+
+    cli._write_health_marker(tmp_path, 0, None, success=True)
+    first = _json.loads((tmp_path / ".health.json").read_text())
+    assert first["last_success"] is not None
+
+    cli._write_health_marker(tmp_path, 1, "boom", success=False)
+    second = _json.loads((tmp_path / ".health.json").read_text())
+    assert second["last_success"] == first["last_success"]  # carried forward, not nulled
+    assert second["last_error"] == "boom"
+
+    cli._write_health_marker(tmp_path, 0, None, success=True)
+    third = _json.loads((tmp_path / ".health.json").read_text())
+    assert third["last_success"] != first["last_success"]  # bumped on the new success
+
+
 def test_send_sundown_writes_state_under_the_shared_lock(monkeypatch, tmp_path):
     """/sundown must use the same _state_lock as the main poll loop's own
     state read-modify-write, or concurrent writes can revert each other's
@@ -5119,6 +5142,55 @@ def test_api_ev_reports_controller_status_and_null_prediction_without_history(
     assert body["prediction"] is None
 
 
+def test_api_baseline_load_empty_state_returns_all_null(tmp_path, monkeypatch):
+    """No confirmed no-EV nights classified yet -> every hour present with a
+    null kw and a zero sample count, not a missing/empty response — the
+    dashboard should never have to special-case an absent hour."""
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+
+    monkeypatch.setattr(webapi, "_cfg", Config(), raising=False)
+    monkeypatch.setattr(webapi, "_OUT", tmp_path, raising=False)
+    client = TestClient(webapi.app)
+    r = client.get("/api/baseline-load")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["hours"]) == 24
+    assert all(h["kw"] is None and h["samples"] == 0 for h in body["hours"])
+    assert body["min_samples"] == 5
+
+
+def test_api_baseline_load_surfaces_confirmed_no_ev_ground_truth(tmp_path, monkeypatch):
+    """_classify_and_record_no_ev_night accumulates real confirmed-no-EV-
+    night samples every morning into peak-alert state — this endpoint is
+    its first-ever consumer besides predict()'s silent forecast override,
+    so an hour with enough samples must surface a real EWMA kw value."""
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+
+    state = {"no_ev_load_h3": [0.4, 0.42, 0.38, 0.41, 0.39, 0.40]}  # >= min samples
+    (tmp_path / ".peak_alert_state.json").write_text(_json.dumps(state))
+    monkeypatch.setattr(webapi, "_cfg", Config(), raising=False)
+    monkeypatch.setattr(webapi, "_OUT", tmp_path, raising=False)
+
+    client = TestClient(webapi.app)
+    r = client.get("/api/baseline-load")
+    assert r.status_code == 200
+    body = r.json()
+    hour3 = next(h for h in body["hours"] if h["hour"] == 3)
+    assert hour3["samples"] == 6
+    assert hour3["kw"] is not None
+    assert 0.3 < hour3["kw"] < 0.5
+    # An hour with no samples at all must still stay null, not 0.0.
+    hour5 = next(h for h in body["hours"] if h["hour"] == 5)
+    assert hour5["kw"] is None
+    assert hour5["samples"] == 0
+
+
 def test_api_accuracy_excludes_pre_bias_fix_days(tmp_path, monkeypatch):
     """Mirrors cmd_accuracy's floor (see test_accuracy_excludes_pre_bias_fix_days):
     a wide `days` request must not mix pre-2026-08-24 predicted_kwh_ days
@@ -5519,6 +5591,56 @@ def test_alert_drain_target_reached_silent_before_sunrise():
     outlook = _eb_target_outlook(cloudy=False)
     c = types.SimpleNamespace(battery_soc_pct=6.5)
     assert alerts._alert_drain_target_reached({}, "2026-09-11", now, c, Config(), outlook) is None
+
+
+def test_alert_cold_snap_prep_fires_below_threshold():
+    """Symmetric to heat_wave_prep (95°F/AC) but for tomorrow's min temp —
+    heat-pump/resistive heating load spike risk."""
+    import types
+    now = datetime(2026, 1, 15, 21, 0)
+    tomorrow = datetime(2026, 1, 16)
+    outlook = types.SimpleNamespace(hours=[
+        types.SimpleNamespace(time=tomorrow.replace(hour=h), temp_c=temp_c)
+        for h, temp_c in [(2, -3.0), (8, 1.0), (14, 4.0), (20, 0.0)]
+    ])
+    c = types.SimpleNamespace(battery_soc_pct=50.0)
+    state = {}
+    body = alerts._alert_cold_snap_prep(state, "2026-01-15", now, c, outlook)
+    assert body is not None
+    assert "Cold snap tomorrow" in body
+    assert "Emergency Backup" in body  # SoC 50% < 80 -> recommend topping up
+    assert state["cold_snap_prep_date"] == "2026-01-15"
+    # Dedup: no re-fire same day.
+    assert alerts._alert_cold_snap_prep(state, "2026-01-15", now, c, outlook) is None
+
+
+def test_alert_cold_snap_prep_silent_above_threshold():
+    import types
+    now = datetime(2026, 1, 15, 21, 0)
+    tomorrow = datetime(2026, 1, 16)
+    outlook = types.SimpleNamespace(hours=[
+        types.SimpleNamespace(time=tomorrow.replace(hour=h), temp_c=temp_c)
+        for h, temp_c in [(2, 10.0), (8, 12.0), (14, 18.0), (20, 11.0)]
+    ])
+    c = types.SimpleNamespace(battery_soc_pct=50.0)
+    assert alerts._alert_cold_snap_prep({}, "2026-01-15", now, c, outlook) is None
+
+
+def test_alert_cold_snap_prep_silent_outside_evening_window():
+    import types
+    now = datetime(2026, 1, 15, 14, 0)  # 2pm, not the 21/22h evening gate
+    outlook = types.SimpleNamespace(hours=[
+        types.SimpleNamespace(time=datetime(2026, 1, 16, 2), temp_c=-5.0),
+    ])
+    c = types.SimpleNamespace(battery_soc_pct=50.0)
+    assert alerts._alert_cold_snap_prep({}, "2026-01-15", now, c, outlook) is None
+
+
+def test_alert_cold_snap_prep_silent_without_outlook():
+    import types
+    now = datetime(2026, 1, 15, 21, 0)
+    c = types.SimpleNamespace(battery_soc_pct=50.0)
+    assert alerts._alert_cold_snap_prep({}, "2026-01-15", now, c, None) is None
 
 
 def test_alert_cloudy_eb_target_fires_with_median_and_p75():

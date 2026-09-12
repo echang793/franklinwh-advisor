@@ -3010,6 +3010,40 @@ def _alert_heat_wave_prep(state: dict, today: str, now: datetime, c, outlook) ->
     )
 
 
+def _alert_cold_snap_prep(state: dict, today: str, now: datetime, c, outlook) -> str | None:
+    """Evening alert when tomorrow's forecast dips below 41°F (5°C) — heat
+    pump / resistive heating load spike risk. Symmetric to
+    _alert_heat_wave_prep (95°F/AC), just min-temp instead of max-temp —
+    predictor.py's own temp-scaling model already accounts for increased
+    heating load below 18°C (heat_temp_scale) but nothing alerted on it
+    before this."""
+    if now.hour not in (21, 22) or outlook is None:
+        return None
+    if _already_alerted(state, "cold_snap_prep_date", today):
+        return None
+    tomorrow = (now + timedelta(days=1)).date()
+    tmrw_hours = [h for h in outlook.hours if h.time.date() == tomorrow]
+    if not tmrw_hours:
+        return None
+    min_temp_c = min(h.temp_c for h in tmrw_hours)
+    if min_temp_c > 5.0:  # 41°F
+        return None
+    min_temp_f = min_temp_c * 9 / 5 + 32
+    _mark_alerted(state, "cold_snap_prep_date", today)
+    logger.info("Cold snap prep alert: tomorrow min %.1f°C (%.0f°F)", min_temp_c, min_temp_f)
+    soc = c.battery_soc_pct
+    action = (
+        f"Battery at {soc:.0f}% — consider switching to Emergency Backup tonight to top up before the heating load spike."
+        if soc < 80 else
+        f"Battery at {soc:.0f}% — well positioned. Monitor peak-hour load tomorrow."
+    )
+    return (
+        f"🥶 <b>FranklinWH: Cold snap tomorrow — {min_temp_f:.0f}°F forecast</b>\n"
+        f"Expect higher heating load and grid risk during 4–9 pm on-peak.\n"
+        f"{action}"
+    )
+
+
 def _alert_ev_charge_window(
     state: dict, today: str, now: datetime, c, cfg: Config, outlook=None,
 ) -> str | None:
@@ -3485,6 +3519,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("bill_reconciliation",  lambda: _alert_bill_reconciliation(state, today, now, cfg, store)),
             ("rate_plan_optimality", lambda: _alert_rate_plan_optimality(state, today, now, store)),
             ("heat_wave_prep",       lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),
+            ("cold_snap_prep",       lambda: _alert_cold_snap_prep(state, today, now, c, outlook)),
             ("multiday_cloudy_precharge", lambda: _alert_multiday_cloudy_precharge(state, today, now, c, outlook, cfg)),
             ("solar_surplus_overflow",    lambda: _alert_solar_surplus_overflow(state, today, now, c)),
             ("export_clipping",           lambda: _alert_export_clipping(state, today, now, c)),
