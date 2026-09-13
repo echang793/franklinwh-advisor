@@ -2604,6 +2604,16 @@ def _alert_baseline_load_drift(state: dict, today: str, now: datetime, store, cf
     back) — both sit inside the un-rolled-up region, since
     rollup_old_readings averages to hourly past 180 days, which would flatten
     the overnight trough this depends on.
+
+    Nights with a load spike >= _NO_EV_LOAD_SPIKE_KW anywhere in the window
+    are dropped entirely from both pools (not just capped) — same threshold
+    and rationale _classify_and_record_no_ev_night already uses ("any EV
+    charging, however brief or throttled, shows up as a load spike well
+    above household baseline"). Without this, a week of frequent overnight
+    EV/EB charging reads as the always-on floor itself rising (confirmed
+    2026-09-13: a real alert was ~entirely 7 of 15 recent nights being
+    EV-charging nights, not a new phantom load) — this alert should only
+    ever be about the household's non-EV baseline creeping up.
     """
     if now.hour not in (8, 9) or store is None:
         return None
@@ -2621,6 +2631,7 @@ def _alert_baseline_load_drift(state: dict, today: str, now: datetime, store, cf
             _pctl(vals, _BASELINE_PCTL)
             for vals in by_date.values()
             if len(vals) >= _BASELINE_MIN_SAMPLES_PER_NIGHT
+            and max(vals) < _NO_EV_LOAD_SPIKE_KW
         ]
 
     recent = _nightly(store.quiet_hour_loads(recent_start, today_str))
@@ -2658,8 +2669,9 @@ def _alert_baseline_load_drift(state: dict, today: str, now: datetime, store, cf
         f"({(recent_med / base_med - 1) * 100:.0f}% higher)\n"
         f"That's at least ~<b>${monthly_floor:.0f}/month</b> more, likely higher if it "
         f"runs around the clock.\n"
-        f"From {len(recent)} recent / {len(base)} baseline nights. Check for a new "
-        f"always-on device, a fridge or pump cycling constantly, or something left on."
+        f"From {len(recent)} recent / {len(base)} baseline nights (EV-charging nights "
+        f"excluded). Check for a new always-on device, a fridge or pump cycling "
+        f"constantly, or something left on."
     )
 
 

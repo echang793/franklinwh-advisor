@@ -2634,6 +2634,25 @@ def test_baseline_load_drift_fires_on_sustained_increase(tmp_path):
     assert "at least" in msg   # ...as a floor, not a precise claim
 
 
+def test_baseline_load_drift_excludes_ev_charging_nights(tmp_path):
+    """Requested 2026-09-13: a real alert fired almost entirely because 7 of
+    15 recent nights were EV/EB-charging nights, not a new phantom load —
+    nights with a load spike >= _NO_EV_LOAD_SPIKE_KW must be dropped
+    entirely from both pools, same threshold
+    _classify_and_record_no_ev_night already uses to detect an EV session."""
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime.now().replace(hour=8, minute=30, second=0, microsecond=0)
+    _seed_quiet_nights(db, now - timedelta(days=75), 55, 0.20)   # baseline: flat, no EV
+    # Recent window: 7 normal nights (unchanged from baseline) + 8 nights
+    # with sustained EV-level load (well above _NO_EV_LOAD_SPIKE_KW).
+    _seed_quiet_nights(db, now - timedelta(days=14), 7, 0.20)
+    _seed_quiet_nights(db, now - timedelta(days=7), 8, 3.0)
+    # With EV nights excluded, the surviving recent pool (7 normal nights)
+    # matches baseline exactly -> no drift, silent. (Without the exclusion,
+    # the EV nights would dominate the recent median and fire loudly.)
+    assert alerts._alert_baseline_load_drift({}, now.strftime("%Y-%m-%d"), now, db, Config()) is None
+
+
 def test_baseline_load_drift_silent_on_small_absolute_change(tmp_path):
     """The gate that stops it crying wolf: a large RELATIVE rise on a tiny
     baseline is still only a few watts. Real data showed 0.238 -> 0.317 kW
