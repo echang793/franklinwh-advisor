@@ -116,6 +116,25 @@ def _release_pid_lock() -> None:
         pass
 
 
+def _write_rollup_marker(marker: Path, today_iso: str) -> None:
+    """Persist the weekly-rollup marker — non-fatal on failure.
+
+    Observed live 2026-09-16: a sync daemon (iCloud bird, Dropbox, etc.)
+    briefly locking this file mid-write raised OSError (EDEADLK) here,
+    uncaught — which crash-looped the whole watch loop every cycle (this
+    write sits before the alert engine even runs) until the process died
+    outright, missing ~17h of alerts including that evening's digest. The
+    rollup itself already ran before this is called; only the marker
+    failing to persist means the next cycle just re-checks (and likely
+    re-runs the no-op rollup) instead of losing an entire poll cycle over
+    a non-critical downsampling marker.
+    """
+    try:
+        marker.write_text(today_iso)
+    except OSError as e:
+        logger.warning("Rollup marker write failed (non-fatal): %s", e)
+
+
 def _load_last_mode(out: Path) -> str | None:
     """Read the last recommended mode from disk (persists across cron runs)."""
     p = out / ".last_recommendation.json"
@@ -1825,7 +1844,7 @@ def cmd_advise(
                     if _removed:
                         _info(f"Rolled up {_removed} old readings")
                     outdir.mkdir(parents=True, exist_ok=True)
-                    _rollup_marker.write_text(_today_iso)
+                    _write_rollup_marker(_rollup_marker, _today_iso)
 
                 outlook        = _fetch_outlook_cached(lat, lon)
                 _peak_state    = _load_peak_state(outdir)

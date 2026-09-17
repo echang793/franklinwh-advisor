@@ -1844,6 +1844,31 @@ def test_write_health_marker_last_success_only_bumps_on_success(tmp_path):
     assert third["last_success"] != first["last_success"]  # bumped on the new success
 
 
+def test_write_rollup_marker_survives_oserror(tmp_path, monkeypatch, caplog):
+    """Regression for 2026-09-16: a sync daemon (iCloud bird) briefly
+    locking this file mid-write raised OSError (EDEADLK) uncaught here,
+    which crash-looped the whole watch loop every cycle until the process
+    died outright, missing ~17h of alerts. Must log and continue, never
+    raise."""
+    import logging
+
+    from franklinwh_scraper import cli
+
+    marker = tmp_path / ".last_rollup"
+
+    class _LockedPath:
+        def write_text(self, *_a, **_kw):
+            raise OSError(11, "Resource deadlock avoided")
+
+    with caplog.at_level(logging.WARNING):
+        cli._write_rollup_marker(_LockedPath(), "2026-09-16")  # must not raise
+    assert any("Rollup marker write failed" in r.message for r in caplog.records)
+
+    # Real path: writes normally when nothing's contending for the lock.
+    cli._write_rollup_marker(marker, "2026-09-16")
+    assert marker.read_text() == "2026-09-16"
+
+
 def test_send_sundown_writes_state_under_the_shared_lock(monkeypatch, tmp_path):
     """/sundown must use the same _state_lock as the main poll loop's own
     state read-modify-write, or concurrent writes can revert each other's
