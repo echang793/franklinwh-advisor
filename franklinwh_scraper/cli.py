@@ -1850,7 +1850,7 @@ def cmd_advise(
                 _peak_state    = _load_peak_state(outdir)
                 system_peak_kw = _get_system_peak_kw(_peak_state)
                 cloudy_now     = (
-                    outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD
+                    outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD)
                     if outlook else False
                 )
                 perf_ratio     = _get_performance_ratio(_peak_state, cloudy=cloudy_now)

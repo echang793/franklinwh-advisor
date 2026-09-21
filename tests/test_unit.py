@@ -1167,6 +1167,7 @@ def test_send_ebtarget_works_any_time_any_sky(tmp_path):
     bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(battery_soc_pct=51.0))
     bot._outlook = types.SimpleNamespace(
         avg_ghi=lambda h: 500.0,  # sunny — outside the alert's cloudy gate too
+        is_cloudy=lambda h, t: False,
         remaining_today_generation_kwh=lambda sp, pr, hb: 5.0,
     )
     bot._hist_store = _EbTargetFakeStore(med_kw=1.0, p75_kw=2.0)
@@ -4633,6 +4634,63 @@ def test_morning_preview_pr_calibration_undoes_cloudy_bucket_correctly():
     assert state["perf_ratio_cloudy_samples"] == [1.2 * 0.85]
 
 
+def test_morning_preview_pr_calibration_uses_stashed_cloudy_override_not_raw_ghi():
+    """Regression for 2026-09-20: the cloud_cover override (SolarOutlook.is_cloudy)
+    fixed same-day prediction, but grading yesterday's actual-vs-predicted
+    re-derived cloudy_day from the raw stashed avg_ghi alone — so a day the
+    override correctly predicted as cloudy (high GHI, high cloud_cover) would
+    still get graded as 'sunny' the next morning, feeding a marine-layer day's
+    bad ratio into the wrong EWMA bucket and never letting the cloudy bucket
+    learn from it. Prediction must stash its post-override verdict and
+    grading must read that back, not re-derive from GHI alone."""
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    state = {
+        f"predicted_kwh_{yesterday}": 20.0,
+        f"predicted_avg_ghi_{yesterday}": 412.0,   # raw GHI alone says "sunny" (>= threshold)
+        f"predicted_cloudy_{yesterday}": True,     # but the override called it cloudy
+        f"perf_ratio_used_{yesterday}": 0.85,
+    }
+
+    store = _AttrStore(attr=(0.0, 0.0, 0.0))
+    store.daily_solar_kwh_api = lambda d: 16.83  # actual came in ~19% under prediction
+
+    import types
+    c = types.SimpleNamespace(battery_soc_pct=50.0, solar_production_kw=0.0)
+    alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert "perf_ratio_samples" not in state
+    assert f"predicted_cloudy_{yesterday}" not in state  # cleaned up like its siblings
+    ratio = round(16.83 / 20.0, 3)
+    assert state["perf_ratio_cloudy_samples"] == [ratio * 0.85]
+
+
+def test_morning_preview_pr_calibration_falls_back_to_raw_ghi_without_stashed_verdict():
+    """Backward compat: state written before predicted_cloudy_ existed has no
+    such key — must fall back to the old raw-GHI comparison, not KeyError or
+    silently drop the day."""
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    state = {
+        f"predicted_kwh_{yesterday}": 5.0,
+        f"predicted_avg_ghi_{yesterday}": 200.0,  # cloudy by the old raw-GHI check
+        f"perf_ratio_used_{yesterday}": 0.85,
+        # no predicted_cloudy_{yesterday} key
+    }
+
+    store = _AttrStore(attr=(0.0, 0.0, 0.0))
+    store.daily_solar_kwh_api = lambda d: 6.0
+
+    import types
+    c = types.SimpleNamespace(battery_soc_pct=50.0, solar_production_kw=0.0)
+    alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert "perf_ratio_samples" not in state
+    assert state["perf_ratio_cloudy_samples"] == [1.2 * 0.85]
+
+
 def test_morning_preview_reports_7am_prediction_accuracy_from_store():
     import types
 
@@ -5571,6 +5629,8 @@ def _eb_target_outlook(cloudy=True, remaining_kwh=5.0):
     import types
     return types.SimpleNamespace(
         avg_ghi=lambda h: (200.0 if cloudy else 500.0),
+        is_cloudy=lambda h, t: cloudy,
+        is_cloudy_tomorrow=lambda t: cloudy,
         remaining_today_generation_kwh=lambda sp, pr, hb: remaining_kwh,
         # 6:30am sunrise — used by _sunrise_on for the drain-target alert's
         # window gate; other callers of this fixture don't touch it.
@@ -5973,3 +6033,126 @@ def test_alert_export_clipping_resets_streak_on_good_poll():
     alerts._alert_export_clipping(state, "2026-08-24", now, clipped)
     body = alerts._alert_export_clipping(state, "2026-08-24", now, clipped)
     assert body is None
+
+
+def test_alert_area_power_outage_consumes_flag_after_firing(tmp_path, monkeypatch):
+    """Regression for a stuck alert: the CMR outage bridge writes the flag
+    file exactly once per detection, but the old code only deduped on
+    *today's date* — so a flag written days ago and never cleared kept
+    re-firing every single day forever. The flag is a one-shot "just
+    detected" ping, not an ongoing status, so firing must consume it."""
+    import types
+
+    flag = tmp_path / ".cmr-power-outage.flag"
+    flag.write_text(json.dumps({"detected_at": "2026-09-09T14:43:41.035458", "source": "Fox 5 SD"}))
+    monkeypatch.setattr(alerts, "_CMR_OUTAGE_FLAG", flag)
+
+    c = types.SimpleNamespace(grid_status="normal", battery_soc_pct=80.0, home_load_kw=1.0)
+    cfg = Config()
+
+    state: dict = {}
+    body = alerts._alert_area_power_outage(state, "2026-09-09", datetime(2026, 9, 9, 15, 0), c, cfg)
+    assert body is not None
+    assert not flag.exists()  # consumed, won't re-arm on a later day
+
+    # A later day, fresh per-day dedup state (mirrors how `_alerted_date` keys
+    # roll over) but no reset of "have we shown this outage" — must stay silent.
+    body_next_day = alerts._alert_area_power_outage(state, "2026-09-18", datetime(2026, 9, 18, 8, 0), c, cfg)
+    assert body_next_day is None
+
+
+def test_alert_eb_approaching_target_fires_before_ready_alert():
+    """Regression for 2026-09-20: the at-target (80%) alert alone gave no
+    lead time — user manually flipped to EB on a cloudy morning and missed
+    the moment to switch back, overcharging past target. A heads-up must
+    fire on the way up (75-79%) before the existing at-target alert does."""
+    import types
+
+    now = datetime(2026, 9, 20, 9, 0)
+    cfg = Config(battery_capacity_kwh=13.6)
+    charging = types.SimpleNamespace(
+        battery_soc_pct=76.0, battery_use_kw=-5.0,
+        solar_production_kw=0.2, home_load_kw=1.0,
+    )
+    state: dict = {}
+    body = alerts._alert_eb_approaching_target(state, "2026-09-20", now, charging, cfg)
+    assert body is not None
+    assert "76" in body
+    assert "min" in body
+    # Once/day dedup, like the sibling alert.
+    assert alerts._alert_eb_approaching_target(state, "2026-09-20", now, charging, cfg) is None
+    # Crossing to target doesn't get suppressed by the approaching-target dedup key.
+    at_target = types.SimpleNamespace(
+        battery_soc_pct=80.0, battery_use_kw=-5.0,
+        solar_production_kw=0.2, home_load_kw=1.0,
+    )
+    assert alerts._alert_eb_ready(state, "2026-09-20", now, at_target) is not None
+
+
+def test_alert_eb_approaching_target_silent_below_lead_window_or_not_eb_rate():
+    import types
+
+    now = datetime(2026, 9, 20, 9, 0)
+    cfg = Config(battery_capacity_kwh=13.6)
+    state: dict = {}
+    # Below the 75% lead window.
+    low = types.SimpleNamespace(battery_soc_pct=60.0, battery_use_kw=-5.0,
+                                 solar_production_kw=0.2, home_load_kw=1.0)
+    assert alerts._alert_eb_approaching_target(state, "2026-09-20", now, low, cfg) is None
+    # In the window but not actually EB-charging (e.g. solar-charged).
+    not_eb_rate = types.SimpleNamespace(battery_soc_pct=76.0, battery_use_kw=-1.2,
+                                         solar_production_kw=3.0, home_load_kw=1.0)
+    assert alerts._alert_eb_approaching_target(state, "2026-09-20", now, not_eb_rate, cfg) is None
+
+
+def _outlook_with(ghi_wm2, cloud_cover_pct, tomorrow_ghi_wm2=None, tomorrow_cloud_cover_pct=None):
+    """Build a real SolarOutlook whose every hour uses the given GHI/cloud
+    values, so avg_ghi()/avg_cloud_cover() over any window return them.
+    Anchored to the real wall-clock date (not a hardcoded one) since
+    SolarOutlook._local_now() reads the actual clock, not a mockable one —
+    specifically UTC (utc_offset_seconds=0 below), not local system time."""
+    from datetime import timezone
+    from franklinwh_scraper.weather import SolarOutlook, HourlyForecast
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    hours = []
+    for d, ghi, cc in (
+        (now.date(), ghi_wm2, cloud_cover_pct),
+        (now.date() + timedelta(days=1), tomorrow_ghi_wm2 or ghi_wm2, tomorrow_cloud_cover_pct or cloud_cover_pct),
+    ):
+        for hr in range(24):
+            t = datetime(d.year, d.month, d.day, hr)
+            # direct/diffuse split doesn't matter — ghi_wm2 is their sum.
+            hours.append(HourlyForecast(time=t, direct_radiation_wm2=ghi, diffuse_radiation_wm2=0.0,
+                                         cloud_cover_pct=cc))
+    return SolarOutlook(hours=hours, utc_offset_seconds=0)
+
+
+def test_outlook_is_cloudy_overrides_optimistic_ghi_on_high_cloud_cover():
+    """Regression for 2026-09-20: Open-Meteo returned near-clear-sky GHI
+    (avg 412 W/m² over 12h — above the 300 W/m² threshold) while reporting
+    cloud_cover=100% for nearly every hour of the same forecast. Every
+    GHI-only cloudy check sailed past it and predicted a near-normal day;
+    actual generation came in ~19% below the 20+ kWh prediction. cloud_cover
+    this high must override an optimistic GHI reading."""
+    from franklinwh_scraper.alerts import _GHI_CLOUDY_THRESHOLD
+
+    outlook = _outlook_with(ghi_wm2=412.0, cloud_cover_pct=100.0)
+    assert outlook.avg_ghi(12) >= _GHI_CLOUDY_THRESHOLD  # GHI alone says "sunny"
+    assert outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD) is True  # override catches it
+    assert outlook.is_cloudy_tomorrow(_GHI_CLOUDY_THRESHOLD) is True
+
+
+def test_outlook_is_cloudy_still_true_on_plain_low_ghi():
+    from franklinwh_scraper.alerts import _GHI_CLOUDY_THRESHOLD
+
+    outlook = _outlook_with(ghi_wm2=100.0, cloud_cover_pct=20.0)
+    assert outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD) is True
+
+
+def test_outlook_is_cloudy_false_on_genuinely_sunny_day():
+    from franklinwh_scraper.alerts import _GHI_CLOUDY_THRESHOLD
+
+    outlook = _outlook_with(ghi_wm2=600.0, cloud_cover_pct=10.0)
+    assert outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD) is False
+    assert outlook.is_cloudy_tomorrow(_GHI_CLOUDY_THRESHOLD) is False

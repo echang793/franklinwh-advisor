@@ -583,7 +583,7 @@ _DATE_KEYED_PREFIXES = (
     # These three are written daily but don't end in a literal "_date" suffix
     # and previously matched none of the prune rules — the state file grew
     # by one key per day per prefix, forever, for the life of the install.
-    "predicted_kwh_", "predicted_avg_ghi_", "daily_import_cost_",
+    "predicted_kwh_", "predicted_avg_ghi_", "predicted_cloudy_", "daily_import_cost_",
     "outages_", "sundown_pred_", "savings_daily_", "soc_7am_pred_",
     "actual_bill_", "perf_ratio_used_",
 )
@@ -858,7 +858,15 @@ def _alert_morning_preview(
         if yest_actual <= 0.0:
             yest_actual = store.daily_solar_kwh(yesterday)
         yesterday_ghi = state.get(f"predicted_avg_ghi_{yesterday}", 400.0)
-        cloudy_day    = yesterday_ghi < _GHI_CLOUDY_THRESHOLD
+        # Read back the post-override verdict the prediction actually used
+        # (see _alert_morning_preview's own predicted_cloudy_ write, below) —
+        # re-deriving from raw GHI alone here would grade a cloud_cover-
+        # override day (high GHI, high cloud_cover) as "sunny" and feed its
+        # bad ratio into the wrong EWMA bucket. Falls back to the old raw
+        # comparison for state written before this key existed.
+        cloudy_day    = state.pop(
+            f"predicted_cloudy_{yesterday}", yesterday_ghi < _GHI_CLOUDY_THRESHOLD
+        )
         min_predicted = 0.5 if cloudy_day else 3.0
         # Skip days where actual was less than 65% of prediction — indicates unexpected
         # cloud cover that the GHI forecast missed entirely (not a model calibration signal).
@@ -973,12 +981,13 @@ def _alert_morning_preview(
         system_peak_kw = max(system_peak_kw, 1.0)
 
         avg_ghi    = outlook.avg_ghi(12)
-        cloudy_day = avg_ghi < _GHI_CLOUDY_THRESHOLD
+        cloudy_day = outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD)
         perf_ratio = _get_performance_ratio(state, cloudy=cloudy_day)
         hourly_bias = _get_hourly_bias(state)
         gen_kwh    = round(outlook.today_generation_kwh(system_peak_kw, perf_ratio, hourly_bias), 1)
         state[f"predicted_kwh_{today}"]     = gen_kwh
         state[f"predicted_avg_ghi_{today}"] = round(avg_ghi, 1)
+        state[f"predicted_cloudy_{today}"]  = cloudy_day
         # Stashed so tomorrow's accuracy update can undo today's own
         # correction before feeding a sample back into the EWMA — see the
         # long comment at the read site in _alert_morning_preview for why.
@@ -989,7 +998,9 @@ def _alert_morning_preview(
             predicted_kwh=gen_kwh, cal_samples_n=len(cal_samples),
         )
 
-        sky = "Sunny" if avg_ghi >= 400 else ("Partly cloudy" if avg_ghi >= _GHI_CLOUDY_THRESHOLD else "Cloudy")
+        # Tied to cloudy_day (not raw avg_ghi) so the label can't say "Sunny"
+        # on a day the cloud_cover override already caught as cloudy.
+        sky = "Cloudy" if cloudy_day else ("Sunny" if avg_ghi >= 400 else "Partly cloudy")
         cloudy_samples = state.get("perf_ratio_cloudy_samples", [])
         sunny_samples  = state.get("perf_ratio_samples", [])
         if cloudy_day and len(cloudy_samples) >= 3:
@@ -1001,8 +1012,9 @@ def _alert_morning_preview(
         solar_est = f"~{gen_kwh:.1f} kWh predicted ({sky}, {pr_note})"
 
         # Tomorrow forecast
-        tmrw_ghi = outlook.tomorrow_avg_ghi()
-        tmrw_sky = "Sunny" if tmrw_ghi >= 400 else ("Partly cloudy" if tmrw_ghi >= _GHI_CLOUDY_THRESHOLD else "Cloudy")
+        tmrw_ghi     = outlook.tomorrow_avg_ghi()
+        tmrw_cloudy  = outlook.is_cloudy_tomorrow(_GHI_CLOUDY_THRESHOLD)
+        tmrw_sky = "Cloudy" if tmrw_cloudy else ("Sunny" if tmrw_ghi >= 400 else "Partly cloudy")
         tmrw_kwh = outlook.tomorrow_generation_kwh(system_peak_kw, perf_ratio, hourly_bias)
         solar_est += f"\nTomorrow: {tmrw_sky} — ~{tmrw_kwh:.1f} kWh"
         bat_cap = cfg.battery_capacity_kwh if cfg else _BATTERY_CAPACITY_KWH
@@ -1087,18 +1099,51 @@ def _alert_low_soc_1pm(
 # coincidental SoC crossing from ordinary solar charging.
 _EB_CHARGE_RATE_TOLERANCE_KW = 0.5
 
+_EB_READY_TARGET_PCT = 80.0
+# Requested 2026-09-20: the at-target alert alone wasn't enough lead time —
+# user manually flipped to EB on a cloudy morning and missed the moment to
+# switch back, overcharging past target. This fires once on the way up so
+# there's a heads-up before the target alert, not just at it.
+_EB_APPROACHING_LEAD_PCT  = 5.0
+_EB_APPROACHING_TARGET_PCT = _EB_READY_TARGET_PCT - _EB_APPROACHING_LEAD_PCT
+
+
+def _eb_charging_at_rate(c) -> bool:
+    return (
+        -(_EB_CHARGE_KW + _EB_CHARGE_RATE_TOLERANCE_KW)
+        <= c.battery_use_kw
+        <= -(_EB_CHARGE_KW - _EB_CHARGE_RATE_TOLERANCE_KW)
+    )
+
+
+def _alert_eb_approaching_target(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
+    """Early heads-up while actively EB-charging, fired once on the way up
+    to _EB_READY_TARGET_PCT (see _alert_eb_ready) — gives lead time to
+    switch modes before the battery overshoots the target."""
+    if not _eb_charging_at_rate(c):
+        return None
+    if not (_EB_APPROACHING_TARGET_PCT <= c.battery_soc_pct < _EB_READY_TARGET_PCT):
+        return None
+    if _already_alerted(state, "eb_approaching_target_alerted_date", today):
+        return None
+    _mark_alerted(state, "eb_approaching_target_alerted_date", today)
+    remaining_kwh = max(0.0, (_EB_READY_TARGET_PCT - c.battery_soc_pct) / 100.0 * cfg.battery_capacity_kwh)
+    eta_min = remaining_kwh / _EB_CHARGE_KW * 60.0 if _EB_CHARGE_KW > 0 else 0.0
+    logger.info("EB approaching-target alert sent for %s (%.0f%%, ~%.0f min to %.0f%%)",
+                today, c.battery_soc_pct, eta_min, _EB_READY_TARGET_PCT)
+    return (
+        f"🟡 <b>FranklinWH: Battery at {c.battery_soc_pct:.0f}% — Emergency Backup target in ~{eta_min:.0f} min</b>\n"
+        f"Time: {now.strftime('%-I:%M %p')} — charging {abs(c.battery_use_kw):.1f} kW toward {_EB_READY_TARGET_PCT:.0f}%\n"
+        f"Heads up so you can switch modes before it overshoots."
+    )
+
 
 def _alert_eb_ready(state: dict, today: str, now: datetime, c) -> str | None:
     """Only fires while actively charging at ~5.0 kW (see _EB_CHARGE_RATE_TOLERANCE_KW) —
     confirms Emergency Backup is really charging from the grid, not just a
     battery that happened to reach 80% from solar while still on
     Self-Consumption."""
-    charging_at_eb_rate = (
-        -(_EB_CHARGE_KW + _EB_CHARGE_RATE_TOLERANCE_KW)
-        <= c.battery_use_kw
-        <= -(_EB_CHARGE_KW - _EB_CHARGE_RATE_TOLERANCE_KW)
-    )
-    if not charging_at_eb_rate or c.battery_soc_pct < 80.0:
+    if not _eb_charging_at_rate(c) or c.battery_soc_pct < _EB_READY_TARGET_PCT:
         return None
     if _already_alerted(state, "eb_80pct_alerted_date", today):
         return None
@@ -1187,7 +1232,7 @@ def _alert_drain_target_reached(
     solar_str = ""
     sunny = None
     if outlook is not None:
-        sunny = outlook.avg_ghi(12) >= _GHI_CLOUDY_THRESHOLD
+        sunny = not outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD)
         sp = _get_system_peak_kw(state)
         if sp is not None:
             hb = _get_hourly_bias(state)
@@ -1255,7 +1300,7 @@ def _compute_eb_target(
     sp = _get_system_peak_kw(state)
     if sp is None:
         return None
-    cloudy = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD
+    cloudy = outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD)
     hb = _get_hourly_bias(state)
     pr = _get_performance_ratio(state, cloudy=cloudy)
     remaining_solar_kwh = outlook.remaining_today_generation_kwh(sp, pr, hb)
@@ -1589,7 +1634,7 @@ def _sundown_projection_line(
     live_forecast = usage_forecast
     if store is not None and usage_forecast is not None:
         try:
-            cloudy = outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD if outlook else False
+            cloudy = outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD) if outlook else False
             live_forecast = predict(
                 store, 24, outlook=outlook,
                 system_peak_kw=_get_system_peak_kw(state),
@@ -1732,7 +1777,7 @@ def _alert_eod_digest(
     if outlook:
         sp = _get_system_peak_kw(state)
         if sp:
-            cloudy   = outlook.tomorrow_avg_ghi() < _GHI_CLOUDY_THRESHOLD
+            cloudy   = outlook.is_cloudy_tomorrow(_GHI_CLOUDY_THRESHOLD)
             pr       = _get_performance_ratio(state, cloudy=cloudy)
             tmrw_kwh = outlook.tomorrow_generation_kwh(sp, pr, _get_hourly_bias(state))
             precharge_str  = _precharge_plan(now, soc, tmrw_kwh, bat_cap)
@@ -3187,6 +3232,13 @@ def _alert_area_power_outage(state: dict, today: str, now: datetime, c, cfg: Con
     if _already_alerted(state, "cmr_outage_alerted_date", today):
         return None
     _mark_alerted(state, "cmr_outage_alerted_date", today)
+    # One-shot "just detected" ping, not an ongoing status — consume the
+    # flag so a stale/unhandled outage detection doesn't re-fire every day
+    # forever (this alert used to loop indefinitely on a days-old flag).
+    try:
+        _CMR_OUTAGE_FLAG.unlink()
+    except OSError as e:
+        logger.warning("Failed to consume CMR outage flag (non-fatal): %s", e)
     logger.info("CMR area power outage alert bridged from %s", source)
     ts = detected_at[:16].replace("T", " ")
     # If we're actually on battery, add conservation runtime guidance.
@@ -3225,7 +3277,7 @@ def _alert_multiday_cloudy_precharge(
     sp = _get_system_peak_kw(state)
     if sp is None:
         return None
-    cloudy = outlook.avg_ghi(48) < _GHI_CLOUDY_THRESHOLD
+    cloudy = outlook.is_cloudy(48, _GHI_CLOUDY_THRESHOLD)
     if not cloudy:
         return None
     pr = _get_performance_ratio(state, cloudy=True)
@@ -3503,6 +3555,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
         _candidates = [
             ("morning_preview",   lambda: _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store, cfg)),
             ("grid_import",       lambda: _alert_grid_import(state, today, now, c)),
+            ("eb_approaching_target", lambda: _alert_eb_approaching_target(state, today, now, c, cfg)),
             ("eb_ready",          lambda: _alert_eb_ready(state, today, now, c)),
             ("low_soc_1pm",       lambda: _alert_low_soc_1pm(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("low_morning_solar", lambda: _alert_low_morning_solar(state, today, now, c)),

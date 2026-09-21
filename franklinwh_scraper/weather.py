@@ -191,6 +191,42 @@ class SolarOutlook:
             return 0.0
         return sum(h.ghi_wm2 for h in window) / len(window)
 
+    def tomorrow_avg_cloud_cover(self) -> float:
+        """Average cloud cover (%) during solar hours (6 am–7 pm) tomorrow."""
+        now = self._local_now()
+        tomorrow = (now + timedelta(days=1)).date()
+        window = [
+            h for h in self.hours
+            if h.time.date() == tomorrow and 6 <= h.time.hour <= 19
+        ]
+        if not window:
+            return 100.0
+        return sum(h.cloud_cover_pct for h in window) / len(window)
+
+    # Observed live 2026-09-20: Open-Meteo returned a near-clear-sky GHI
+    # curve (peak 780 W/m², avg 412 W/m² over 12h — above _GHI_CLOUDY_THRESHOLD)
+    # while reporting cloud_cover=100% for nearly every hour of the same
+    # forecast — a genuine upstream model inconsistency (thin/burning-off
+    # marine layer the irradiance component didn't attenuate for). Every
+    # GHI-only "is it cloudy" check in the app sailed right past it and
+    # predicted a near-normal 20+ kWh day; actual came in ~19% lower.
+    # cloud_cover this high overrides an optimistic GHI reading even though
+    # GHI alone would call the day sunny.
+    _CLOUD_COVER_OVERRIDE_PCT = 85.0
+
+    def is_cloudy(self, next_hours: int, ghi_threshold: float) -> bool:
+        """True if avg GHI over the next N hours is below threshold, or the
+        model's own cloud_cover disagrees with an optimistic GHI reading."""
+        if self.avg_ghi(next_hours) < ghi_threshold:
+            return True
+        return self.avg_cloud_cover(next_hours) >= self._CLOUD_COVER_OVERRIDE_PCT
+
+    def is_cloudy_tomorrow(self, ghi_threshold: float) -> bool:
+        """Same as is_cloudy but for tomorrow's 6 am–7 pm solar window."""
+        if self.tomorrow_avg_ghi() < ghi_threshold:
+            return True
+        return self.tomorrow_avg_cloud_cover() >= self._CLOUD_COVER_OVERRIDE_PCT
+
     def ghi_at(self, dt: datetime) -> float:
         """Return GHI (W/m²) for the hour containing dt, 0 if not in forecast.
 

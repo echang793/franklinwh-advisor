@@ -191,7 +191,7 @@ def api_recommendation():
         with HistoryStore(_OUT / "history.db") as history:
             outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
             sp = _get_system_peak_kw(state)
-            cloudy = bool(outlook and outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD)
+            cloudy = bool(outlook and outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
             fc = (predict(history, 24, outlook=outlook, system_peak_kw=sp,
                           perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
                           hourly_bias=_get_hourly_bias(state))
@@ -244,7 +244,7 @@ def api_forecast():
         with HistoryStore(_OUT / "history.db") as history:
             outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
             sp = _get_system_peak_kw(state)
-            cloudy = bool(outlook and outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD)
+            cloudy = bool(outlook and outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
             perf_ratio = _get_performance_ratio(state, cloudy=cloudy)
             hourly_bias = _get_hourly_bias(state)
             fc = (predict(history, 12, outlook=outlook, system_peak_kw=sp,
@@ -511,7 +511,7 @@ def api_willmake(hours: int = Query(..., ge=1, le=24)):
         with HistoryStore(_OUT / "history.db") as history:
             outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
             sp = _get_system_peak_kw(state)
-            cloudy = bool(outlook and outlook.avg_ghi(12) < _GHI_CLOUDY_THRESHOLD)
+            cloudy = bool(outlook and outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
             fc = (predict(history, 24, outlook=outlook, system_peak_kw=sp,
                           perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
                           hourly_bias=_get_hourly_bias(state))
