@@ -1,4 +1,4 @@
-"""SDG&E EV-TOU-5 time-of-use schedule and rates (effective Jan 2026)."""
+"""SDG&E EV-TOU-5 time-of-use schedule and rates (SDG&E delivery 6/1/2026, SDCP generation per the Sep 2026 bill)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from enum import Enum
 
 # SDG&E/SDCP revise rates roughly twice per year. If today is more than 180
 # days past this date, bill estimates may be stale — update _RATES below.
-_RATES_EFFECTIVE_DATE = date(2026, 1, 1)  # SDCP's EV-TOU-5 generation table date
+_RATES_EFFECTIVE_DATE = date(2026, 6, 1)  # SDG&E EV-TOU-5 / DR-SES delivery table date
 
 
 def rates_are_stale(today: date | None = None) -> bool:
@@ -25,62 +25,67 @@ class TouPeriod(str, Enum):
 
 _SUMMER_MONTHS = {6, 7, 8, 9, 10}  # June–October
 
-# Reconstructed from two real, dated, public rate schedules — no bundled
-# SDG&E number and no guess at delivery's TOU structure, unlike the
-# previous version of this table.
+# Reconstructed from real, dated rate schedules plus the customer's own
+# itemized bill — no bundled SDG&E number and no guess at delivery's TOU
+# structure.
 #
 # Customer is on San Diego Community Power (SDCP, a CCA), not bundled
 # SDG&E generation. Unbundled customers pay SDG&E delivery + SDCP
-# generation separately (SDG&E's own EV-TOU-5-P tariff, note 2: "Unbundled
+# generation separately (SDG&E's own EV-TOU-5 tariff, note 2: "Unbundled
 # customers do not pay SDG&E's commodity rates").
 #
 # Delivery (SDG&E, "UDC Total" + "WF-NBC + DWR-BC Rate" columns of
-# Schedule EV-TOU-5-P, effective 10/1/2025, sdge.com/sites/default/files/
-# regulatory/10-1-25%20Schedule%20EV-TOU-5-P%20Total%20Rates%20Table.pdf):
-# flat across summer/winter — only Transmission+Distribution differ by
-# period, and on-peak/off-peak share the same value in this tariff, only
-# super-off-peak drops.
-#   on-peak = off-peak: 0.30120 (UDC) + 0.00595 (WF-NBC/DWR-BC) = 0.30715
-#   super-off-peak:     0.02858 (UDC) + 0.00595 (WF-NBC/DWR-BC) = 0.03453
+# Schedule EV-TOU-5, effective 6/1/2026, sdge.com/sites/default/files/
+# regulatory/6-1-26%20Schedule%20EV-TOU-5%20Total%20Rates%20Table.pdf) —
+# same in summer and winter; on-peak and off-peak share one value, only
+# super-off-peak drops. Raised from the 10/1/2025 table's 0.30120/0.02858
+# UDC; the app was still on that older table and under-called import cost
+# by ~22% on the Aug 19 - Sep 17 2026 bill.
+#   on-peak = off-peak: 0.31711 (UDC) + 0.00591 (WF-NBC/DWR-BC) = 0.32302
+#   super-off-peak:     0.04114 (UDC) + 0.00591 (WF-NBC/DWR-BC) = 0.04705
 #
-# Generation (SDCP EV-TOU-5, PowerBase column — matches this customer's
-# own itemized bill numbers to within routine periodic-update drift;
-# PowerOn is ~$0.01-0.03/kWh higher and not what the bill shows.
-# "2026 Current Residential Rates", effective 1/1/2026,
-# sdcommunitypower.org/wp-content/uploads/2026/01/Res_2021V_2026.pdf):
-#   summer: on-peak 0.38298, off-peak 0.11853, super-off-peak 0.03696
+# Generation (SDCP EV-TOU-5, PowerBase). Summer is taken directly from the
+# customer's Aug 19 - Sep 17 2026 SDCP itemization (0.38242 / 0.11828 /
+# 0.0368 — within 0.4% of SDCP's published 1/1/2026 table, so SDCP's
+# mid-year update is small). Winter is still SDCP's published 1/1/2026
+# table (sdcommunitypower.org/wp-content/uploads/2026/01/Res_2021V_2026.pdf)
+# — refresh from a winter bill when one is available.
+#   summer: on-peak 0.38242, off-peak 0.11828, super-off-peak 0.0368
 #   winter: on-peak 0.14237, off-peak 0.09205, super-off-peak 0.03039
 #
-# Known gap: PCIA (Power Charge Indifference Adjustment), a small
-# vintage-dependent line item SDG&E charges unbundled customers on top of
-# delivery — not included below. SDG&E's own published DA-vintage table
-# ranges roughly -$0.032 to +$0.002/kWh depending on the year the
-# customer's cohort left bundled service; the CCA-specific vintage table
-# lives in a separate CCA-CRS schedule this session didn't have access to.
-# If your bill shows a "PCIA" line item, that value should be added to
-# every period below — until then this table is real delivery + real
-# generation, missing one small, usually negative, adjustment.
+# PCIA (Power Charge Indifference Adjustment, CCA 2021 vintage 0.03564
+# $/kWh per the 6/1/2026 tariff): the bill's "Delivery Import Charges"
+# ($15.86) exceed UDC + WF-NBC priced at the bill's kWh ($13.36) by ~$2.50.
+# That residual is consistent with PCIA applying to net imports (import
+# minus export, ~62 kWh this cycle) rather than all imports, so it is
+# modeled as one small per-import-kWh adder (_PCIA_NET_ADDER) folded into
+# every period. It is an empirical fit to ONE bill — it will drift with
+# how much you export — so refine it from further bills.
+_PCIA_NET_ADDER = 0.0133  # $/kWh imported (~PCIA 0.03564 x ~37% net-import share)
+
 _RATES = {
     "summer": {
-        TouPeriod.SUPER_OFF_PEAK: 0.07149,
-        TouPeriod.OFF_PEAK:       0.42568,
-        TouPeriod.ON_PEAK:        0.69013,
+        TouPeriod.SUPER_OFF_PEAK: 0.0368  + 0.04705 + _PCIA_NET_ADDER,
+        TouPeriod.OFF_PEAK:       0.11828 + 0.32302 + _PCIA_NET_ADDER,
+        TouPeriod.ON_PEAK:        0.38242 + 0.32302 + _PCIA_NET_ADDER,
     },
     "winter": {
-        TouPeriod.SUPER_OFF_PEAK: 0.06492,
-        TouPeriod.OFF_PEAK:       0.39920,
-        TouPeriod.ON_PEAK:        0.44952,
+        TouPeriod.SUPER_OFF_PEAK: 0.03039 + 0.04705 + _PCIA_NET_ADDER,
+        TouPeriod.OFF_PEAK:       0.09205 + 0.32302 + _PCIA_NET_ADDER,
+        TouPeriod.ON_PEAK:        0.14237 + 0.32302 + _PCIA_NET_ADDER,
     },
 }
 
 _ON_PEAK_START = 16  # 4 pm
 _ON_PEAK_END   = 21  # 9 pm
 
-# SDG&E EV-TOU-5 fixed Basic Service Fee — charged per day regardless of usage.
-# Per SDG&E's official "1-1-26 Schedule EV-TOU-5 Total Rates Table" tariff filing
-# (sdge.com/sites/default/files/regulatory/), the Base Services Charge is
-# $0.79343/day. Verify against your bill; update if SDG&E changes it.
-BASE_SERVICE_DAILY = 0.79343
+# SDG&E EV-TOU-5 fixed charge per day, regardless of usage. The tariff's
+# Base Services Charge is $0.79343/day (6/1/2026 table), but the Aug 19 -
+# Sep 17 2026 bill's "Non-Nettable Charges" were $24.36 over 30 days =
+# $0.812/day exactly, ~$0.56/cycle more than the tariff figure alone
+# explains (cause not identified from one bill). Using the bill's observed
+# figure so cycle estimates match it; re-verify against another bill.
+BASE_SERVICE_DAILY = 0.812
 
 # Export credit rate ($/kWh) — actual customer is on San Diego Community
 # Power (SDCP, a CCA), not bundled SDG&E generation. Real number confirmed
@@ -210,32 +215,34 @@ def rate_at(dt: datetime) -> float:
 # switched to real unbundled numbers.
 #
 # Delivery (SDG&E, "UDC Total" + "WF-NBC + DWR-BC Rate" of Schedule DR-SES,
-# effective 6/1/2025, sdge.com/sites/default/files/regulatory/6-1-25%20
+# effective 6/1/2026, sdge.com/sites/default/files/regulatory/6-1-26%20
 # Schedule%20DR-SES%20Total%20Rates%20Table.pdf): flat across ALL periods
 # and both seasons, unlike EV-TOU-5 — DR-SES has no time-varying delivery
-# component at all, only Distribution differs slightly from EV-TOU-5's.
-#   every period, every season: 0.29962 (UDC) + 0.00595 (WF-NBC/DWR-BC) = 0.30557
+# component at all, only Distribution differs from EV-TOU-5's.
+#   every period, every season: 0.26328 (UDC) + 0.00591 (WF-NBC/DWR-BC) = 0.26919
 #
-# Generation (SDCP DR-SES, PowerBase column, same source/date as EV-TOU-5's
-# SDCP generation numbers above):
+# Generation (SDCP DR-SES, PowerBase column, SDCP's published 1/1/2026
+# table — SDCP's small mid-year update isn't itemized for DR-SES on any
+# bill, so this is not refreshed the way EV-TOU-5's summer column is):
 #   summer: on-peak 0.38856, off-peak 0.12411, super-off-peak 0.04254
 #   winter: on-peak 0.14795, off-peak 0.09763, super-off-peak 0.03597
 #
-# Same PCIA gap as EV-TOU-5's _RATES — not included, see that comment.
+# Same PCIA adder as EV-TOU-5 (_PCIA_NET_ADDER) so the two plans stay
+# comparable — see that comment.
 _DRSES_RATES = {
     "summer": {
-        TouPeriod.SUPER_OFF_PEAK: 0.34811,
-        TouPeriod.OFF_PEAK:       0.42968,
-        TouPeriod.ON_PEAK:        0.69413,
+        TouPeriod.SUPER_OFF_PEAK: 0.04254 + 0.26919 + _PCIA_NET_ADDER,
+        TouPeriod.OFF_PEAK:       0.12411 + 0.26919 + _PCIA_NET_ADDER,
+        TouPeriod.ON_PEAK:        0.38856 + 0.26919 + _PCIA_NET_ADDER,
     },
     "winter": {
-        TouPeriod.SUPER_OFF_PEAK: 0.34154,
-        TouPeriod.OFF_PEAK:       0.40320,
-        TouPeriod.ON_PEAK:        0.45352,
+        TouPeriod.SUPER_OFF_PEAK: 0.03597 + 0.26919 + _PCIA_NET_ADDER,
+        TouPeriod.OFF_PEAK:       0.09763 + 0.26919 + _PCIA_NET_ADDER,
+        TouPeriod.ON_PEAK:        0.14795 + 0.26919 + _PCIA_NET_ADDER,
     },
 }
-# Base Services Charge is $0.79343/day on DR-SES too (same UDC line item as
-# EV-TOU-5's BASE_SERVICE_DAILY) — identical in the counterfactual, so
+# Base Services Charge is $0.79343/day on DR-SES too (same tariff line item
+# as EV-TOU-5's) — identical in the counterfactual, so
 # compare_rate_plans() ignores it rather than duplicating the constant.
 
 

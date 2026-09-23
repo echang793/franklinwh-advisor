@@ -629,13 +629,13 @@ def test_license_clock_rollback_detected(tmp_path, monkeypatch):
 
 
 def test_tou_rates_stale_alert_fires_once():
-    stale_now = datetime(2026, 8, 1)  # well past 180 days from tou._RATES_EFFECTIVE_DATE
+    stale_now = datetime(2027, 1, 1)  # well past 180 days from tou._RATES_EFFECTIVE_DATE (6/1/2026)
     state: dict = {}
-    msg = alerts._alert_tou_rates_stale(state, "2026-08-01", stale_now)
+    msg = alerts._alert_tou_rates_stale(state, "2027-01-01", stale_now)
     assert msg is not None and "outdated" in msg
-    assert state["tou_stale_alerted"] == "2026-08-01"
+    assert state["tou_stale_alerted"] == "2027-01-01"
     # Second call same/later day must not re-fire.
-    assert alerts._alert_tou_rates_stale(state, "2026-08-02", stale_now) is None
+    assert alerts._alert_tou_rates_stale(state, "2027-01-02", stale_now) is None
 
 
 def test_tou_rates_stale_alert_silent_when_fresh():
@@ -3750,6 +3750,47 @@ def test_bill_record_without_export_flags_keeps_previous_learned_rate(tmp_path):
     assert _load_peak_state(tmp_path)["learned_export_rate"]["rate"] == 0.5139
 
 
+def test_import_rates_reproduce_sep_2026_bill():
+    """Regression for 2026-09-24: the rate table (SDG&E delivery from the
+    10/1/2025 tariff) under-called import cost by ~$5 (22%) on the Aug 19 -
+    Sep 17 bill. Priced at the bill's own period kWh (SDCP itemized: on-peak
+    $0.97 @ 0.38242, off-peak $1.63 @ 0.11828, super-off-peak $6.33 @ 0.0368
+    -> 2.54 / 13.78 / 172.0 kWh), the model must land on the bill's actual
+    import charges: generation $8.93 + delivery $15.86 = $24.79."""
+    sop = tou.rate_at(datetime(2026, 9, 2, 3, 0))    # Wed 3am  super off-peak
+    off = tou.rate_at(datetime(2026, 9, 2, 7, 0))    # Wed 7am  off-peak
+    on = tou.rate_at(datetime(2026, 9, 2, 17, 0))    # Wed 5pm  on-peak
+    assert tou.period_at(datetime(2026, 9, 2, 3, 0)) == tou.TouPeriod.SUPER_OFF_PEAK
+    assert tou.period_at(datetime(2026, 9, 2, 7, 0)) == tou.TouPeriod.OFF_PEAK
+    assert tou.period_at(datetime(2026, 9, 2, 17, 0)) == tou.TouPeriod.ON_PEAK
+    modeled = 2.54 * on + 13.78 * off + 172.0 * sop
+    assert abs(modeled - 24.79) < 0.35, modeled
+
+
+def test_ev_tou_5_summer_rates_are_current_delivery_plus_sdcp_generation():
+    """SDG&E EV-TOU-5 effective 6/1/2026: UDC 0.31711 (on/off-peak) and
+    0.04114 (super-off-peak) + WF-NBC/DWR-BC 0.00591; SDCP summer generation
+    from the Sep 2026 bill: 0.38242 / 0.11828 / 0.0368."""
+    adder = tou._PCIA_NET_ADDER
+    assert abs(tou.rate_at(datetime(2026, 9, 2, 17, 0)) - (0.38242 + 0.31711 + 0.00591 + adder)) < 1e-9
+    assert abs(tou.rate_at(datetime(2026, 9, 2, 7, 0)) - (0.11828 + 0.31711 + 0.00591 + adder)) < 1e-9
+    assert abs(tou.rate_at(datetime(2026, 9, 2, 3, 0)) - (0.0368 + 0.04114 + 0.00591 + adder)) < 1e-9
+
+
+def test_drses_delivery_uses_6_1_2026_udc():
+    """DR-SES 6/1/2026: UDC 0.26328 flat + WF-NBC/DWR-BC 0.00591. Kept
+    current so compare_rate_plans doesn't favour whichever plan's table is
+    staler."""
+    adder = tou._PCIA_NET_ADDER
+    dt = datetime(2026, 9, 2, 17, 0)  # weekday on-peak
+    assert abs(tou.drses_rate_at(dt) - (0.38856 + 0.26328 + 0.00591 + adder)) < 1e-9
+
+
+def test_base_service_matches_sep_2026_bill():
+    """Bill's non-nettable charges: $24.36 over a 30-day cycle."""
+    assert abs(tou.base_service_cost(30) - 24.36) < 0.005
+
+
 def test_vpp_event_logs_start_end_and_rate(tmp_path):
     from unittest.mock import patch
 
@@ -6175,29 +6216,29 @@ def test_drses_period_at_march_carveout():
 
 
 def test_drses_rate_at_on_peak_matches_verified_table():
-    """Pinned against the real unbundled DR-SES numbers (SDG&E delivery +
-    SDCP generation, 2026-08-31) — catches an accidental edit to the
-    hardcoded schedule."""
-    assert tou.drses_rate_at(datetime(2026, 7, 8, 17)) == pytest.approx(0.69413)
-    assert tou.drses_rate_at(datetime(2026, 1, 8, 17)) == pytest.approx(0.45352)
+    """Pinned against the real unbundled DR-SES numbers (SDG&E 6/1/2026
+    delivery 0.26919 + SDCP generation + PCIA adder) — catches an accidental
+    edit to the hardcoded schedule."""
+    assert tou.drses_rate_at(datetime(2026, 7, 8, 17)) == pytest.approx(0.38856 + 0.26919 + tou._PCIA_NET_ADDER)
+    assert tou.drses_rate_at(datetime(2026, 1, 8, 17)) == pytest.approx(0.14795 + 0.26919 + tou._PCIA_NET_ADDER)
 
 
-def test_compare_rate_plans_evtou5_currently_cheaper():
+def test_compare_rate_plans_prices_each_period_on_current_tables():
     from franklinwh_scraper.savings import compare_rate_plans
 
-    # With real unbundled numbers (both plans priced as SDG&E delivery +
-    # SDCP generation, not bundled SDG&E), EV-TOU-5 is cheaper than DR-SES
-    # at every TOU period for this customer — DR-SES's generation rate runs
-    # slightly higher than EV-TOU-5's at every period, and EV-TOU-5 alone
-    # gets the deep super-off-peak delivery discount. This replaces a
-    # pre-correction test that had it backwards, comparing a bundled DR-SES
-    # number against an unbundled EV-TOU-5 number.
-    dt = datetime(2026, 7, 8, 17)  # Wed 5pm, on-peak both schedules
-    intervals = [(dt, 1.0, 2.0, 2.0, 0.0)]  # (dt, hours, grid_kw, home_kw, solar_kw)
-    cmp = compare_rate_plans(intervals)
-    assert cmp.evtou5_import_cost < cmp.drses_import_cost
-    assert cmp.monthly_savings < 0  # switching to DR-SES would cost more, not save
-    assert cmp.import_kwh == pytest.approx(2.0)
+    # With the 6/1/2026 delivery tables, DR-SES's flat delivery (0.26919) is
+    # below EV-TOU-5's on/off-peak delivery (0.32302), so DR-SES is cheaper
+    # for on-peak imports — the older 10/1/2025 EV-TOU-5 table (0.30715)
+    # wrongly made EV-TOU-5 look cheaper there too. EV-TOU-5 still wins
+    # decisively at super-off-peak (delivery 0.04705), which is where this
+    # customer's imports actually are (172 of 189 kWh on the Sep 2026 bill).
+    on_peak = compare_rate_plans([(datetime(2026, 7, 8, 17), 1.0, 2.0, 2.0, 0.0)])
+    assert on_peak.drses_import_cost < on_peak.evtou5_import_cost
+    assert on_peak.import_kwh == pytest.approx(2.0)
+
+    super_off = compare_rate_plans([(datetime(2026, 7, 8, 3), 1.0, 2.0, 2.0, 0.0)])  # Wed 3am
+    assert super_off.evtou5_import_cost < super_off.drses_import_cost
+    assert super_off.monthly_savings < 0  # switching to DR-SES would cost more, not save
 
 
 def test_alert_rate_plan_optimality_quiet_below_savings_floor():
