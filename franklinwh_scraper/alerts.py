@@ -1421,12 +1421,22 @@ def _alert_cloudy_eb_target(
     )
 
 
+_NOON_RECOVERING_CHARGE_KW = 2.0
+
+
 def _alert_low_noon_soc(
     state: dict, today: str, now: datetime, c, cfg: Config,
     outlook=None, usage_forecast=None, store=None,
 ) -> str | None:
     in_window = now.hour in (11, 12)
     if not in_window or c.battery_soc_pct >= 30.0 or c.solar_production_kw <= 0.5:
+        return None
+    # battery_use_kw is negative while charging. Charging this fast means the
+    # battery is recovering fine (2026-09-23: fired at +3 kW, 29% -> 97% by
+    # 2:20pm). Slower charging still alerts — that's the cloudy-day case this
+    # exists for. Returns before _mark_alerted so a later, slower reading in
+    # the window can still fire.
+    if -c.battery_use_kw >= _NOON_RECOVERING_CHARGE_KW:
         return None
     if _already_alerted(state, "low_noon_soc_date", today):
         return None

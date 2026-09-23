@@ -4199,6 +4199,33 @@ def test_low_noon_soc_omits_sundown_line_without_store():
     assert "Projected @ sundown" not in msg
 
 
+def test_low_noon_soc_silent_when_charging_at_2kw_or_faster():
+    """Regression for 2026-09-23: fired at 11:01 with the battery already
+    charging at +3 kW (29% -> 97% by 2:20pm) and told the user to check for
+    'manual intervention'. Fast charging means it IS recovering."""
+    import types
+
+    now = datetime(2026, 9, 23, 11, 1, 0)
+    for charge_kw in (-2.0, -2.96):  # battery_use_kw negative = charging
+        c = types.SimpleNamespace(battery_soc_pct=29.0, solar_production_kw=3.28,
+                                  home_load_kw=0.34, battery_use_kw=charge_kw)
+        state: dict = {}
+        assert alerts._alert_low_noon_soc(state, "2026-09-23", now, c, Config()) is None
+        # Not marked as alerted — a later, slower reading in the window can still fire.
+        assert "low_noon_soc_date" not in state
+
+
+def test_low_noon_soc_still_fires_when_charging_slowly():
+    """Cloudy day: low at noon and only trickle-charging is exactly what
+    this alert exists to flag."""
+    import types
+
+    now = datetime(2026, 9, 23, 11, 1, 0)
+    c = types.SimpleNamespace(battery_soc_pct=29.0, solar_production_kw=1.0,
+                              home_load_kw=0.5, battery_use_kw=-1.9)
+    assert alerts._alert_low_noon_soc({}, "2026-09-23", now, c, Config()) is not None
+
+
 def test_fast_drain_critical_alert_includes_sundown_projection(monkeypatch):
     import types
 
