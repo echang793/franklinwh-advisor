@@ -3005,6 +3005,38 @@ def _alert_bill_projection(
     )
 
 
+_BILL_MATCH_TOLERANCE_DAYS = 3
+
+
+def _find_actual_bill(state: dict, cycle_end) -> float | None:
+    """Actual recorded bill for the cycle ending near `cycle_end` (a date).
+
+    SDG&E's meter read date drifts a day or two month to month, while
+    billing_cycle_start_day is a fixed day-of-month — so the end date a user
+    records from their bill (Sep 17) rarely equals the one the app computes
+    (Sep 19). Match the nearest actual_bill_<date> within
+    _BILL_MATCH_TOLERANCE_DAYS instead of requiring an exact key; exact wins,
+    ties go to the earlier date. Cycles are ~30 days apart, so +/-3 days
+    can't reach a neighbouring cycle's bill.
+    """
+    best: tuple[int, str, float] | None = None
+    prefix = "actual_bill_"
+    for key, val in state.items():
+        if not key.startswith(prefix) or not isinstance(val, (int, float)):
+            continue
+        try:
+            d = datetime.strptime(key[len(prefix):], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        gap = abs((d - cycle_end).days)
+        if gap > _BILL_MATCH_TOLERANCE_DAYS:
+            continue
+        cand = (gap, key, float(val))
+        if best is None or cand[:2] < best[:2]:
+            best = cand
+    return best[2] if best else None
+
+
 def _alert_bill_reconciliation(
     state: dict, today: str, now: datetime, cfg: Config, store,
 ) -> str | None:
@@ -3032,7 +3064,7 @@ def _alert_bill_reconciliation(
         return None
     state[reminded_key] = today
 
-    actual = state.get(f"actual_bill_{prior_end.isoformat()}")
+    actual = _find_actual_bill(state, prior_end)
     if actual is None:
         logger.info("Bill reconciliation reminder sent for cycle ending %s", prior_end)
         return (

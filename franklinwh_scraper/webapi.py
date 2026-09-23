@@ -24,6 +24,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 
 from .alerts import (
+    _find_actual_bill,
     _get_hourly_bias,
     _get_no_ev_hourly_load,
     _get_performance_ratio,
@@ -610,7 +611,7 @@ def api_bill():
     # writes/reads, so the CLI and dashboard always agree on which cycle a
     # recorded amount belongs to.
     state = _load_peak_state(_OUT)
-    actual_prior = state.get(f"actual_bill_{prior_end.isoformat()}")
+    actual_prior = _find_actual_bill(state, prior_end)
     diff_prior = round(actual_prior - prior["net"], 2) if isinstance(actual_prior, (int, float)) else None
 
     return {

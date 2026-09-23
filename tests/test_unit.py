@@ -2298,6 +2298,56 @@ def test_bill_reconciliation_reports_diff_once_actual_recorded(tmp_path):
     assert "Log your real bill" not in msg
 
 
+def test_find_actual_bill_tolerates_drifting_read_dates():
+    """SDG&E's meter read date drifts a day or two month to month, so the
+    cycle end a user records (their bill's Sep 17) rarely equals the end
+    the fixed billing_cycle_start_day computes (Sep 19). Lookup must find
+    the bill within +/-3 days rather than requiring an exact key match."""
+    from datetime import date
+
+    state = {"actual_bill_2026-09-17": -15.58}
+    assert alerts._find_actual_bill(state, date(2026, 9, 19)) == -15.58  # 2 days off
+    assert alerts._find_actual_bill(state, date(2026, 9, 17)) == -15.58  # exact
+    assert alerts._find_actual_bill(state, date(2026, 9, 20)) == -15.58  # 3 days: edge, inclusive
+    assert alerts._find_actual_bill(state, date(2026, 9, 21)) is None    # 4 days: a different cycle
+    assert alerts._find_actual_bill({}, date(2026, 9, 19)) is None
+
+
+def test_find_actual_bill_prefers_exact_then_nearest():
+    from datetime import date
+
+    state = {"actual_bill_2026-09-17": 10.0, "actual_bill_2026-09-19": 20.0, "actual_bill_2026-09-21": 30.0}
+    assert alerts._find_actual_bill(state, date(2026, 9, 19)) == 20.0  # exact wins
+    assert alerts._find_actual_bill(state, date(2026, 9, 18)) == 10.0  # tie -> earlier date
+    assert alerts._find_actual_bill(state, date(2026, 9, 20)) == 20.0  # nearest
+
+
+def test_find_actual_bill_ignores_non_numeric_and_malformed_keys():
+    from datetime import date
+
+    state = {"actual_bill_2026-09-19": "n/a", "actual_bill_garbage": 5.0, "actual_bill_2026-09-18": 7.5}
+    assert alerts._find_actual_bill(state, date(2026, 9, 19)) == 7.5
+
+
+def test_bill_reconciliation_finds_bill_recorded_on_real_cycle_end(tmp_path):
+    """Regression for 2026-09-23: user recorded their bill against the real
+    Sep 17 cycle end, but the app's fixed start-day put its prior cycle end
+    at Sep 19 — the reconciliation kept nagging 'log your real bill'."""
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    _insert_cycle_readings(db, 20, "2026-07", range(20, 32))
+    _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
+    now = datetime(2026, 8, 24, 8, 30)  # app's prior cycle ends Aug 19
+
+    state = {"actual_bill_2026-08-17": 999.0}  # user's real cycle ended 2 days earlier
+    msg = alerts._alert_bill_reconciliation(state, "2026-08-24", now, _C(billing_cycle_start_day=20), db)
+    assert msg is not None
+    assert "Bill reconciliation" in msg
+    assert "actual $999.00" in msg
+    assert "Log your real bill" not in msg
+
+
 def test_bill_reconciliation_gates_on_window_and_dedup(tmp_path):
     from franklinwh_scraper.config import Config as _C
 
