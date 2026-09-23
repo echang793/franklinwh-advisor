@@ -1490,6 +1490,54 @@ def test_eod_digest_no_sundown_bias_sample_on_not_directly_comparable():
     assert "sundown_bias_samples" not in state
 
 
+def _sundown_grading_store(load_kw_by_reading):
+    class _Store:
+        def daily_solar_kwh_api(self, d): return 0.0
+        def daily_solar_kwh(self, d): return 0.0
+        def daily_battery_kwh(self, d): return (0.0, 0.0)
+        def weekly_readings(self, s, e): return []
+        def soc_near(self, ts): return 25.0  # far below the raw 99% projection
+        def readings_between(self, start, end):
+            return [(f"2026-08-28T1{i}:00:00", 0.0, kw, 3.0) for i, kw in enumerate(load_kw_by_reading)]
+    return _Store()
+
+
+def _grade_sundown(store):
+    import types
+
+    today = "2026-08-28"
+    state = {f"sundown_pred_{today}": {
+        "pct": 99.0, "raw_pct": 99.0,
+        "dt": "2026-08-28T19:00:00", "requested_at": "2026-08-28T12:00:00",
+    }}
+    stats = types.SimpleNamespace(
+        current=types.SimpleNamespace(battery_soc_pct=20.0),
+        totals=types.SimpleNamespace(
+            solar_kwh=0.0, battery_charge_kwh=0.0, battery_discharge_kwh=0.0,
+            grid_load_kwh=0.0, grid_export_kwh=0.0, home_use_kwh=0.0,
+        ),
+    )
+    alerts._alert_eod_digest(state, today, datetime(2026, 8, 28, 21, 0), stats,
+                             Config(battery_capacity_kwh=13.6), None, None, store=store)
+    return state
+
+
+def test_eod_digest_sundown_bias_skips_days_with_ev_level_load():
+    """Regression for 2026-09-23: three EV-charging afternoons (4-5 kW load
+    the forecast can't know about) were graded as model bias — samples of
+    -40/-23/-73 pts averaged to a -37.5 pt correction that then dragged a
+    correct ~100% projection down to 62% on a day with no EV charging at
+    all. An EV session between the request and sundown is unforecastable
+    noise, not a bias signal, so that day must not feed the EWMA."""
+    state = _grade_sundown(_sundown_grading_store([0.5, 4.3, 0.6, 4.4]))
+    assert "sundown_bias_samples" not in state
+
+
+def test_eod_digest_sundown_bias_still_learns_on_quiet_days():
+    state = _grade_sundown(_sundown_grading_store([0.5, 0.6, 0.4, 0.5]))
+    assert state["sundown_bias_samples"] == [25.0 - 99.0]
+
+
 # ── Audit fixes (2026-07-26) ────────────────────────────────────────────
 
 def test_notify_email_reports_real_failure(monkeypatch):

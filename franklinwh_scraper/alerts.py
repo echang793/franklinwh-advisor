@@ -1618,6 +1618,20 @@ def _predict_sundown_soc(
     return kwh / bat_cap * 100.0, sundown_dt, export_kwh
 
 
+def _sundown_window_had_ev_load(store, sundown_pred: dict) -> bool:
+    """True if home load hit EV-charging level between the /sundown request
+    and the predicted sundown. Such a day's miss is unforecastable noise —
+    three EV afternoons once produced -40/-23/-73 pt "bias" samples whose
+    -37.5 pt EWMA then dragged a correct ~100% projection to 62% on a day
+    with no EV charging. Fails open (False) when the store can't answer, so
+    older stores/state keep learning as before."""
+    try:
+        rows = store.readings_between(sundown_pred["requested_at"], sundown_pred["dt"])
+    except Exception:
+        return False
+    return max((r[2] for r in rows), default=0.0) >= _NO_EV_LOAD_SPIKE_KW
+
+
 def _sundown_projection_line(
     state: dict, now: datetime, c, cap: float,
     outlook=None, usage_forecast=None, store=None,
@@ -1738,9 +1752,13 @@ def _alert_eod_digest(
             # estimate doesn't compound on itself). raw_pct falls back to
             # pct for state written before this field existed.
             raw_pct = sundown_pred.get("raw_pct", pred_pct)
-            bias_samples = state.get("sundown_bias_samples", [])
-            bias_samples.append(actual_pct - raw_pct)
-            state["sundown_bias_samples"] = bias_samples[-_SUNDOWN_BIAS_CAP:]
+            if _sundown_window_had_ev_load(store, sundown_pred):
+                logger.info("Sundown bias: EV-level load between request and sundown — "
+                            "not a model miss, sample skipped")
+            else:
+                bias_samples = state.get("sundown_bias_samples", [])
+                bias_samples.append(actual_pct - raw_pct)
+                state["sundown_bias_samples"] = bias_samples[-_SUNDOWN_BIAS_CAP:]
 
     # "Without EV" is a flat assumed-baseline walk to the next sunrise (no
     # forecast/solar/percentile model, by request 2026-08-17 — see
