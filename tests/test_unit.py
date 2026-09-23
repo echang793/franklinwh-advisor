@@ -3466,13 +3466,22 @@ def test_accuracy_excludes_pre_bias_fix_days(tmp_path):
     """cmd_accuracy must floor at the same _PR_BIAS_FIX_DATE that
     _alert_solar_degradation floors at — otherwise the week-over-week
     trend column partly reports the 2026-08-24 perf_ratio migration
-    discontinuity as forecast drift instead of real accuracy change."""
+    discontinuity as forecast drift instead of real accuracy change.
+
+    Seeds state via a direct file write, not _save_peak_state — that
+    function's real 30-day prune (relative to actual wall-clock "now")
+    was silently dropping these hardcoded 2026-08-2x fixture days once
+    real time passed 30 days beyond them, making the test flake purely
+    from the calendar moving forward with no code regression involved.
+    cmd_accuracy itself has no other today-relative filtering, so bypassing
+    just that prune (matching the convention other tests in this file
+    already use for this same state file) is the whole fix."""
+    import json as _json
     from unittest.mock import patch
 
     from click.testing import CliRunner
 
     from franklinwh_scraper import cli as cli_mod
-    from franklinwh_scraper.alerts import _save_peak_state
 
     state = {
         # Pre-fix: inflated ratio (1.15 -> 15% "error") — must be excluded.
@@ -3482,7 +3491,7 @@ def test_accuracy_excludes_pre_bias_fix_days(tmp_path):
         "daily_pr_2026-08-24": 1.02,
         "daily_pr_2026-08-25": 0.98,
     }
-    _save_peak_state(tmp_path, state)
+    (tmp_path / ".peak_alert_state.json").write_text(_json.dumps(state))
     cfg = Config(output_dir=str(tmp_path))
     runner = CliRunner()
     with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
