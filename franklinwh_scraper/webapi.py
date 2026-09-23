@@ -62,6 +62,7 @@ _OUT     = Path(_cfg.output_dir)
 if not _OUT.is_absolute():
     _OUT = _ROOT / _OUT   # server may be launched from any CWD
 _BAT_CAP = _cfg.battery_capacity_kwh or 13.6
+_load_peak_state(_OUT)  # installs the learned export rate before any route prices exports
 _POLL_S  = (_cfg.watch_interval or 5) * 60
 
 # Billing-cycle boundary now comes from cfg.billing_cycle_start_day via
@@ -600,6 +601,9 @@ def api_bill():
     today = date.today()
     start, end = _cycle_bounds(today)
     prior_start, prior_end = _cycle_bounds(start - timedelta(days=1))
+    # Load state first: it (re)installs the learned export rate the two
+    # _cycle_cost calls below price exports with.
+    state = _load_peak_state(_OUT)
     cur = _cycle_cost(start, end)
     prior = _cycle_cost(prior_start, prior_end)
     day_n = (today - start).days + 1
@@ -610,7 +614,6 @@ def api_bill():
     # by the prior cycle's end date, same key alerts._alert_bill_reconciliation
     # writes/reads, so the CLI and dashboard always agree on which cycle a
     # recorded amount belongs to.
-    state = _load_peak_state(_OUT)
     actual_prior = _find_actual_bill(state, prior_end)
     diff_prior = round(actual_prior - prior["net"], 2) if isinstance(actual_prior, (int, float)) else None
 

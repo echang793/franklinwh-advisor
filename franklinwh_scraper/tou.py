@@ -103,24 +103,49 @@ BASE_SERVICE_DAILY = 0.79343
 _NEM3_DEFAULT_EXPORT_RATE = 0.121  # $/kWh — real SDCP+SDG&E combined export credit
 
 
+# Effective export $/kWh learned from the user's latest real bill (set by
+# alerts._load_peak_state from state["learned_export_rate"], recorded via
+# `franklinwh bill-record --export-credit ... --export-kwh ...`). The flat
+# default above matched the Aug 2026 bill ($0.121) but the Sep bill averaged
+# ~$0.51/kWh — legacy 2024 export pricing varies by hour and season, so one
+# hardcoded rate can't be right every cycle. Using the latest bill's
+# effective rate tracks it with a one-cycle lag.
+_learned_export_rate: float | None = None
+_LEARNED_EXPORT_RATE_MAX = 2.0  # $/kWh — above this is a typo, not a rate
+
+
+def set_learned_export_rate(rate) -> None:
+    """Install (or, with None/invalid input, clear) the learned rate."""
+    global _learned_export_rate
+    if (isinstance(rate, (int, float)) and not isinstance(rate, bool)
+            and 0.0 < rate <= _LEARNED_EXPORT_RATE_MAX):
+        _learned_export_rate = float(rate)
+    else:
+        _learned_export_rate = None
+
+
+def _current_export_rate() -> float:
+    return _learned_export_rate if _learned_export_rate is not None else _NEM3_DEFAULT_EXPORT_RATE
+
+
 def export_rate_at(dt: datetime) -> float:
     """Return the export credit rate ($/kWh) for grid export at dt.
 
-    Flat year-round — see _NEM3_DEFAULT_EXPORT_RATE's docstring. `dt` is
-    kept in the signature (unused) so every call site that reasonably
-    expects a time-varying rate doesn't need touching if real hourly data
-    ever replaces this.
+    Flat — the latest bill's learned effective rate if one was recorded,
+    else _NEM3_DEFAULT_EXPORT_RATE. `dt` is kept in the signature (unused)
+    so every call site that reasonably expects a time-varying rate doesn't
+    need touching if real hourly data ever replaces this.
     """
-    return _NEM3_DEFAULT_EXPORT_RATE
+    return _current_export_rate()
 
 
 def peak_export_hour(month: int) -> tuple[int, float]:
     """Highest-value export (hour, $/kWh). Flat rate now (see
-    _NEM3_DEFAULT_EXPORT_RATE) so "peak" is nominal — returns a
-    representative evening hour at the one real rate, kept as a
-    (hour, rate) pair since callers display both.
+    export_rate_at) so "peak" is nominal — returns a representative
+    evening hour at the one rate, kept as a (hour, rate) pair since
+    callers display both.
     """
-    return 18, _NEM3_DEFAULT_EXPORT_RATE
+    return 18, _current_export_rate()
 
 
 def _is_holiday(dt: datetime) -> bool:

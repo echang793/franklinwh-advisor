@@ -23,7 +23,8 @@ from .notifier import (notify_email, notify_imessage_text, notify_ntfy,
                        notify_telegram, notify_webhook)
 from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
                   cycle_bounds, export_rate_at, on_peak_window,
-                  peak_export_hour, period_at, rate_at, rates_are_stale)
+                  peak_export_hour, period_at, rate_at, rates_are_stale,
+                  set_learned_export_rate)
 from .predictor import predict
 from .savings import compare_rate_plans, compute as savings_compute
 from .weather import (_outlook_cache, fetch_nws_storm_alerts)
@@ -558,6 +559,7 @@ def _load_peak_state(out: Path) -> dict:
     try:
         state = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
+        set_learned_export_rate(None)
         return {}
     # Migrate renamed key from earlier version
     if "monthly_summary_month" in state and "monthly_summary_date" not in state:
@@ -568,6 +570,11 @@ def _load_peak_state(out: Path) -> dict:
     # duplicate). It isn't date-suffixed and matches no _prune_old_state rule,
     # so it would otherwise sit in the state file forever.
     state.pop("full_charge_state", None)
+    # Keep tou's export rate in sync with the latest recorded bill on every
+    # load — also clears it when the key is absent/malformed, so a value from
+    # an earlier load in the same process can't outlive its state.
+    learned = state.get("learned_export_rate")
+    set_learned_export_rate(learned.get("rate") if isinstance(learned, dict) else None)
     return state
 
 

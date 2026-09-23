@@ -824,8 +824,15 @@ def setup(quick: bool) -> None:
 @click.option("--cycle-end", default="",
               help="Billing cycle end date this bill covers (YYYY-MM-DD). "
                    "Defaults to the most recently closed cycle.")
+@click.option("--export-credit", type=float, default=None,
+              help="Total $ credited for exports on the bill (generation + "
+                   "delivery export credits, as a positive number). With "
+                   "--export-kwh, teaches the app your real export $/kWh.")
+@click.option("--export-kwh", type=float, default=None,
+              help="Total kWh exported on the bill (see --export-credit).")
 @click.pass_context
-def bill_record(ctx: click.Context, amount: float, cycle_end: str) -> None:
+def bill_record(ctx: click.Context, amount: float, cycle_end: str,
+                export_credit: float | None, export_kwh: float | None) -> None:
     """Record your real utility bill to compare against the app's projection.
 
     The app estimates your bill from grid import/export at published TOU
@@ -837,6 +844,14 @@ def bill_record(ctx: click.Context, amount: float, cycle_end: str) -> None:
     outdir = Path(cfg.output_dir)
     if not outdir.is_absolute():
         outdir = Path(__file__).parent.parent / outdir
+
+    if (export_credit is None) != (export_kwh is None):
+        raise click.ClickException("--export-credit and --export-kwh must be given together.")
+    learned_rate = None
+    if export_credit is not None:
+        if export_kwh <= 0 or export_credit <= 0:
+            raise click.ClickException("--export-credit and --export-kwh must both be positive.")
+        learned_rate = round(export_credit / export_kwh, 4)
 
     today = datetime.now().date()
     cur_start, _cur_end = cycle_bounds(today, cfg.billing_cycle_start_day)
@@ -863,9 +878,17 @@ def bill_record(ctx: click.Context, amount: float, cycle_end: str) -> None:
     with _state_lock(outdir):
         state = _load_peak_state(outdir)
         state[f"actual_bill_{end.isoformat()}"] = amount
+        if learned_rate is not None:
+            state["learned_export_rate"] = {
+                "rate": learned_rate, "cycle_end": end.isoformat(),
+                "credit": export_credit, "kwh": export_kwh,
+            }
         _save_peak_state(outdir, state)
 
     _ok(f"Recorded ${amount:.2f} for the cycle ending {end.strftime('%b %-d, %Y')}")
+    if learned_rate is not None:
+        _ok(f"Export credit rate now ${learned_rate:.4f}/kWh "
+            f"(${export_credit:.2f} / {export_kwh:g} kWh) — used for cost estimates going forward")
     click.echo("  Check the dashboard's billing card or `franklinwh doctor` for the projection diff.")
 
 

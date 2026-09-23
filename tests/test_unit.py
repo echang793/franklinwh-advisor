@@ -17,6 +17,15 @@ from franklinwh_scraper.config import Config
 from franklinwh_scraper.predictor import predict
 
 
+@pytest.fixture(autouse=True)
+def _reset_learned_export_rate():
+    """tou's learned export rate is process-global (set by _load_peak_state);
+    keep one test's state from leaking into the next."""
+    tou.set_learned_export_rate(None)
+    yield
+    tou.set_learned_export_rate(None)
+
+
 # ── TOU ───────────────────────────────────────────────────────────────
 
 def test_period_at_weekday():
@@ -3635,6 +3644,110 @@ def test_bill_record_defaults_to_most_recently_closed_cycle(tmp_path):
     cur_start, _cur_end = cycle_bounds(datetime.now().date(), 20)
     _, expected_end = cycle_bounds(cur_start - timedelta(days=1), 20)
     assert state[f"actual_bill_{expected_end.isoformat()}"] == 88.0
+
+
+def test_export_rate_uses_learned_rate_when_set():
+    """The flat $0.121 came from the Aug 2026 bill, but the Sep bill's
+    export credits averaged ~$0.51/kWh (legacy 2024 pricing varies by hour
+    and season) — a fixed rate under-called that cycle's credits by ~$50."""
+    now = datetime(2026, 9, 24, 15, 0)
+    assert tou.export_rate_at(now) == 0.121  # default until something is learned
+    tou.set_learned_export_rate(0.5139)
+    assert tou.export_rate_at(now) == 0.5139
+    assert tou.peak_export_hour(9)[1] == 0.5139
+    tou.set_learned_export_rate(None)
+    assert tou.export_rate_at(now) == 0.121
+
+
+def test_learned_export_rate_rejects_implausible_values():
+    now = datetime(2026, 9, 24, 15, 0)
+    for bad in (0.0, -0.3, 5.0, float("nan"), float("inf"), "0.5"):
+        tou.set_learned_export_rate(bad)
+        assert tou.export_rate_at(now) == 0.121, bad
+
+
+def test_load_peak_state_applies_learned_export_rate(tmp_path):
+    import json as _json
+
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    now = datetime(2026, 9, 24, 15, 0)
+    (tmp_path / ".peak_alert_state.json").write_text(_json.dumps(
+        {"learned_export_rate": {"rate": 0.5139, "cycle_end": "2026-09-17"}}))
+    _load_peak_state(tmp_path)
+    assert tou.export_rate_at(now) == 0.5139
+
+    # A state file without the key must reset it, not keep a stale value
+    # from an earlier load in the same process.
+    (tmp_path / ".peak_alert_state.json").write_text(_json.dumps({}))
+    _load_peak_state(tmp_path)
+    assert tou.export_rate_at(now) == 0.121
+
+    # Malformed entry is ignored rather than crashing the load.
+    (tmp_path / ".peak_alert_state.json").write_text(_json.dumps({"learned_export_rate": "junk"}))
+    _load_peak_state(tmp_path)
+    assert tou.export_rate_at(now) == 0.121
+
+
+def test_bill_record_learns_export_rate_from_export_credit(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    cfg = Config(output_dir=str(tmp_path), billing_cycle_start_day=20)
+    recent = (datetime.now().date() - timedelta(days=5)).isoformat()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = CliRunner().invoke(cli_mod.cli, [
+            "bill-record", "--amount=-15.58", "--cycle-end", recent,
+            "--export-credit", "64.75", "--export-kwh", "126"])
+    assert res.exit_code == 0, res.output
+    state = _load_peak_state(tmp_path)
+    learned = state["learned_export_rate"]
+    assert learned["rate"] == round(64.75 / 126, 4)
+    assert learned["cycle_end"] == recent
+    assert state[f"actual_bill_{recent}"] == -15.58
+    assert "0.5139" in res.output
+
+
+def test_bill_record_export_flags_must_come_together(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    cfg = Config(output_dir=str(tmp_path), billing_cycle_start_day=20)
+    recent = (datetime.now().date() - timedelta(days=5)).isoformat()
+    for extra in (["--export-credit", "64.75"], ["--export-kwh", "126"],
+                  ["--export-credit", "10", "--export-kwh", "0"]):
+        with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+            res = CliRunner().invoke(cli_mod.cli, ["bill-record", "--amount", "10",
+                                                   "--cycle-end", recent, *extra])
+        assert res.exit_code != 0, extra
+    assert "learned_export_rate" not in _load_peak_state(tmp_path)
+
+
+def test_bill_record_without_export_flags_keeps_previous_learned_rate(tmp_path):
+    import json as _json
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    (tmp_path / ".peak_alert_state.json").write_text(_json.dumps(
+        {"learned_export_rate": {"rate": 0.5139, "cycle_end": "2026-09-17"}}))
+    cfg = Config(output_dir=str(tmp_path), billing_cycle_start_day=20)
+    recent = (datetime.now().date() - timedelta(days=5)).isoformat()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = CliRunner().invoke(cli_mod.cli, ["bill-record", "--amount", "42", "--cycle-end", recent])
+    assert res.exit_code == 0, res.output
+    assert _load_peak_state(tmp_path)["learned_export_rate"]["rate"] == 0.5139
 
 
 def test_vpp_event_logs_start_end_and_rate(tmp_path):
