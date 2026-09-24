@@ -3013,6 +3013,7 @@ def _alert_bill_projection(
 
 
 _BILL_MATCH_TOLERANCE_DAYS = 3
+_BILL_PCT_MIN_ESTIMATE = 5.0  # $ — below this, a percent-off figure is noise
 
 
 def _find_actual_bill(state: dict, cycle_end) -> float | None:
@@ -3097,11 +3098,19 @@ def _alert_bill_reconciliation(
     diff       = actual - estimated
     logger.info("Bill reconciliation: actual $%.2f vs estimated $%.2f (diff $%.2f)",
                 actual, estimated, diff)
+    def _usd(x: float, signed: bool = False) -> str:
+        sign = ("+" if signed else "") if x >= 0 else "-"
+        return f"{sign}${abs(x):.2f}"
+
+    # Percent of |estimate| only when the estimate is big enough to mean
+    # something — a net-credit month (negative estimate) once printed 11420%
+    # via max(estimated, 0.01), and any miss on a ~$0 bill looks enormous.
+    pct = (f" ({abs(diff) / abs(estimated) * 100:.0f}%)"
+           if abs(estimated) >= _BILL_PCT_MIN_ESTIMATE else "")
     return (
         f"💵 <b>FranklinWH: Bill reconciliation</b>\n"
-        f"Cycle ending {prior_end.strftime('%b %-d')}: actual ${actual:.2f} vs "
-        f"app estimate ${estimated:.2f} — off by ${diff:+.2f} "
-        f"({abs(diff) / max(estimated, 0.01) * 100:.0f}%)."
+        f"Cycle ending {prior_end.strftime('%b %-d')}: actual {_usd(actual)} vs "
+        f"app estimate {_usd(estimated)} — off by {_usd(diff, signed=True)}{pct}."
     )
 
 

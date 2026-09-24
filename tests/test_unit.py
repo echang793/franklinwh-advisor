@@ -2357,6 +2357,42 @@ def test_bill_reconciliation_finds_bill_recorded_on_real_cycle_end(tmp_path):
     assert "Log your real bill" not in msg
 
 
+def _reconcile_with_estimate(tmp_path, monkeypatch, estimated, actual):
+    """Run the reconciliation alert with the app's estimate pinned to
+    `estimated` by stubbing the cost model (cycle is Jul 20 - Aug 19, 31 days)."""
+    import types
+
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    _insert_cycle_readings(db, 20, "2026-07", range(20, 32))
+    _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
+    monkeypatch.setattr(alerts, "savings_compute", lambda iv: types.SimpleNamespace(
+        actual_net_energy_cost=estimated - alerts.base_service_cost(31)))
+    state = {"actual_bill_2026-08-19": actual}
+    return alerts._alert_bill_reconciliation(
+        state, "2026-08-24", datetime(2026, 8, 24, 8, 30), _C(billing_cycle_start_day=20), db)
+
+
+def test_bill_reconciliation_percent_sane_when_estimate_is_negative(tmp_path, monkeypatch):
+    """Regression for 2026-09-24: with a net-credit month (estimate -$14.44)
+    the percent divided by max(estimated, 0.01) = $0.01, so a $1.14 miss
+    printed as 11420%. Percent must be relative to |estimate|."""
+    msg = _reconcile_with_estimate(tmp_path, monkeypatch, estimated=-14.44, actual=-15.58)
+    assert msg is not None
+    assert "11420" not in msg and "(8%)" in msg  # 1.14 / 14.44
+    assert "-$15.58" in msg and "-$14.44" in msg and "-$1.14" in msg  # sign before the $, not "$-"
+    assert "$-" not in msg
+
+
+def test_bill_reconciliation_omits_percent_when_estimate_near_zero(tmp_path, monkeypatch):
+    """A percent of a ~$0 bill is meaningless (any dollar miss looks huge)."""
+    msg = _reconcile_with_estimate(tmp_path, monkeypatch, estimated=1.0, actual=6.0)
+    assert msg is not None
+    assert "off by +$5.00" in msg
+    assert "%" not in msg
+
+
 def test_bill_reconciliation_gates_on_window_and_dedup(tmp_path):
     from franklinwh_scraper.config import Config as _C
 
