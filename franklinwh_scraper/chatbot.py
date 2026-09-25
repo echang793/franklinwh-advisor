@@ -346,6 +346,8 @@ class TelegramChatBot:
                             "/ebtarget — Emergency Backup charge target for today\n"
                             "/mute     — snooze non-safety alerts (2h or 8h)\n"
                             "/unmute   — cancel an active mute\n"
+                            "/snooze   — silence ONE alert: /snooze <alert> [hours]\n"
+                            "/unsnooze — cancel: /unsnooze <alert>\n"
                             "/clear    — reset conversation history"
                         )
                         continue
@@ -419,6 +421,9 @@ class TelegramChatBot:
                             args=(chat_id,),
                             daemon=True,
                         ).start()
+                        continue
+                    if re.match(r"/(un)?snooze(\s|$)", text.lower()):
+                        self._send(chat_id, self._snooze_command(text))
                         continue
                     # /mute — buttons for the two durations, matching the
                     # CMR News bot's mute UX. /mute N (hours) skips the
@@ -1126,6 +1131,17 @@ class TelegramChatBot:
             self._answer_callback_query(cq_id, "Muted" if hours > 0 else "Unmuted")
             self._send(chat_id, reply)
             return
+        if data.startswith("snooze:"):
+            _, _, rest = data.partition(":")
+            name, _, hrs = rest.rpartition(":")
+            try:
+                hours = float(hrs)
+            except ValueError:
+                hours = 24.0
+            ok, reply = self._set_snooze(name, hours)
+            self._answer_callback_query(cq_id, "Snoozed" if ok and hours > 0 else "Done" if ok else "Can't snooze")
+            self._send(chat_id, reply)
+            return
         self._answer_callback_query(cq_id)
 
     def _set_mute(self, hours: float) -> str:
@@ -1156,22 +1172,70 @@ class TelegramChatBot:
                     f"area outage) are never muted.")
         return "🔔 Alerts unmuted."
 
+    def _set_snooze(self, name: str, hours: float) -> tuple[bool, str]:
+        """Snooze (hours > 0) or clear (hours <= 0) ONE alert. Same state
+        file and lock as _set_mute; alerts.snooze_alert owns validation
+        (safety alerts refused, typos get suggestions)."""
+        from pathlib import Path
+
+        from .alerts import _save_peak_state, _state_lock, snooze_alert
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        with _state_lock(out):
+            state = _load_peak_state(out)
+            ok, msg = snooze_alert(state, name, hours, datetime.now())
+            if ok:
+                _save_peak_state(out, state)
+        return ok, msg
+
+    def _snooze_command(self, text: str) -> str:
+        """Handle `/snooze [alert [hours]]` and `/unsnooze <alert>`."""
+        from pathlib import Path
+
+        from .alerts import active_snoozes
+        parts = text.split()
+        cmd, args = parts[0].lower(), parts[1:]
+        usage = ("Usage: /snooze <alert> [hours]  (default 24h; e.g. /snooze low_noon_soc 8)\n"
+                 "/unsnooze <alert>  ·  names: franklinwh alerts-report or the 😴 button on an alert")
+        if cmd == "/unsnooze":
+            return self._set_snooze(args[0], 0)[1] if args else usage
+        if not args:
+            out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+            active = active_snoozes(_load_peak_state(out), datetime.now())
+            lines = [f"😴 {n} until {u.strftime('%a %-I:%M %p')}" for n, u in sorted(active.items())]
+            return "\n".join(lines + [usage]) if lines else "No alerts snoozed.\n" + usage
+        hours = 24.0
+        if len(args) > 1:
+            dur = args[1].lower().rstrip("h")
+            if dur in ("off", "clear", "0"):
+                hours = 0.0
+            else:
+                try:
+                    hours = float(dur)
+                except ValueError:
+                    return usage
+        return self._set_snooze(args[0], hours)[1]
+
     def _mute_status_line(self) -> str:
         """One-line mute status for /status, or '' if not muted. Read-only
         peek at state — no lock needed for an informational display."""
         from pathlib import Path
 
+        from .alerts import active_snoozes
+
         out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
-        until_raw = _load_peak_state(out).get("alerts_muted_until")
-        if not until_raw:
-            return ""
+        state = _load_peak_state(out)
+        parts = []
+        until_raw = state.get("alerts_muted_until")
         try:
-            until = datetime.fromisoformat(until_raw)
+            until = datetime.fromisoformat(until_raw) if until_raw else None
         except ValueError:
-            return ""
-        if datetime.now() >= until:
-            return ""
-        return f"🔕 Alerts muted until {until.strftime('%-I:%M %p')}."
+            until = None
+        if until and datetime.now() < until:
+            parts.append(f"🔕 Alerts muted until {until.strftime('%-I:%M %p')}.")
+        snoozed = active_snoozes(state, datetime.now())
+        if snoozed:
+            parts.append("😴 Snoozed: " + ", ".join(sorted(snoozed)))
+        return "\n".join(parts)
 
     def _send(self, chat_id: str, text: str, reply_markup: dict | None = None) -> None:
         url = f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}/sendMessage"

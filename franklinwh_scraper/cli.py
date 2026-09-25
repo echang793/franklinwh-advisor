@@ -35,6 +35,7 @@ from .alerts import (
     _save_peak_state,
     _send_alert,
     _state_lock,
+    summarize_alert_log,
 )
 from .chatbot import TelegramChatBot
 from .client import FranklinWHClient
@@ -871,6 +872,48 @@ def setup(quick: bool) -> None:
 
 
 # ── Bill reconciliation ─────────────────────────────────────────────
+
+@cli.command("alerts-report")
+@click.option("--days", default=30, show_default=True, type=click.IntRange(1, 365),
+              help="Look back this many days.")
+@click.pass_context
+def alerts_report(ctx: click.Context, days: int) -> None:
+    """Count alerts by type (most frequent first) to find the noisy ones.
+
+    Reads output/alerts_log.jsonl. Alerts sent since 2026-09-25 are recorded
+    by name (use that name with /snooze in Telegram); older entries are
+    grouped by their title.
+    """
+    cfg = ctx.obj["config"]
+    outdir = Path(cfg.output_dir)
+    if not outdir.is_absolute():
+        outdir = Path(__file__).parent.parent / outdir
+    entries = []
+    try:
+        for line in (outdir / "alerts_log.jsonl").read_text().splitlines():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        pass
+    rows = summarize_alert_log(entries, datetime.now(), days)
+    if not rows:
+        _info(f"No alerts logged in the last {days} days.")
+        return
+    total = sum(r["count"] for r in rows)
+    _header(f"Alerts — last {days} days")
+    _info(f"{total} alerts, {len(rows)} types, {sum(r['per_day'] for r in rows):.1f}/day")
+    click.echo()
+    for r in rows:
+        flag = "!" if r["urgent"] else " "
+        click.echo(f"  {r['count']:>4}  {r['per_day']:>5.1f}/day  last {r['last']:%b %-d %H:%M} {flag} {r['key']}")
+    click.echo()
+    if any(r["named"] for r in rows):
+        _info("Silence a noisy one from Telegram: /snooze <name> [hours]  (or tap 😴 on the alert)")
+    else:
+        _info("Names appear here for alerts sent from now on; use /snooze <name> [hours] in Telegram.")
+
 
 @cli.command("bill-record")
 @click.option("--amount", type=float, required=True,

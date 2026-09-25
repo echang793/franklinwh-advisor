@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .history import HistoryStore
 from .tou import _is_holiday
+
+logger = logging.getLogger(__name__)
 
 _SEASON_MIN_DAYS = 21  # need at least this many days in season for seasonal profile
 
@@ -54,6 +57,56 @@ _LOAD_NOWCAST_HALFLIFE_H = 2.0  # current draw's influence on the forecast
                                 # distorting the pure-overnight tail.
 
 
+_NOWCAST_MODEL_MIN_KW = 0.5           # only compare readings where the model expects real sun
+_NOWCAST_MIN_READINGS = 12            # ~1h of polling before having any opinion
+_NOWCAST_FULL_WEIGHT_READINGS = 36    # ~3h of daytime data = full trust
+_NOWCAST_CLAMP = (0.5, 1.5)           # one bad stretch can't zero (or double) the day
+
+
+def solar_nowcast_factor(
+    store, outlook, system_peak_kw: float, perf_ratio: float = 1.0,
+    hourly_bias: dict[int, float] | None = None, now: datetime | None = None,
+) -> float:
+    """How today's real solar output compares with what the forecast model
+    said it would be so far — the multiplier for the rest of today.
+
+    Forecast GHI can be wrong for a whole day (2026-09-20: a marine-layer day
+    forecast ~20 kWh delivered ~17). Once there's real production, that gap
+    is far better evidence about the afternoon than yesterday's calibration.
+    Uses the same model as predict() (GHI x system peak x perf_ratio x hourly
+    bias) over today's readings where the model expected meaningful sun.
+    The ratio is clamped to _NOWCAST_CLAMP and shrunk toward 1.0 until about
+    three hours of data exist. Returns 1.0 (no change) whenever it can't say:
+    no readings, too few, no outlook, or any store error.
+    """
+    if outlook is None or system_peak_kw is None:
+        return 1.0
+    now = now or datetime.now()
+    try:
+        rows = store.readings_between(
+            now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(), now.isoformat())
+        actual = model = 0.0
+        n = 0
+        for ts, _grid_kw, _home_kw, solar_kw in rows:
+            dt = datetime.fromisoformat(ts)
+            expected = max(0.0, outlook.ghi_at(dt)) / 1000.0 * system_peak_kw * perf_ratio
+            if hourly_bias and dt.hour in hourly_bias:
+                expected *= hourly_bias[dt.hour]
+            if expected < _NOWCAST_MODEL_MIN_KW:
+                continue
+            actual += max(0.0, solar_kw)
+            model += expected
+            n += 1
+    except Exception:
+        logger.debug("Solar nowcast unavailable", exc_info=True)
+        return 1.0
+    if n < _NOWCAST_MIN_READINGS or model <= 0:
+        return 1.0
+    ratio = min(max(actual / model, _NOWCAST_CLAMP[0]), _NOWCAST_CLAMP[1])
+    weight = min(1.0, n / _NOWCAST_FULL_WEIGHT_READINGS)
+    return 1.0 + weight * (ratio - 1.0)
+
+
 def predict(
     store: HistoryStore,
     horizon_hours: int = 12,
@@ -64,6 +117,7 @@ def predict(
     hourly_bias: dict[int, float] | None = None,
     current_load_kw: float | None = None,
     load_percentile: float = 0.5,
+    nowcast: bool = True,
 ) -> UsageForecast:
     """
     Predict home load and solar production for the next `horizon_hours` hours.
@@ -88,6 +142,9 @@ def predict(
     HistoryStore._percentile_load_by_slot). Leave at the default for the
     general forecast (Emergency-Backup decisions, /sundown, general
     dashboard) where realistic mixed expectations are the point.
+    nowcast: rescale the rest of TODAY's weather-driven solar by how today's
+    real production has tracked the model so far (solar_nowcast_factor);
+    tomorrow's hours are left alone. Pass False for a pure forecast.
     Confidence degrades with fewer data points per slot.
     """
     now        = datetime.now()
@@ -139,6 +196,12 @@ def predict(
     ac_temp_scale   = 1.0 + 0.025 * max(0.0, avg_temp_c - 27.0)
     heat_temp_scale = 1.0 + 0.020 * max(0.0, 18.0 - avg_temp_c)
 
+    solar_nowcast = 1.0
+    if nowcast and outlook is not None and system_peak_kw is not None:
+        solar_nowcast = solar_nowcast_factor(store, outlook, system_peak_kw, perf_ratio, hourly_bias, now)
+        if abs(solar_nowcast - 1.0) > 0.05:
+            logger.debug("Solar nowcast x%.2f applied to today's remaining forecast", solar_nowcast)
+
     predictions: list[HourPrediction] = []
     live_residual_kw = 0.0  # set from h=0's (current - baseline) gap, then decayed
 
@@ -161,6 +224,8 @@ def predict(
             solar_kw = max(0.0, outlook.ghi_at(future) / 1000.0 * system_peak_kw * perf_ratio)
             if hourly_bias and future.hour in hourly_bias:
                 solar_kw *= hourly_bias[future.hour]
+            if future.date() == now.date():
+                solar_kw *= solar_nowcast
         else:
             solar_kw = solar_profile.get(slot, 0.0)
 

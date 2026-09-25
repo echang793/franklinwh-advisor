@@ -415,22 +415,32 @@ _MUTE_KEYBOARD = {"inline_keyboard": [[
 ]]}
 
 
+def _alert_keyboard(alert_name: str) -> dict:
+    """Buttons under a Telegram alert: the global mute row plus a one-tap
+    "snooze just this alert for 24h" (callback `snooze:<name>:<hours>`;
+    Telegram caps callback_data at 64 bytes, alert names are far shorter)."""
+    return {"inline_keyboard": _MUTE_KEYBOARD["inline_keyboard"] + [[
+        {"text": "😴 Snooze this alert 24h", "callback_data": f"snooze:{alert_name}:24"},
+    ]]}
+
+
 def _send_alert(body: str, cfg: Config, urgent: bool = False, alert_name: str | None = None) -> None:
     """Send to all configured channels.
 
     `alert_name` — when given and not one of `_ALWAYS_ON_ALERTS`, the
-    Telegram message carries the same 2h/8h mute buttons as the standalone
-    `/mute` command, so muting doesn't require leaving the alert to type a
-    command. `_handle_callback_query` in chatbot.py already handles any
-    `mute:N` tap regardless of which message it came from, so no chatbot
-    change was needed to wire this up. Omitted (None) or an always-on
-    safety alert → plain message, no buttons — matches _alert_enabled's
-    own always-on carve-out so a safety alert can never even look mutable.
+    Telegram message carries the mute buttons (same as the standalone
+    `/mute` command) plus a per-alert snooze button, so silencing a noisy
+    alert doesn't require leaving it to type a command.
+    `_handle_callback_query` in chatbot.py handles the taps. Omitted (None)
+    or an always-on safety alert → plain message, no buttons — matches
+    _alert_enabled's own always-on carve-out so a safety alert can never
+    even look mutable. The name is also recorded in alerts_log.jsonl so
+    `franklinwh alerts-report` can count alerts by type.
     """
     if cfg.imessage_phone:
         notify_imessage_text(body, cfg.imessage_phone)
     if cfg.telegram_bot_token and cfg.telegram_chat_id:
-        kb = _MUTE_KEYBOARD if (alert_name and alert_name not in _ALWAYS_ON_ALERTS) else None
+        kb = _alert_keyboard(alert_name) if (alert_name and alert_name not in _ALWAYS_ON_ALERTS) else None
         notify_telegram(body, cfg.telegram_bot_token, cfg.telegram_chat_id, reply_markup=kb)
     if cfg.smtp_host and cfg.email_to:
         notify_email(body, cfg)
@@ -438,19 +448,18 @@ def _send_alert(body: str, cfg: Config, urgent: bool = False, alert_name: str | 
         notify_webhook(body, urgent, cfg)
     if getattr(cfg, "ntfy_topic", ""):
         notify_ntfy(body, cfg)
-    _log_alert(body, cfg, urgent)
+    _log_alert(body, cfg, urgent, alert_name)
 
 
-def _log_alert(body: str, cfg: Config, urgent: bool) -> None:
+def _log_alert(body: str, cfg: Config, urgent: bool, alert_name: str | None = None) -> None:
     """Append the alert to output/alerts_log.jsonl for the web dashboard feed."""
     try:
         path = Path(cfg.output_dir) / "alerts_log.jsonl"
+        entry = {"ts": datetime.now().isoformat(), "urgent": urgent, "body": body}
+        if alert_name:
+            entry["alert"] = alert_name
         with open(path, "a") as f:
-            f.write(json.dumps({
-                "ts": datetime.now().isoformat(),
-                "urgent": urgent,
-                "body": body,
-            }) + "\n")
+            f.write(json.dumps(entry) + "\n")
     except OSError as e:
         logger.debug("Alert log write failed: %s", e)
 
@@ -509,10 +518,114 @@ def _alerts_muted(state: dict, now: datetime) -> bool:
     return False
 
 
+def known_alert_names() -> list[str]:
+    """Every alert name the dispatcher can send, read from its own
+    `_candidates` table so there is one source of truth (a hand-kept list
+    would drift the next time an alert is added)."""
+    import inspect
+    import re
+    return sorted(set(re.findall(r'\("([a-z0-9_]+)",\s+lambda', inspect.getsource(_check_peak_alerts))))
+
+
+def active_snoozes(state: dict, now: datetime) -> dict[str, datetime]:
+    """{alert name: snoozed-until} for snoozes still in force. Expired or
+    malformed entries are dropped from `state` (caller persists), so a
+    forgotten snooze can't silently silence an alert forever."""
+    snoozes = state.get("alert_snoozed_until")
+    if not isinstance(snoozes, dict):
+        return {}
+    active: dict[str, datetime] = {}
+    for name, until in list(snoozes.items()):
+        try:
+            when = datetime.fromisoformat(until)
+        except (TypeError, ValueError):
+            snoozes.pop(name, None)
+            continue
+        if now < when:
+            active[name] = when
+        else:
+            snoozes.pop(name, None)
+    if not snoozes:
+        state.pop("alert_snoozed_until", None)
+    return active
+
+
+def snooze_alert(state: dict, name: str, hours: float, now: datetime) -> tuple[bool, str]:
+    """Snooze one alert for `hours` (<= 0 clears it). Returns (ok, message).
+
+    Finer-grained than the global /mute: one noisy alert can be silenced
+    without losing the rest. Safety alerts (_ALWAYS_ON_ALERTS) can never be
+    snoozed. Names are matched tolerantly (case, dashes, a pasted
+    `_alert_` prefix) and typos get did-you-mean suggestions.
+    """
+    import difflib
+    key = name.strip().lower().replace("-", "_")
+    if key.startswith("_alert_"):
+        key = key[len("_alert_"):]
+    if key in _ALWAYS_ON_ALERTS:
+        return False, f"{key} is a safety alert and can't be snoozed."
+    known = known_alert_names()
+    if key not in known:
+        close = difflib.get_close_matches(key, known, n=3)
+        hint = f" Did you mean: {', '.join(close)}?" if close else " Run `franklinwh alerts-report` to see alert names."
+        return False, f"Unknown alert '{name}'.{hint}"
+    active_snoozes(state, now)  # prune expired first
+    if hours <= 0:
+        state.get("alert_snoozed_until", {}).pop(key, None)
+        if not state.get("alert_snoozed_until", True):
+            state.pop("alert_snoozed_until", None)
+        return True, f"🔔 {key} is no longer snoozed."
+    until = now + timedelta(hours=hours)
+    state.setdefault("alert_snoozed_until", {})[key] = until.isoformat()
+    return True, f"😴 {key} snoozed until {until.strftime('%a %-I:%M %p')} ({hours:g}h)."
+
+
+def _title_key(body: str) -> str:
+    """Stable grouping key for an alert logged without a name: first line,
+    tags stripped, numbers collapsed ("Unusual drain rate — 13%/hr" and
+    "— 9%/hr" are one alert type)."""
+    import re
+    first = re.sub(r"<[^>]+>", "", body).strip().splitlines()[0] if body.strip() else ""
+    # Date words too: "Daily Summary — Thu Sep 24" is one alert type, not one per weekday.
+    first = re.sub(r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\b|"
+                   r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b", "#", first)
+    return re.sub(r"\d+(?:\.\d+)?", "#", first)[:70]
+
+
+def summarize_alert_log(entries: list[dict], now: datetime, days: int) -> list[dict]:
+    """Per-alert-type counts from alerts_log.jsonl entries, most frequent
+    first. Entries carry an `alert` name when sent after 2026-09-25;
+    older ones are grouped by normalized title. Each row: key, named, count,
+    per_day, last, urgent."""
+    cutoff = now - timedelta(days=days)
+    rows: dict[str, dict] = {}
+    earliest = now
+    for e in entries:
+        try:
+            ts = datetime.fromisoformat(e["ts"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if ts < cutoff:
+            continue
+        earliest = min(earliest, ts)
+        key = e.get("alert") or _title_key(e.get("body", ""))
+        row = rows.setdefault(key, {"key": key, "named": bool(e.get("alert")),
+                                    "count": 0, "last": ts, "urgent": False})
+        row["count"] += 1
+        row["last"] = max(row["last"], ts)
+        row["urgent"] = row["urgent"] or bool(e.get("urgent"))
+    span = max(1, min(days, (now - earliest).days + 1))
+    for row in rows.values():
+        row["per_day"] = row["count"] / span
+    return sorted(rows.values(), key=lambda r: (-r["count"], r["key"]))
+
+
 def _alert_enabled(cfg: Config, name: str, state: dict, now: datetime) -> bool:
     if name in _ALWAYS_ON_ALERTS:
         return True  # grid outage, fast drain, area outage — /mute never touches these
     if name in (cfg.disabled_alerts or []):
+        return False
+    if name in active_snoozes(state, now):
         return False
     return not _alerts_muted(state, now)
 

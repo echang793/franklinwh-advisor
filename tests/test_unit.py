@@ -5402,7 +5402,7 @@ def test_send_alert_attaches_mute_buttons_except_always_on(monkeypatch, tmp_path
     cfg = Config(telegram_bot_token="x", telegram_chat_id="y", output_dir=str(tmp_path))
 
     alerts._send_alert("battery full", cfg, alert_name="solar_surplus_overflow")
-    assert calls[-1] == alerts._MUTE_KEYBOARD
+    assert calls[-1] == alerts._alert_keyboard("solar_surplus_overflow")  # mute row + per-alert snooze
 
     alerts._send_alert("grid down!", cfg, alert_name="grid_down")
     assert calls[-1] is None
@@ -6818,3 +6818,226 @@ def test_doctor_not_loaded_agent_only_a_problem_on_the_host_machine(monkeypatch)
     assert "✗" in host and "not loaded" in host                                  # this IS the host
     elsewhere = _line(_doctor_lines(monkeypatch, run_on_host="Erics-MacBook-Air"), "advisor LaunchAgent")
     assert "✓" in elsewhere                                                       # standby machine: expected
+
+
+# ── Per-alert snooze + alerts-report (2026-09-25) ───────────────────────
+
+def test_known_alert_names_come_from_the_dispatcher():
+    names = alerts.known_alert_names()
+    assert len(names) >= 30
+    assert {"eb_ready", "low_noon_soc", "grid_down", "eb_approaching_target"} <= set(names)
+
+
+def test_snooze_silences_only_that_alert_until_it_expires():
+    now = datetime(2026, 9, 25, 12, 0)
+    cfg = Config()
+    state: dict = {}
+    ok, _msg = alerts.snooze_alert(state, "low_noon_soc", 24, now)
+    assert ok
+    assert not alerts._alert_enabled(cfg, "low_noon_soc", state, now + timedelta(hours=23))
+    assert alerts._alert_enabled(cfg, "eb_ready", state, now)              # others untouched
+    assert alerts._alert_enabled(cfg, "low_noon_soc", state, now + timedelta(hours=25))  # expired
+    assert "low_noon_soc" not in state.get("alert_snoozed_until", {})       # expiry pruned
+
+
+def test_snooze_can_be_cleared_and_lists_active():
+    now = datetime(2026, 9, 25, 12, 0)
+    state: dict = {}
+    alerts.snooze_alert(state, "eb_ready", 2, now)
+    alerts.snooze_alert(state, "low_noon_soc", 8, now)
+    assert set(alerts.active_snoozes(state, now)) == {"eb_ready", "low_noon_soc"}
+    ok, msg = alerts.snooze_alert(state, "eb_ready", 0, now)                # hours<=0 clears
+    assert ok and "no longer snoozed" in msg
+    assert set(alerts.active_snoozes(state, now)) == {"low_noon_soc"}
+
+
+def test_snooze_refuses_safety_alerts_and_suggests_for_typos():
+    now = datetime(2026, 9, 25, 12, 0)
+    state: dict = {}
+    ok, msg = alerts.snooze_alert(state, "grid_down", 24, now)
+    assert not ok and "safety" in msg and not state
+    ok, msg = alerts.snooze_alert(state, "low_noon_sox", 24, now)
+    assert not ok and "low_noon_soc" in msg and not state                   # did-you-mean
+    # tolerant input: case, dashes, and a pasted function name
+    ok, _ = alerts.snooze_alert(state, "Low-Noon-SoC", 1, now)
+    assert ok
+    ok, _ = alerts.snooze_alert(state, "_alert_eb_ready", 1, now)
+    assert ok
+
+
+def test_send_alert_logs_the_alert_name_and_offers_snooze(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(alerts, "notify_telegram",
+                        lambda body, token, chat_id, reply_markup=None: calls.append(reply_markup))
+    cfg = Config(telegram_bot_token="x", telegram_chat_id="y", output_dir=str(tmp_path))
+
+    alerts._send_alert("noon low", cfg, alert_name="low_noon_soc")
+    entry = json.loads((tmp_path / "alerts_log.jsonl").read_text().splitlines()[-1])
+    assert entry["alert"] == "low_noon_soc"
+    buttons = [b for row in calls[-1]["inline_keyboard"] for b in row]
+    assert {"text": "😴 Snooze this alert 24h", "callback_data": "snooze:low_noon_soc:24"} in buttons
+    assert any(b["callback_data"] == "mute:2" for b in buttons)              # mute buttons kept
+
+    alerts._send_alert("grid down!", cfg, alert_name="grid_down")            # safety: no buttons at all
+    assert calls[-1] is None
+    alerts._send_alert("system message", cfg)                                # unnamed: logged without "alert"
+    assert "alert" not in json.loads((tmp_path / "alerts_log.jsonl").read_text().splitlines()[-1])
+
+
+def test_chatbot_snooze_commands(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    bot = TelegramChatBot(Config(output_dir=str(tmp_path)), api_key="x")
+    assert "low_noon_soc" in bot._snooze_command("/snooze low_noon_soc")          # default 24h
+    assert "low_noon_soc" in _load_peak_state(tmp_path)["alert_snoozed_until"]
+    assert "2h" in bot._snooze_command("/snooze eb_ready 2h")
+    assert "0.5h" in bot._snooze_command("/snooze eb_ready 0.5")
+    assert "no longer snoozed" in bot._snooze_command("/unsnooze low_noon_soc")
+    listing = bot._snooze_command("/snooze")                                       # no args: status + usage
+    assert "eb_ready" in listing and "/snooze <alert>" in listing
+    assert "safety" in bot._snooze_command("/snooze fast_drain")
+    assert "Unknown alert" in bot._snooze_command("/snooze nonsense")
+
+
+def test_snooze_button_callback(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    bot = TelegramChatBot(Config(output_dir=str(tmp_path), telegram_chat_id=""), api_key="x")
+    sent, answered = [], []
+    bot._send = lambda chat_id, text, reply_markup=None: sent.append(text)
+    bot._answer_callback_query = lambda cq_id, text="": answered.append(text)
+    bot._handle_callback_query({"id": "c1", "message": {"chat": {"id": 1}}, "data": "snooze:low_noon_soc:24"})
+    assert answered == ["Snoozed"] and "low_noon_soc" in sent[0]
+    assert "low_noon_soc" in _load_peak_state(tmp_path)["alert_snoozed_until"]
+
+
+def test_summarize_alert_log_groups_by_name_then_normalized_title():
+    now = datetime(2026, 9, 25, 12, 0)
+    e = lambda days_ago, body, alert=None, urgent=False: {   # noqa: E731
+        "ts": (now - timedelta(days=days_ago)).isoformat(), "body": body,
+        "urgent": urgent, **({"alert": alert} if alert else {})}
+    entries = [
+        e(1, "🟡 <b>FranklinWH: Unusual drain rate — 13%/hr</b>\nx"),
+        e(2, "🟡 <b>FranklinWH: Unusual drain rate — 9%/hr</b>\nx"),       # same title once digits normalized
+        e(3, "🟡 <b>FranklinWH: Unusual drain rate — 21%/hr</b>\nx"),
+        e(0, "noon low", alert="low_noon_soc"),
+        e(50, "ancient", alert="old_alert"),                                # outside the window
+    ]
+    rows = alerts.summarize_alert_log(entries, now, days=30)
+    assert [r["key"] for r in rows][0].startswith("🟡 FranklinWH: Unusual drain rate")
+    assert rows[0]["count"] == 3 and rows[0]["named"] is False
+    named = next(r for r in rows if r["key"] == "low_noon_soc")
+    assert named["named"] is True and named["count"] == 1
+    assert all(r["key"] != "old_alert" for r in rows)
+    assert rows[0]["last"] == now - timedelta(days=1)
+
+
+def test_alerts_report_command(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    now = datetime.now()
+    lines = [json.dumps({"ts": (now - timedelta(days=d)).isoformat(), "body": "x", "urgent": False, "alert": a})
+             for d, a in ((0, "low_noon_soc"), (1, "low_noon_soc"), (2, "eb_ready"))]
+    (tmp_path / "alerts_log.jsonl").write_text("\n".join(lines) + "\n")
+    cfg = Config(output_dir=str(tmp_path))
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = CliRunner().invoke(cli_mod.cli, ["alerts-report", "--days", "30"])
+    assert res.exit_code == 0, res.output
+    assert "3 alerts" in res.output
+    assert res.output.index("low_noon_soc") < res.output.index("eb_ready")       # most frequent first
+    assert "/snooze" in res.output
+
+
+def test_alert_title_key_ignores_weekday_and_month_names():
+    """Daily Summary titles carry the date ("— Thu Sep 24"), which split one
+    alert type into a row per weekday in `alerts-report`."""
+    a = alerts._title_key("📊 <b>FranklinWH Daily Summary — Thu Sep 24</b>\nrest")
+    b = alerts._title_key("📊 <b>FranklinWH Daily Summary — Tue Sep 22</b>\nrest")
+    c = alerts._title_key("📊 <b>FranklinWH Daily Summary — Wednesday January 7</b>\nrest")
+    assert a == b == c
+    assert "Summary" in a
+
+
+# ── Same-day solar nowcast (2026-09-25) ─────────────────────────────────
+# Forecast GHI can be wrong for the whole day (2026-09-20: a marine-layer day
+# forecast ~20 kWh delivered ~17). By late morning the day's real production
+# says how far off it is, so the rest of today's forecast is rescaled.
+
+class _NowcastOutlook:
+    def __init__(self, ghi=800.0):
+        self._ghi = ghi
+
+    def ghi_at(self, dt):
+        return self._ghi
+
+
+class _NowcastStore:
+    """readings_between -> (ts, grid_kw, home_kw, solar_kw) like HistoryStore."""
+    def __init__(self, solar_kw, n, step_min=5):
+        base = datetime(2026, 9, 25, 10, 0)
+        self._rows = [((base + timedelta(minutes=step_min * i)).isoformat(), 0.0, 1.0, solar_kw)
+                      for i in range(n)]
+
+    def readings_between(self, start, end):
+        return self._rows
+
+
+def _factor(solar_kw, n, ghi=800.0, **kw):
+    return predictor.solar_nowcast_factor(
+        _NowcastStore(solar_kw, n), _NowcastOutlook(ghi), system_peak_kw=5.0,
+        now=datetime(2026, 9, 25, 12, 0), **kw)  # model = 0.8 * 5 = 4.0 kW
+
+
+def test_nowcast_is_one_when_production_matches_the_model():
+    assert _factor(4.0, 48) == pytest.approx(1.0)
+
+
+def test_nowcast_scales_down_when_production_lags_and_ramps_in_with_evidence():
+    assert _factor(2.0, 48) == pytest.approx(0.5)                     # 4h of data: full weight
+    assert _factor(2.0, 24) == pytest.approx(1 - (24 / 36) * 0.5)      # 2h: two-thirds weight
+    assert _factor(6.0, 48) == pytest.approx(1.5)                      # over-delivering scales up
+
+
+def test_nowcast_is_bounded_and_needs_enough_daytime_data():
+    assert _factor(0.1, 48) == pytest.approx(0.5)                      # clamp: one bad hour can't zero the day
+    assert _factor(40.0, 48) == pytest.approx(1.5)
+    assert _factor(2.0, 11) == 1.0                                     # under an hour of readings: no opinion
+    assert _factor(2.0, 48, ghi=0.0) == 1.0                            # model says night: nothing to compare
+
+
+def test_nowcast_fails_open_without_readings():
+    class NoReadings:
+        pass
+
+    assert predictor.solar_nowcast_factor(NoReadings(), _NowcastOutlook(), 5.0,
+                                          now=datetime(2026, 9, 25, 12, 0)) == 1.0
+    assert predictor.solar_nowcast_factor(_NowcastStore(2.0, 48), None, 5.0,
+                                          now=datetime(2026, 9, 25, 12, 0)) == 1.0
+
+
+def test_predict_applies_nowcast_to_todays_remaining_hours_only(tmp_path, monkeypatch):
+    fixed_now = datetime(2026, 9, 25, 20, 0)
+
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    monkeypatch.setattr(predictor, "datetime", _FakeDatetime)
+    monkeypatch.setattr(predictor, "solar_nowcast_factor", lambda *a, **kw: 0.5)
+    store = HistoryStore(tmp_path / "h.db")
+    args = dict(horizon_hours=12, outlook=_NowcastOutlook(400.0), system_peak_kw=5.0)
+
+    scaled = predict(store, **args).hours
+    plain = predict(store, nowcast=False, **args).hours
+    today = [i for i, h in enumerate(scaled) if h.dt.date() == fixed_now.date()]
+    tomorrow = [i for i, h in enumerate(scaled) if h.dt.date() != fixed_now.date()]
+    assert today and tomorrow
+    for i in today:
+        assert scaled[i].predicted_solar_kw == pytest.approx(0.5 * plain[i].predicted_solar_kw)
+    for i in tomorrow:                                                  # tomorrow's weather isn't today's
+        assert scaled[i].predicted_solar_kw == pytest.approx(plain[i].predicted_solar_kw)
