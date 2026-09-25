@@ -2,10 +2,22 @@
 
 ## Systems
 
-| System | Location | Log | Schedule |
-|--------|----------|-----|----------|
-| FranklinWH Advisor | `~/Desktop/franklinwh` | `output/advisor.log` | cron `*/15 8-23 * * *` |
-| CMR News Bot | `~/Desktop/cmr-news` | `bot.log` | LaunchAgent `com.cmrnews.bot` |
+| System | Location | Log | Runs as |
+|--------|----------|-----|---------|
+| FranklinWH Advisor (alerts + Telegram bot) | `~/Projects/franklinwh` | `~/Library/Logs/franklinwh-advisor.log` | LaunchAgent `com.franklinwh.advisor` |
+| FranklinWH Dashboard (web UI, :8093) | `~/Projects/franklinwh` | `~/Library/Logs/franklinwh-dashboard.log` | LaunchAgent `com.franklinwh.dashboard` |
+| CMR News Bot | `~/Projects/cmr-news` | `bot.log` in the repo | LaunchAgent `com.cmrnews.bot` |
+
+**One host only.** The advisor and both bots must run on exactly one machine (currently the Mac mini, `run_on_host: Mac-mini` in `~/.franklinwh.json`). Two copies double every alert and fight over the Telegram token. Keep repos under `~/Projects`, **not** `~/Desktop` / `~/Documents` (iCloud sync locks files — see incidents below). `franklinwh doctor` checks the host guard, the iCloud path and both LaunchAgents. Logs rotate at 5 MB (3 copies kept) from inside the advisor loop.
+
+## Adding or moving to another machine
+
+1. Clone to `~/Projects/<repo>` (not Desktop/Documents), then `pip install -e .` — or run `./install.sh`.
+2. Copy `~/.franklinwh.json` (and `~/.franklinwh_tesla.json`, `~/.franklinwh.license` if used) **by hand** (AirDrop/scp). Never commit them; they hold passwords and tokens.
+3. **Stop and disable the agents on the machine that is giving up hosting first**, then confirm nothing is left:
+   `for l in com.franklinwh.advisor com.franklinwh.dashboard com.cmrnews.bot; do launchctl bootout gui/$(id -u)/$l 2>/dev/null; launchctl disable gui/$(id -u)/$l; done; launchctl list | grep -Ei "franklinwh|cmrnews"`
+4. On the new host set `run_on_host` to its short hostname, run `franklinwh install-service`, then `xattr -c ~/Library/LaunchAgents/com.franklinwh.*.plist`.
+5. Check: `franklinwh doctor` is all green and one "advisor started on <host>" Telegram message arrives. A second one from another hostname means two hosts are running.
 
 ---
 
@@ -51,15 +63,42 @@ The PID lock in `_acquire_pid_lock()` only gates `--watch` startup, not single-s
 
 ---
 
+### 2026-09-09 → 09-17 — iCloud sync crashed the advisor; launchd wedged (FranklinWH)
+
+**Symptom**: no evening digest; `.health.json` `last_success` ~17 h old; `launchctl list` showed PID `-`.
+
+**Root cause**: iCloud Desktop & Documents sync (`bird`) briefly locked `output/.last_rollup` mid-write → `OSError: [Errno 11] Resource deadlock avoided`, uncaught, crash-looping every cycle (the write runs before the alert engine). Earlier (09-09) moving the folder under iCloud also broke path resolution for fresh processes. Separately launchd stuck at `state = spawn scheduled` with no PID: `bootout`/`bootstrap`/`kickstart -k` all returned 0 but never spawned, while running the same command by hand worked — the wedge was launchd's own per-job state.
+
+**Fix**: moved both repos to `~/Projects` (out of iCloud); the marker write is now non-fatal (`_write_rollup_marker`); **removed the plist file and recreated it** (editing it did not clear the wedge), added the missing `RunAtLoad` key, `xattr -c`, fresh `bootstrap`. Transient `Bootstrap failed: 5: Input/output error` on restart: just retry once.
+
+**Detection**: `franklinwh doctor` now flags `spawn scheduled` with no PID and any iCloud-synced install path.
+
+---
+
+### 2026-09-24 — Duplicate alerts from two Macs (FranklinWH, CMR News)
+
+**Symptom**: the daily summary arrived twice within 5 minutes.
+
+**Root cause**: after the new Mac mini, the MacBook Air still had all three LaunchAgents loaded. Each copy keeps its own state, so both sent every alert, and both bots polled one Telegram token. (Same failure shape as the 2026-05-05 incident below.)
+
+**Fix**: agents booted out and `launchctl disable`d on the Air; `run_on_host` guard added so a second host stands down; the advisor sends "advisor started on <host>" at startup so a second host is visible at once.
+
+---
+
 ## Diagnostics
 
 ```bash
+# FranklinWH — overall health (host guard, iCloud path, LaunchAgents, uptime monitor)
+franklinwh doctor
+cat ~/Projects/franklinwh/output/.health.json          # last_success should be < ~10 min old
+launchctl print gui/$(id -u)/com.franklinwh.advisor | grep -E "state|pid"
+
 # FranklinWH — recent errors
-grep -i "error\|warn\|fail" ~/Desktop/franklinwh/output/advisor.log | tail -30
+grep -i "error\|warn\|fail" ~/Library/Logs/franklinwh-advisor.log | tail -30
 
 # CMR News — service status
 launchctl list com.cmrnews.bot
-tail -20 ~/Desktop/cmr-news/bot.log
+tail -20 ~/Projects/cmr-news/bot.log
 
 # Reload CMR News bot after plist changes
 launchctl unload ~/Library/LaunchAgents/com.cmrnews.bot.plist

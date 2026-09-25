@@ -6670,3 +6670,151 @@ def test_no_test_seeds_literal_dated_state_through_the_pruning_saver():
             offenders.append(fn.name)
     assert not offenders, (
         f"seed literal-dated state without _save_peak_state's prune: {offenders}")
+
+
+# ── Log rotation + doctor system checks (2026-09-25) ────────────────────
+
+def test_rotate_log_leaves_small_files_alone(tmp_path):
+    from franklinwh_scraper.logutil import rotate_log
+
+    log = tmp_path / "advisor.log"
+    log.write_text("x" * 100)
+    assert rotate_log(log, max_bytes=1000) is False
+    assert log.read_text() == "x" * 100 and not (tmp_path / "advisor.log.1").exists()
+
+
+def test_rotate_log_copies_then_truncates_in_place(tmp_path):
+    """launchd holds the log open for append, so it can't be renamed out
+    from under the process — copy it aside and truncate the same inode.
+    (Verified against a real launchd job 2026-09-25: append-mode, so writes
+    resume at the start with no NUL-filled hole.)"""
+    from franklinwh_scraper.logutil import rotate_log
+
+    log = tmp_path / "advisor.log"
+    with open(log, "ab") as writer:               # the still-open launchd handle
+        writer.write(b"old line\n" * 200)
+        writer.flush()
+        assert rotate_log(log, max_bytes=500) is True
+        writer.write(b"new line\n")
+        writer.flush()
+    assert (tmp_path / "advisor.log.1").read_bytes() == b"old line\n" * 200
+    assert log.read_bytes() == b"new line\n"      # no NUL hole, starts fresh
+
+
+def test_rotate_log_keeps_only_n_generations_newest_first(tmp_path):
+    from franklinwh_scraper.logutil import rotate_log
+
+    log = tmp_path / "advisor.log"
+    for gen in ("a", "b", "c", "d"):
+        log.write_text(gen * 100)
+        assert rotate_log(log, max_bytes=10, keep=3) is True
+    assert (tmp_path / "advisor.log.1").read_text() == "d" * 100
+    assert (tmp_path / "advisor.log.2").read_text() == "c" * 100
+    assert (tmp_path / "advisor.log.3").read_text() == "b" * 100
+    assert not (tmp_path / "advisor.log.4").exists()  # "a" aged out
+
+
+def test_rotate_log_never_raises(tmp_path):
+    from franklinwh_scraper.logutil import rotate_log
+
+    assert rotate_log(tmp_path / "missing.log") is False
+    (tmp_path / "adir").mkdir()
+    assert rotate_log(tmp_path / "adir", max_bytes=0) is False
+
+
+def test_rotate_known_logs_covers_output_dir_and_library_logs(tmp_path):
+    from franklinwh_scraper.logutil import rotate_known_logs
+
+    out = tmp_path / "output"
+    out.mkdir()
+    lib = tmp_path / "Library" / "Logs"
+    lib.mkdir(parents=True)
+    big, small = "x" * 600, "x" * 5
+    (out / "advisor.log").write_text(big)
+    (out / "dashboard.log").write_text(small)
+    (lib / "franklinwh-advisor.log").write_text(big)
+    (lib / "unrelated.log").write_text(big)          # not ours: untouched
+    rotated = rotate_known_logs(out, home=tmp_path, max_bytes=500)
+    assert {p.name for p in rotated} == {"advisor.log", "franklinwh-advisor.log"}
+    assert (lib / "unrelated.log").read_text() == big
+
+
+_LAUNCHD_RUNNING = "gui/501/com.franklinwh.advisor = {\n\tactive count = 1\n\ttype = LaunchAgent\n\tstate = running\n\n\tprogram = /usr/bin/caffeinate\n\truns = 1\n\tpid = 8365\n\tlast exit code = (never exited)\n\n\tevent triggers = {\n\t\ttype = resource\n\t\tstate = active\n\t}\n}\n"
+_LAUNCHD_WEDGED = "gui/501/com.franklinwh.advisor = {\n\tactive count = 0\n\ttype = LaunchAgent\n\tstate = spawn scheduled\n\n\truns = 0\n\tlast exit code = (never exited)\n}\n"
+
+
+def test_launchd_health_classifies_running_wedged_stopped_and_missing():
+    from franklinwh_scraper.doctor_checks import launchd_health, parse_launchd_print
+
+    assert parse_launchd_print(_LAUNCHD_RUNNING) == ("running", 8365)  # first state/pid, not nested
+    assert parse_launchd_print(_LAUNCHD_WEDGED) == ("spawn scheduled", None)
+
+    kind = lambda rc, out: launchd_health("l", run=lambda label: (rc, out))[0]  # noqa: E731
+    assert kind(0, _LAUNCHD_RUNNING) == "running"
+    assert kind(0, _LAUNCHD_WEDGED) == "wedged"
+    assert kind(0, _LAUNCHD_WEDGED.replace("spawn scheduled", "not running")) == "stopped"
+    assert kind(113, 'Could not find service "l" in domain for user gui: 501') == "not_loaded"
+    assert kind(1, "garbage") == "unknown"
+
+
+def test_icloud_path_warning_flags_synced_folders_only(tmp_path):
+    from franklinwh_scraper.doctor_checks import icloud_path_warning
+
+    home = tmp_path
+    assert icloud_path_warning(home / "Projects" / "franklinwh", home) is None
+    assert "Projects" in icloud_path_warning(home / "Desktop" / "franklinwh", home)
+    assert icloud_path_warning(home / "Documents" / "x" / "franklinwh", home)
+    assert icloud_path_warning(home / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "f", home)
+    # a sibling that merely starts with "Desktop" isn't the synced folder
+    assert icloud_path_warning(home / "Desktop-old" / "franklinwh", home) is None
+
+
+def _doctor_lines(monkeypatch, icloud=None, health=None, **cfg_kw):
+    """Run doctor with the system probes stubbed; return its output lines."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.sys, "platform", "darwin")
+    health = health or {}
+    cfg = Config(email="e", password="p", lat=1.0, lon=1.0,
+                 output_dir="/tmp/nonexistent-doctor-test", **cfg_kw)
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg), \
+         patch("franklinwh_scraper.cli.AccountClient") as ac, \
+         patch("franklinwh_scraper.cli.socket.gethostname", return_value="Mac-mini.local"), \
+         patch("franklinwh_scraper.cli.icloud_path_warning", return_value=icloud), \
+         patch("franklinwh_scraper.cli.launchd_health",
+               side_effect=lambda label: health.get(label, ("not_loaded", "not loaded on this machine"))):
+        ac.side_effect = RuntimeError("skip login")
+        return CliRunner().invoke(cli_mod.cli, ["doctor"]).output.splitlines()
+
+
+def _line(lines, needle):
+    return next(l for l in lines if needle in l)
+
+
+def test_doctor_flags_icloud_synced_install(monkeypatch):
+    bad = _line(_doctor_lines(monkeypatch, icloud="under ~/Desktop — iCloud sync can lock files"), "iCloud")
+    assert "✗" in bad and "~/Desktop" in bad
+    assert "✓" in _line(_doctor_lines(monkeypatch, icloud=None), "iCloud")
+
+
+def test_doctor_flags_wedged_and_stopped_launch_agents(monkeypatch):
+    lines = _doctor_lines(monkeypatch, health={
+        "com.franklinwh.advisor": ("wedged", "state=spawn scheduled, no PID — launchd may be wedged (see RUNBOOK)"),
+        "com.franklinwh.dashboard": ("running", "running (pid 42)"),
+    })
+    adv, dash = _line(lines, "advisor LaunchAgent"), _line(lines, "dashboard LaunchAgent")
+    assert "✗" in adv and "wedged" in adv
+    assert "✓" in dash and "pid 42" in dash
+
+
+def test_doctor_not_loaded_agent_only_a_problem_on_the_host_machine(monkeypatch):
+    other = _line(_doctor_lines(monkeypatch), "advisor LaunchAgent")            # no run_on_host: fine
+    assert "✓" in other and "not loaded" in other
+    host = _line(_doctor_lines(monkeypatch, run_on_host="Mac-mini"), "advisor LaunchAgent")
+    assert "✗" in host and "not loaded" in host                                  # this IS the host
+    elsewhere = _line(_doctor_lines(monkeypatch, run_on_host="Erics-MacBook-Air"), "advisor LaunchAgent")
+    assert "✓" in elsewhere                                                       # standby machine: expected

@@ -8,6 +8,7 @@ import logging
 import os
 import socket
 import stat
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,9 +39,11 @@ from .alerts import (
 from .chatbot import TelegramChatBot
 from .client import FranklinWHClient
 from .config import Config, host_matches, load as load_config, save as save_config
+from .doctor_checks import icloud_path_warning, launchd_health
 from .exporters import export_csv, export_json
 
 from .history import HistoryStore
+from .logutil import rotate_known_logs
 from .license import ENFORCE_LICENSE, check_license
 from .notifier import (notify_email, notify_imessage, notify_log,
                        notify_macos, notify_ntfy, notify_telegram, notify_webhook,
@@ -1057,6 +1060,18 @@ def doctor() -> None:
     else:
         _check("Single-host guard", True,
                "optional — set run_on_host so a second Mac can't double every alert")
+
+    _repo = Path(__file__).resolve().parent.parent
+    _warn_icloud = icloud_path_warning(_repo) or icloud_path_warning(Path(cfg.output_dir).resolve())
+    _check("Not in iCloud-synced folder", _warn_icloud is None, _warn_icloud or str(_repo))
+
+    if sys.platform == "darwin":
+        _is_host = bool(cfg.run_on_host) and host_matches(cfg.run_on_host, _host)
+        for _svc in ("advisor", "dashboard"):
+            _kind, _detail = launchd_health(f"com.franklinwh.{_svc}")
+            # Not loaded is expected on a standby machine, a problem on the host.
+            _ok = _kind == "running" or (_kind == "not_loaded" and not _is_host)
+            _check(f"{_svc} LaunchAgent", _ok, _detail)
 
     # EV draw estimate — feeds the digest's "with EV charging" SoC line
     # whenever cfg.ev_charging is set, independent of Tesla control below.
@@ -2077,6 +2092,11 @@ def cmd_advise(
             # be hit. A hard process crash or a fully hung loop still won't
             # ping — that's the failure this switch exists to catch.
             _ping_healthcheck(cfg)
+            try:
+                for _rotated in rotate_known_logs(outdir.resolve()):
+                    logger.info("Rotated log %s", _rotated)
+            except Exception:
+                logger.exception("Log rotation failed")
 
             if not watch:
                 break
