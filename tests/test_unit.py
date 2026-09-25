@@ -6540,3 +6540,133 @@ def test_outlook_is_cloudy_false_on_genuinely_sunny_day():
     outlook = _outlook_with(ghi_wm2=600.0, cloud_cover_pct=10.0)
     assert outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD) is False
     assert outlook.is_cloudy_tomorrow(_GHI_CLOUDY_THRESHOLD) is False
+
+
+# ── Single-host guard + startup notice (2026-09-25) ─────────────────────
+# A second machine running the same LaunchAgents doubled every alert and put
+# two bots on one Telegram token (MacBook Air + Mac mini, 2026-09-24).
+
+def test_host_matches_ignores_case_and_domain_suffix():
+    from franklinwh_scraper.config import host_matches
+
+    assert host_matches("Mac-mini", "Mac-mini.local")
+    assert host_matches("mac-mini.local", "MAC-MINI")
+    assert host_matches("Mac-mini.attlocal.net", "Mac-mini.local")
+    assert not host_matches("Mac-mini", "Erics-MacBook-Air.local")
+    assert not host_matches("Mac-mini", "Mac-mini-2.local")  # prefix isn't a match
+    assert host_matches("", "anything")  # blank = guard off
+
+
+def test_enforce_run_on_host_noop_when_unset_or_matching():
+    from franklinwh_scraper import cli as cli_mod
+
+    slept = []
+    cli_mod._enforce_run_on_host(Config(), True, hostname="Mac-mini.local", sleep=slept.append)
+    cli_mod._enforce_run_on_host(Config(run_on_host="Mac-mini"), True,
+                                 hostname="Mac-mini.local", sleep=slept.append)
+    assert slept == []
+
+
+def test_enforce_run_on_host_watch_mode_standbys_then_exits_zero():
+    """Under launchd KeepAlive a nonzero/instant exit would relaunch every
+    ~10s; sleep an hour first, and exit 0 so it isn't logged as a crash."""
+    from franklinwh_scraper import cli as cli_mod
+
+    slept = []
+    with pytest.raises(SystemExit) as exc:
+        cli_mod._enforce_run_on_host(Config(run_on_host="Mac-mini"), True,
+                                     hostname="Erics-MacBook-Air.local", sleep=slept.append)
+    assert exc.value.code == 0
+    assert slept == [3600]
+
+
+def test_enforce_run_on_host_one_shot_fails_immediately():
+    import click
+
+    from franklinwh_scraper import cli as cli_mod
+
+    slept = []
+    with pytest.raises(click.ClickException) as exc:
+        cli_mod._enforce_run_on_host(Config(run_on_host="Mac-mini"), False,
+                                     hostname="Erics-MacBook-Air.local", sleep=slept.append)
+    assert "Mac-mini" in exc.value.message and "Erics-MacBook-Air" in exc.value.message
+    assert slept == []
+
+
+def test_startup_notice_sends_once_then_rate_limits(tmp_path, monkeypatch):
+    from franklinwh_scraper import cli as cli_mod
+
+    sent = []
+    monkeypatch.setattr(cli_mod, "_send_alert", lambda body, cfg, **kw: sent.append(body))
+    cfg = Config()
+    t0 = datetime(2026, 9, 25, 12, 0)
+
+    assert cli_mod._maybe_send_startup_notice(cfg, tmp_path, "Mac-mini.local", now=t0) is True
+    assert len(sent) == 1 and "Mac-mini" in sent[0]
+    # A crash-loop/restart storm must not spam the chat.
+    assert cli_mod._maybe_send_startup_notice(cfg, tmp_path, "Mac-mini.local",
+                                              now=t0 + timedelta(minutes=5)) is False
+    assert cli_mod._maybe_send_startup_notice(cfg, tmp_path, "Mac-mini.local",
+                                              now=t0 + timedelta(minutes=11)) is True
+    assert len(sent) == 2
+
+
+def _doctor_output(**cfg_kw):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+
+    cfg = Config(email="e", password="p", lat=1.0, lon=1.0,
+                 output_dir="/tmp/nonexistent-doctor-test", **cfg_kw)
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg), \
+         patch("franklinwh_scraper.cli.AccountClient") as ac, \
+         patch("franklinwh_scraper.cli.socket.gethostname", return_value="Mac-mini.local"):
+        ac.side_effect = RuntimeError("skip login")
+        return CliRunner().invoke(cli, ["doctor"]).output
+
+
+def test_doctor_reports_single_host_guard():
+    assert "Single-host guard" in _doctor_output()  # optional line, shown even when unset
+    ok = _doctor_output(run_on_host="Mac-mini")
+    assert "runs only on Mac-mini" in ok and "✗" not in ok.split("Single-host guard")[0].splitlines()[-1]
+    other = _doctor_output(run_on_host="Erics-MacBook-Air")
+    line = next(l for l in other.splitlines() if "Single-host guard" in l)
+    assert "✗" in line and "Mac-mini.local" in line  # this machine would stand down
+
+
+def test_doctor_uptime_monitoring_tells_you_how_to_get_paged():
+    out = _doctor_output(healthcheck_url="https://hc-ping.com/abc")
+    assert "pings every cycle" in out and "phone" in out.lower()
+
+
+def test_no_test_seeds_literal_dated_state_through_the_pruning_saver():
+    """Guard for the flake that bit three tests (2026-08 -> 09): _save_peak_state
+    prunes date-keyed entries older than 30 days against the REAL clock, so a
+    test that seeds e.g. "daily_pr_2026-08-20" through it passes until the
+    calendar moves 30 days past that date, then fails with no code change.
+    Seed such fixtures by writing .peak_alert_state.json directly, or build
+    the dates from datetime.now()."""
+    import ast
+    import re
+
+    from franklinwh_scraper.alerts import _DATE_KEYED_PREFIXES
+
+    literal = re.compile(
+        r"^(?:%s)\d{4}-\d{2}-\d{2}" % "|".join(re.escape(p) for p in _DATE_KEYED_PREFIXES))
+    tree = ast.parse(pathlib.Path(__file__).read_text())
+    offenders = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        nodes = list(ast.walk(fn))
+        calls_saver = any(
+            isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_save_peak_state"
+            for n in nodes)
+        if calls_saver and any(
+                isinstance(n, ast.Constant) and isinstance(n.value, str) and literal.match(n.value)
+                for n in nodes):
+            offenders.append(fn.name)
+    assert not offenders, (
+        f"seed literal-dated state without _save_peak_state's prune: {offenders}")

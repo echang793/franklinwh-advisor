@@ -6,6 +6,7 @@ import atexit
 import json
 import logging
 import os
+import socket
 import stat
 import time
 from datetime import datetime, timedelta
@@ -36,7 +37,7 @@ from .alerts import (
 )
 from .chatbot import TelegramChatBot
 from .client import FranklinWHClient
-from .config import Config, load as load_config, save as save_config
+from .config import Config, host_matches, load as load_config, save as save_config
 from .exporters import export_csv, export_json
 
 from .history import HistoryStore
@@ -114,6 +115,56 @@ def _release_pid_lock() -> None:
         _PID_FILE.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _enforce_run_on_host(cfg: Config, watch: bool, hostname: str | None = None,
+                         sleep=time.sleep) -> None:
+    """Stand down when cfg.run_on_host names a different machine.
+
+    Two Macs both running the advisor doubled every alert and put two bots
+    on one Telegram token (2026-09-24). A one-shot invocation just fails
+    with a clear message. The long-running watch loop sleeps an hour first
+    and exits 0: launchd's KeepAlive relaunches it either way, and this
+    keeps a stood-down machine to one wake-up an hour instead of a ~10s
+    crash loop.
+    """
+    hostname = hostname or socket.gethostname()
+    if host_matches(cfg.run_on_host, hostname):
+        return
+    msg = (f"run_on_host is {cfg.run_on_host!r} but this machine is {hostname!r} — "
+           "standing down so only one machine sends alerts")
+    if not watch:
+        raise click.ClickException(msg)
+    logger.warning(msg)
+    sleep(3600)
+    raise SystemExit(0)
+
+
+_STARTUP_NOTICE_MIN_GAP = timedelta(minutes=10)
+
+
+def _maybe_send_startup_notice(cfg: Config, outdir: Path, hostname: str,
+                               now: datetime | None = None) -> bool:
+    """Tell the user which machine just started the advisor.
+
+    With more than one Mac able to run it, a second host shows up
+    immediately as a second "started on ..." message instead of as
+    mysteriously doubled alerts a day later. Rate-limited so a restart
+    storm can't spam the chat. Returns whether a notice was sent.
+    """
+    now = now or datetime.now()
+    with _state_lock(outdir):
+        state = _load_peak_state(outdir)
+        last = state.get("startup_notice_at")
+        try:
+            if last and now - datetime.fromisoformat(last) < _STARTUP_NOTICE_MIN_GAP:
+                return False
+        except ValueError:
+            pass  # malformed marker: treat as never sent
+        state["startup_notice_at"] = now.isoformat()
+        _save_peak_state(outdir, state)
+    _send_alert(f"🟢 <b>FranklinWH advisor started</b> on {hostname} (pid {os.getpid()})", cfg)
+    return True
 
 
 def _write_rollup_marker(marker: Path, today_iso: str) -> None:
@@ -995,7 +1046,17 @@ def doctor() -> None:
     )
     _check("Notification channel", has_channel)
     _check("Uptime monitoring",    bool(cfg.healthcheck_url),
-           "configured" if cfg.healthcheck_url else "optional — set up at healthchecks.io")
+           "pings every cycle — on healthchecks.io set period ~10 min, grace ~15 min, "
+           "and attach a phone/Telegram channel or an outage won't reach you"
+           if cfg.healthcheck_url else "optional — set up at healthchecks.io")
+    _host = socket.gethostname()
+    if cfg.run_on_host:
+        _check("Single-host guard", host_matches(cfg.run_on_host, _host),
+               f"runs only on {cfg.run_on_host}" if host_matches(cfg.run_on_host, _host)
+               else f"set to {cfg.run_on_host} — this machine ({_host}) will stand down")
+    else:
+        _check("Single-host guard", True,
+               "optional — set run_on_host so a second Mac can't double every alert")
 
     # EV draw estimate — feeds the digest's "with EV charging" SoC line
     # whenever cfg.ev_charging is set, independent of Tesla control below.
@@ -1733,6 +1794,7 @@ def cmd_advise(
         raise click.ClickException("Run 'setup' first.")
     if not lat or not lon:
         raise click.ClickException("Location not set. Run 'setup' to configure it.")
+    _enforce_run_on_host(cfg, watch)
 
     outdir    = Path(out)
     log_path  = outdir / "advisor_log.jsonl"
@@ -1785,6 +1847,12 @@ def cmd_advise(
             _bot_thread.start()
             _info("Telegram AI chatbot started — message the bot to ask energy questions")
             click.echo()
+
+        if watch:
+            try:
+                _maybe_send_startup_notice(cfg, outdir, socket.gethostname())
+            except Exception:
+                logger.exception("Startup notice failed")
 
         if ENFORCE_LICENSE:
             _lic = check_license(gateway or "")

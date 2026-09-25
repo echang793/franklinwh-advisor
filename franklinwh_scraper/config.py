@@ -122,11 +122,31 @@ class Config:
     # set this if the dashboard is ever reachable beyond localhost).
     dashboard_token: str = ""
 
+    # Hostname the advisor is allowed to run on (blank = any machine). With
+    # the repo on two Macs, a second copy of the LaunchAgent doubles every
+    # alert and puts two bots on one Telegram token — set this to the host
+    # that should own alerting and the other one goes into standby.
+    run_on_host: str = ""
+
     def is_complete(self) -> bool:
         return bool(self.email and self.password and self.lat and self.lon)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def host_matches(configured: str, actual: str) -> bool:
+    """Whether `actual` (socket.gethostname()) is the configured host.
+
+    Compares the short name case-insensitively — macOS reports the same
+    machine as "Mac-mini", "Mac-mini.local" or "Mac-mini.attlocal.net"
+    depending on network — so those all match, while "Mac-mini-2" doesn't.
+    A blank `configured` means the guard is off.
+    """
+    if not configured.strip():
+        return True
+    short = lambda h: h.strip().lower().split(".", 1)[0]  # noqa: E731
+    return short(configured) == short(actual)
 
 
 def load() -> Config:
