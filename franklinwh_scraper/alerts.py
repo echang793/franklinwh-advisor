@@ -841,6 +841,42 @@ def _morning_greeting(now: datetime) -> str:
     return _MORNING_GREETINGS[now.timetuple().tm_yday % len(_MORNING_GREETINGS)]
 
 
+def _overnight_avg_load_kw(store, start_iso: str, end_iso: str) -> float | None:
+    """Time-weighted average home load (kW == kWh/hr) between two ISO
+    datetimes, or None when the store can't say (no method, error, <2
+    readings). Gaps over 15 min are capped so a data outage can't dominate."""
+    try:
+        rows = store.readings_between(start_iso, end_iso)
+    except Exception:
+        return None
+    total_kwh = total_hours = 0.0
+    for (t0, _g0, home0, _s0), (t1, _g1, _h1, _s1) in zip(rows, rows[1:]):
+        hours = min((datetime.fromisoformat(t1) - datetime.fromisoformat(t0)).total_seconds() / 3600.0, 0.25)
+        if hours > 0:
+            total_kwh += max(0.0, home0) * hours
+            total_hours += hours
+    return total_kwh / total_hours if total_hours > 0 else None
+
+
+def _overnight_use_too_high(store, sunrise_pred: dict) -> bool:
+    """True if actual home load between the prediction and sunrise averaged
+    above _NO_EV_RANGE_HIGH_KW (0.5 kWh/hr). Unknown usage -> False, so the
+    accuracy line keeps showing rather than vanishing on missing data.
+    State stashed before `made_at` existed falls back to 9pm the night
+    before, which is when the digest that makes the prediction runs."""
+    if store is None:
+        return False
+    try:
+        end = datetime.fromisoformat(sunrise_pred["dt"])
+        made_at = sunrise_pred.get("made_at")
+        start = (datetime.fromisoformat(made_at) if made_at
+                 else (end - timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0))
+    except (KeyError, ValueError, TypeError):
+        return False
+    avg = _overnight_avg_load_kw(store, start.isoformat(), end.isoformat())
+    return avg is not None and avg > _NO_EV_RANGE_HIGH_KW
+
+
 def _alert_morning_preview(
     state: dict, today: str, now: datetime, c,
     outlook, usage_forecast, store, cfg: Config | None = None,
@@ -919,6 +955,12 @@ def _alert_morning_preview(
     # itself is the real sunrise time regardless of the key's name.
     soc_7am_acc_str = ""
     soc_7am_pred = state.pop(f"soc_7am_pred_{today}", None)
+    if soc_7am_pred and _overnight_use_too_high(store, soc_7am_pred):
+        # Requested 2026-09-25: the flat 0.3-0.5 kWh/hr model is only a fair
+        # yardstick for a genuinely low-use night; skip the line otherwise.
+        logger.info("Sunrise SoC accuracy omitted: overnight use above %.1f kWh/hr",
+                    _NO_EV_RANGE_HIGH_KW)
+        soc_7am_pred = None
     if soc_7am_pred:
         pred_pct = soc_7am_pred["pct"]
         pred_dt  = datetime.fromisoformat(soc_7am_pred["dt"])
@@ -1804,7 +1846,7 @@ def _alert_eod_digest(
             now, soc, bat_cap, _NO_EV_RANGE_LOW_KW, checkpoint_dt)   # less draw -> upper bound
         state[f"soc_7am_pred_{checkpoint_dt.strftime('%Y-%m-%d')}"] = {
             "pct": pred_soc_6am, "low_pct": low_pct, "high_pct": high_pct,
-            "dt": checkpoint_dt.isoformat(),
+            "dt": checkpoint_dt.isoformat(), "made_at": now.isoformat(),
         }
 
     precharge_str  = ""

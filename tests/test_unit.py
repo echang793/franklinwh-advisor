@@ -4829,6 +4829,9 @@ def test_eod_digest_stores_7am_prediction_for_tomorrow(monkeypatch):
     assert isinstance(state[key]["low_pct"], float)
     assert isinstance(state[key]["high_pct"], float)
     assert state[key]["low_pct"] < state[key]["pct"] < state[key]["high_pct"]
+    # When the prediction was made — the start of the overnight window the
+    # morning report checks actual usage over.
+    assert state[key]["made_at"] == now.isoformat()
 
 
 def test_morning_greeting_varies_by_day_of_year():
@@ -5051,6 +5054,59 @@ def test_morning_preview_7am_accuracy_falls_back_without_nearby_reading():
     assert msg is not None
     assert "not directly comparable" in msg
     assert "using now's 35%" in msg
+
+
+def _overnight_accuracy_msg(load_kw_by_hour, with_made_at=True, has_readings=True):
+    """Morning report for a sunrise prediction (21-35% range, actual 30%)
+    with home load `load_kw_by_hour` (one value per hour, 9pm -> 7am)."""
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    pred_dt = now.replace(hour=7, minute=0)
+    made_at = (pred_dt - timedelta(hours=10))  # 9pm the night before
+    pred = {"pct": 27.0, "low_pct": 21.0, "high_pct": 35.0, "dt": pred_dt.isoformat()}
+    if with_made_at:
+        pred["made_at"] = made_at.isoformat()
+    state = {f"soc_7am_pred_{today}": pred}
+
+    store = _AttrStore(attr=(8.2, 5.1, 0.9))
+    store.soc_near = lambda ts: 30.0
+    if has_readings:
+        store.readings_between = lambda a, b: [
+            ((made_at + timedelta(hours=i)).isoformat(), 0.0, kw, 0.0)
+            for i, kw in enumerate(load_kw_by_hour)]
+    c = types.SimpleNamespace(battery_soc_pct=30.0, solar_production_kw=0.5)
+    msg = alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+    assert f"soc_7am_pred_{today}" not in state  # always popped, shown or not
+    return msg
+
+
+def test_morning_preview_omits_sunrise_accuracy_after_heavy_overnight_use():
+    """Requested 2026-09-25: only grade the sunrise SoC prediction when the
+    night was actually a low-use one (<= 0.5 kWh/hr). Heavier use — EV
+    charging, AC, a dryer — means the flat 0.3-0.5 kWh/hr model was never
+    the right yardstick, so the accuracy line is noise."""
+    assert "Sunrise SoC accuracy" not in _overnight_accuracy_msg([0.9] * 11)
+    # One EV-charging stretch drags the night's average over 0.5.
+    assert "Sunrise SoC accuracy" not in _overnight_accuracy_msg([0.3] * 6 + [4.0] * 2 + [0.3] * 3)
+
+
+def test_morning_preview_shows_sunrise_accuracy_after_light_overnight_use():
+    msg = _overnight_accuracy_msg([0.4] * 11)
+    assert "Sunrise SoC accuracy: predicted 21-35%" in msg
+    # Exactly 0.5 kWh/hr still counts as light use ("0.5 or less").
+    assert "Sunrise SoC accuracy" in _overnight_accuracy_msg([0.5] * 11)
+
+
+def test_morning_preview_sunrise_accuracy_without_usage_data_still_shows():
+    """No made_at (state stashed before this shipped) or no readings the
+    store can answer: fall back / fail open like before rather than lose
+    the line."""
+    assert "Sunrise SoC accuracy" in _overnight_accuracy_msg([0.4] * 11, with_made_at=False)
+    assert "Sunrise SoC accuracy" in _overnight_accuracy_msg([], has_readings=False)
+    # made_at missing falls back to 9pm the night before, so heavy use is still caught.
+    assert "Sunrise SoC accuracy" not in _overnight_accuracy_msg([0.9] * 11, with_made_at=False)
 
 
 def test_morning_preview_7am_accuracy_within_range():
@@ -5621,12 +5677,12 @@ def test_api_accuracy_excludes_pre_bias_fix_days(tmp_path, monkeypatch):
     """Mirrors cmd_accuracy's floor (see test_accuracy_excludes_pre_bias_fix_days):
     a wide `days` request must not mix pre-2026-08-24 predicted_kwh_ days
     (perf_ratio ran ~6% high) into the dashboard's mean-error figure."""
+    import json as _json
     from datetime import date
 
     from fastapi.testclient import TestClient
 
     from franklinwh_scraper import webapi
-    from franklinwh_scraper.alerts import _save_peak_state
     from franklinwh_scraper.history import HistoryStore
 
     real_date = date
@@ -5652,7 +5708,11 @@ def test_api_accuracy_excludes_pre_bias_fix_days(tmp_path, monkeypatch):
         )
     db._conn.commit()
     db.close()
-    _save_peak_state(tmp_path, state)
+    # Written directly, not via _save_peak_state: its 30-day prune runs on the
+    # real clock and silently deletes these fixed Aug-2026 fixture days once
+    # real time passes 30 days beyond them (same drift as
+    # test_accuracy_excludes_pre_bias_fix_days).
+    (tmp_path / ".peak_alert_state.json").write_text(_json.dumps(state))
 
     monkeypatch.setattr(webapi, "_cfg", Config(output_dir=str(tmp_path)), raising=False)
     monkeypatch.setattr(webapi, "_OUT", tmp_path, raising=False)
