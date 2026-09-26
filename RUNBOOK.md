@@ -108,6 +108,20 @@ launchctl load  ~/Library/LaunchAgents/com.cmrnews.bot.plist
 curl -s "https://api.open-meteo.com/v1/forecast?latitude=32.97&longitude=-117.07&hourly=cloud_cover&forecast_days=1" | python3.13 -c "import sys,json; d=json.load(sys.stdin); print('ok', len(d['hourly']['time']), 'hours')"
 ```
 
+## iPhone / Apple Watch glance widget
+
+`GET /api/glance` returns a flat object with a ready-to-display `text` (e.g. `74% 🔋 ☀0.0kW 🏠1.5kW`), plus `soc_pct`, `battery_state` (charging/discharging/idle), `eta_full_min` / `eta_empty_min`, `grid_status` and a `stale` flag (true when the newest reading is over 15 min old — the text is then prefixed `⚠ 90m old`).
+
+**Reach it from anywhere with Tailscale** (no router changes, works on any Wi-Fi/cellular): install Tailscale on the iPhone, sign in to the same tailnet as the Mac, and use the host's tailnet address — `tailscale ip -4` on the host, currently `100.77.88.77` (or its MagicDNS name). Do **not** port-forward or expose the dashboard publicly.
+
+**Shortcuts app** (iPhone): New Shortcut →
+1. *Get Contents of URL* — URL `http://100.77.88.77:8093/api/glance`, Method GET, Headers: `X-Dashboard-Token` = the `dashboard_token` from `~/.franklinwh.json`.
+2. *Get Dictionary Value* — key `text` (from the previous step).
+3. *Show Result* (or *Show Notification*).
+Add it to the Home Screen / a Lock Screen widget (Shortcuts widget), or add it to the Watch. Apple Watch caveat: a Watch shortcut runs through the iPhone, so it needs the iPhone in range; the Watch has no Tailscale client of its own.
+
+The token is a shared secret: it sits in the Shortcut, so don't share the shortcut. Rotate it by editing `dashboard_token` in `~/.franklinwh.json` and restarting the dashboard agent.
+
 ## Alert Channels
 
 - **Telegram**: chat ID `5650189923` (FranklinWH advisor + CMR News bot both configured)

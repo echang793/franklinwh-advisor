@@ -7041,3 +7041,79 @@ def test_predict_applies_nowcast_to_todays_remaining_hours_only(tmp_path, monkey
         assert scaled[i].predicted_solar_kw == pytest.approx(0.5 * plain[i].predicted_solar_kw)
     for i in tomorrow:                                                  # tomorrow's weather isn't today's
         assert scaled[i].predicted_solar_kw == pytest.approx(plain[i].predicted_solar_kw)
+
+
+# ── /api/glance: compact endpoint for an iPhone/Watch Shortcuts widget ───
+
+def _glance_client(monkeypatch, reading, cfg=None):
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+
+    monkeypatch.setattr(webapi, "_cfg", cfg or Config(), raising=False)
+    monkeypatch.setattr(webapi, "_BAT_CAP", 13.6, raising=False)
+    monkeypatch.setattr(webapi, "_latest_reading", lambda: reading)
+    return TestClient(webapi.app)
+
+
+def _reading(minutes_old=1, soc=87.4, solar=3.2, load=0.4, batt=-2.8, grid=0.0, status="normal"):
+    ts = (datetime.now() - timedelta(minutes=minutes_old)).isoformat()
+    return {"timestamp": ts, "battery_soc": soc, "solar_kw": solar, "home_load_kw": load,
+            "battery_use_kw": batt, "grid_use_kw": grid, "grid_status": status, "solar_total_kwh": 12.3}
+
+
+def test_glance_charging_reading(monkeypatch):
+    body = _glance_client(monkeypatch, _reading()).get("/api/glance").json()
+    assert body["ok"] is True and body["stale"] is False
+    assert body["soc_pct"] == 87                              # whole number: it's a widget
+    assert body["battery_state"] == "charging"
+    assert body["solar_kw"] == 3.2 and body["load_kw"] == 0.4
+    # (100-87.4)% of 13.6 kWh = 1.71 kWh at 2.8 kW = 0.61 h ~= 37 min to full
+    assert 34 <= body["eta_full_min"] <= 40 and body["eta_empty_min"] is None
+    assert "87%" in body["text"] and "⚡" in body["text"]
+
+
+def test_glance_discharging_and_idle(monkeypatch):
+    dis = _glance_client(monkeypatch, _reading(soc=50.0, solar=0.0, batt=1.0)).get("/api/glance").json()
+    assert dis["battery_state"] == "discharging" and dis["eta_full_min"] is None
+    assert 400 <= dis["eta_empty_min"] <= 420                 # 6.8 kWh / 1 kW ~= 408 min
+    idle = _glance_client(monkeypatch, _reading(batt=0.02)).get("/api/glance").json()
+    assert idle["battery_state"] == "idle" and idle["eta_full_min"] is None and idle["eta_empty_min"] is None
+
+
+def test_glance_flags_stale_data_rather_than_showing_it_as_live(monkeypatch):
+    """A widget quietly showing an hours-old battery level is worse than
+    showing nothing — after 15 min without a reading it must say so."""
+    body = _glance_client(monkeypatch, _reading(minutes_old=90)).get("/api/glance").json()
+    assert body["ok"] is True and body["stale"] is True and body["age_min"] >= 89
+    assert body["text"].startswith("⚠")
+
+
+def test_glance_outage_and_no_data(monkeypatch):
+    out = _glance_client(monkeypatch, _reading(status="down")).get("/api/glance").json()
+    assert out["grid_status"] == "down" and "GRID DOWN" in out["text"]
+    none = _glance_client(monkeypatch, None).get("/api/glance").json()
+    assert none["ok"] is False and none["text"]              # widget still gets something displayable
+
+
+def test_glance_never_emits_nan_or_inf(monkeypatch):
+    """iOS Safari / Shortcuts hard-fail on NaN in JSON."""
+    bad = _reading(soc=float("nan"), solar=float("inf"), batt=float("nan"))
+    resp = _glance_client(monkeypatch, bad).get("/api/glance")
+    assert resp.status_code == 200
+    assert "NaN" not in resp.text and "Infinity" not in resp.text
+    assert resp.json()["soc_pct"] is None and resp.json()["solar_kw"] is None
+
+
+def test_glance_requires_the_dashboard_token_when_set(monkeypatch):
+    client = _glance_client(monkeypatch, _reading(), cfg=Config(dashboard_token="s3cret"))
+    assert client.get("/api/glance").status_code == 401
+    assert client.get("/api/glance", headers={"X-Dashboard-Token": "s3cret"}).status_code == 200
+
+
+def test_glance_text_never_shows_negative_zero_solar(monkeypatch):
+    """Overnight the inverter reports tiny negatives (-0.01 kW); the widget
+    must read "☀0.0kW", not "☀-0.0kW"."""
+    body = _glance_client(monkeypatch, _reading(solar=-0.01, load=-0.004, batt=1.2, soc=60.0)).get("/api/glance").json()
+    assert "☀0.0kW" in body["text"] and "-0.0" not in body["text"]
+    assert body["solar_kw"] >= 0 and body["load_kw"] >= 0

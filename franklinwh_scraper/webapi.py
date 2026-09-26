@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -170,6 +171,82 @@ def api_current():
         "poll_seconds": _POLL_S,
         "saved_today": _saved_today(now),
         "on_peak": period_at(now) == TouPeriod.ON_PEAK,
+    }
+
+
+_GLANCE_STALE_MIN = 15      # ~3 missed polls: don't show old numbers as live
+_GLANCE_IDLE_KW = 0.05      # |battery kW| under this reads as "idle"
+
+
+def _finite(x, ndigits: int = 2):
+    """A JSON-safe number or None — Shortcuts/iOS hard-fail on NaN/Infinity."""
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return None
+    return round(f, ndigits) if math.isfinite(f) else None
+
+
+@app.get("/api/glance", dependencies=_authed)
+def api_glance():
+    """Tiny payload for an iPhone/Watch Shortcuts widget (see RUNBOOK).
+
+    One flat object plus a ready-to-display `text`, so a widget needs no
+    logic: SoC, what the battery is doing, solar/load, time-to-full or
+    time-to-empty, and grid status. `stale` is true when the newest reading
+    is older than _GLANCE_STALE_MIN — a widget quietly showing an hours-old
+    battery level is worse than one that says so.
+    """
+    r = _latest_reading()
+    if not r:
+        return {"ok": False, "stale": True, "text": "⚠ no readings yet"}
+    try:
+        age_min = max(0, int((datetime.now() - datetime.fromisoformat(r["timestamp"])).total_seconds() // 60))
+    except (KeyError, ValueError):
+        age_min = None
+    stale = age_min is None or age_min > _GLANCE_STALE_MIN
+
+    soc = _finite(r.get("battery_soc"), 1)
+    # Inverters report tiny negatives at night (-0.01 kW); clamp so the widget
+    # reads "0.0kW", never "-0.0kW".
+    def _nonneg(x):
+        f = _finite(x)          # NaN -> None first: max(0.0, nan) would silently give 0.0
+        return None if f is None else max(0.0, f)
+    solar = _nonneg(r.get("solar_kw"))
+    load = _nonneg(r.get("home_load_kw"))
+    batt = _finite(r.get("battery_use_kw"))      # − charging / + discharging
+    status = r.get("grid_status") or "unknown"
+
+    if batt is None or abs(batt) < _GLANCE_IDLE_KW:
+        state, eta_full, eta_empty = "idle", None, None
+    elif batt < 0:
+        state = "charging"
+        eta_empty = None
+        eta_full = round((100 - soc) / 100 * _BAT_CAP / -batt * 60) if soc is not None else None
+    else:
+        state = "discharging"
+        eta_full = None
+        eta_empty = round(soc / 100 * _BAT_CAP / batt * 60) if soc is not None else None
+
+    icon = {"charging": "⚡", "discharging": "🔋", "idle": "·"}[state]
+    parts = [f"{round(soc)}%" if soc is not None else "--%", icon]
+    if solar is not None:
+        parts.append(f"☀{solar:.1f}kW")
+    if load is not None:
+        parts.append(f"🏠{load:.1f}kW")
+    text = " ".join(parts)
+    if status not in ("normal", "unknown"):
+        text = f"GRID {'DOWN' if status == 'down' else status.upper()} · {text}"
+    if stale:
+        text = f"⚠ {age_min if age_min is not None else '?'}m old · {text}"
+    return {
+        "ok": True, "stale": stale, "age_min": age_min, "ts": r.get("timestamp"),
+        "soc_pct": round(soc) if soc is not None else None,
+        "battery_state": state, "battery_kw": batt,
+        "solar_kw": solar, "load_kw": load, "grid_kw": _finite(r.get("grid_use_kw")),
+        "grid_status": status, "eta_full_min": eta_full, "eta_empty_min": eta_empty,
+        "solar_today_kwh": _finite(r.get("solar_total_kwh"), 1),
+        "text": text,
     }
 
 
