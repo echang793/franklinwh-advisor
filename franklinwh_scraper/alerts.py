@@ -3535,6 +3535,11 @@ def _alert_multiday_cloudy_precharge(
     day2_hours   = [h for h in outlook.hours if h.time.date() == day2_date]
     from franklinwh_scraper.weather import _MIN_EFFICIENCY, _TEMP_COEFF
     day2_kwh = 0.0
+    if not day2_hours:
+        # No forecast for the day after (e.g. stale/short cached outlook):
+        # unknown, not 0.0 kWh — a made-up zero once made this alert claim
+        # a dead-solar day.
+        return None
     if day2_hours:
         for h in day2_hours:
             eff = max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (h.panel_temp_c - 25.0))

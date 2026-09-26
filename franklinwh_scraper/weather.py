@@ -311,7 +311,7 @@ def fetch_nws_storm_alerts(lat: float, lon: float, timeout: int = 10) -> list[st
 
 
 def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int = 3) -> SolarOutlook:
-    """Fetch 48-hour hourly solar irradiance + temperature forecast for a location."""
+    """Fetch ~72-hour hourly solar irradiance + temperature forecast for a location."""
     import time as _time
     last_exc: Exception | None = None
     for attempt in range(retries):
@@ -321,7 +321,7 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
                 "longitude": lon,
                 "hourly": "direct_radiation,diffuse_radiation,cloud_cover,temperature_2m,wind_speed_10m",
                 "daily": "sunrise",
-                "forecast_days": 2,
+                "forecast_days": 3,  # today + tomorrow + day after (multi-day alerts)
                 "timezone": "auto",
             }, timeout=timeout)
             resp.raise_for_status()

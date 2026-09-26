@@ -7825,3 +7825,37 @@ def test_export_arbitrage_min_credit_is_configurable():
     raised = alerts._alert_export_arbitrage({}, "2026-09-02", now, c,
                                             Config(battery_capacity_kwh=13.6, export_alert_min_credit=50.0), None)
     assert raised is None
+
+
+def test_fetch_solar_outlook_requests_three_forecast_days(monkeypatch):
+    """Regression: forecast_days=2 covered only today+tomorrow, so the
+    2-day cloudy alert's "day after" had no hours and printed 0.0 kWh."""
+    from franklinwh_scraper import weather
+
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"hourly": {"time": [], "direct_radiation": [], "diffuse_radiation": [],
+                               "cloud_cover": []}, "daily": {"sunrise": []}}
+
+    def _get(url, params=None, timeout=None):
+        seen.update(params)
+        return _Resp()
+
+    monkeypatch.setattr(weather.requests, "get", _get)
+    weather.fetch_solar_outlook(32.9, -117.1)
+    assert seen["forecast_days"] >= 3
+
+
+def test_multiday_cloudy_alert_silent_when_day_after_forecast_missing():
+    """No day-after hours = unknown, not 0.0 kWh; never send a made-up number."""
+    from franklinwh_scraper.config import Config as _C
+    import types
+
+    outlook = _outlook_with(20.0, 95.0)  # cloudy today+tomorrow only
+    state = {"solar_cal_samples": [8.0, 8.0, 8.0]}
+    c = types.SimpleNamespace(battery_soc_pct=28.0)
+    now = datetime.now().replace(hour=8, minute=0)
+    assert alerts._alert_multiday_cloudy_precharge(state, "x", now, c, outlook, _C()) is None
