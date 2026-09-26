@@ -122,6 +122,11 @@ class Config:
     # set this if the dashboard is ever reachable beyond localhost).
     dashboard_token: str = ""
 
+    # Minimum $ credit for the "Export opportunity today" alert. The hourly
+    # schedule makes evening exports worth real money in Jun-Jul and Aug-Oct;
+    # raise this to hear about fewer/larger opportunities, lower it for more.
+    export_alert_min_credit: float = 1.0
+
     # Hostname the advisor is allowed to run on (blank = any machine). With
     # the repo on two Macs, a second copy of the LaunchAgent doubles every
     # alert and puts two bots on one Telegram token — set this to the host

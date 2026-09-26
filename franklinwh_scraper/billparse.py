@@ -43,8 +43,8 @@ class ParsedBill:
     next_read: date | None
     season: str                                  # "summer" | "winter"
     pcia_vintage: int | None
-    gen_rates: dict[str, float]                  # period -> SDCP $/kWh actually billed
-    gen_kwh: dict[str, float]                    # period -> kWh (charge / rate; the bill prints them rounded)
+    gen_rates: dict[str, float]                  # dominant season's SDCP $/kWh actually billed, by period
+    gen_kwh: dict[str, float]                    # period -> kWh over ALL seasons (charge / rate; bill prints them rounded)
     export_kwh: float
     delivery_import: float                       # SDG&E "Delivery Import Charges"
     nonnettable: float                           # fixed/non-nettable charges
@@ -55,6 +55,8 @@ class ParsedBill:
     gen_export_adder_credit: float = 0.0         # positive $ of that adder
     generation_net: float = 0.0                  # SDCP net (negative = credit banked to SBP)
     climate_credit: float = 0.0                  # positive $; NOT part of the usage bill
+    gen_rates_by_season: dict[str, dict[str, float]] = field(default_factory=dict)  # a cycle can straddle Oct/Nov
+    export_pricing_year: int | None = None       # "Export Pricing: Legacy 2024 Pricing" -> 2024
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -102,8 +104,11 @@ class ParsedBill:
         return round((self.delivery_import - expected) / self.import_kwh, 5)
 
     def learned_import(self) -> dict:
-        """The `learned_import` state entry (see tou.set_learned_import)."""
-        out: dict = {"season": self.season, "gen": dict(self.gen_rates), "base_daily": self.base_daily}
+        """The `learned_import` state entry (see tou.set_learned_import).
+        Every season the bill priced is included, so a cycle that straddles
+        the summer/winter change teaches both."""
+        out: dict = {"gen_by_season": {k: dict(v) for k, v in self.gen_rates_by_season.items()},
+                     "base_daily": self.base_daily}
         if self.implied_pcia_adder is not None:
             out["pcia_adder"] = self.implied_pcia_adder
         return out
@@ -132,41 +137,50 @@ def parse_bill_text(text: str) -> ParsedBill:
     exp_kwh = re.search(rf"Total Export kWh\s+({_NUM})", text, re.I)
     deliv_exp = re.search(rf"Delivery Export Credits\s+({_NUM})", text, re.I)
 
-    gen_rates: dict[str, float] = {}
+    by_season: dict[str, dict[str, float]] = {}
+    season_kwh: dict[str, float] = {}
     gen_kwh: dict[str, float] = {}
     gen_charge = 0.0
-    season = None
     for m in re.finditer(
             rf"Generation\s+(On-Peak|Off-Peak|Super Off-Peak)\s+(Summer|Winter)\s+({_NUM})\s*kWh\s*X\s*\$?({_NUM})\s+({_NUM})",
             text, re.I):
         period = _PERIODS[m.group(1).lower()]
         rate, charge = _num(m.group(4)), _num(m.group(5))
-        season = m.group(2).lower()
-        gen_rates[period] = rate
+        seas = m.group(2).lower()
+        kwh = charge / rate if rate > 0 else _num(m.group(3))
+        by_season.setdefault(seas, {})[period] = rate
+        season_kwh[seas] = season_kwh.get(seas, 0.0) + kwh
+        gen_kwh[period] = gen_kwh.get(period, 0.0) + kwh     # accumulate: never overwrite the other season's usage
         gen_charge += charge
-        gen_kwh[period] = charge / rate if rate > 0 else _num(m.group(3))
-    if not gen_rates:
+    if not by_season:
         missing.append("generation (SDCP) usage lines")
+    season = max(season_kwh, key=season_kwh.get) if season_kwh else None
+    gen_rates = dict(by_season.get(season, {}))
 
     if missing:
         raise BillParseError("Couldn't find in the pasted text: " + ", ".join(missing)
                              + ". Paste the full 'Electric Service' and CCA generation pages.")
 
-    export_kwh = abs(_num(exp_kwh.group(1))) if exp_kwh else 0.0
     delivery_export = abs(_num(deliv_exp.group(1))) if deliv_exp else 0.0
 
     gen_export = 0.0
     adder_rate, adder_credit = None, 0.0
+    gen_export_kwh = 0.0
     for m in re.finditer(rf"Generation Electricity Export Credits( Adder)?\s+({_NUM})\s*kWh\s*X\s*\$?({_NUM})\s+({_NUM})",
                          text, re.I):
         credit = abs(_num(m.group(4)))
         gen_export += credit
+        gen_export_kwh = max(gen_export_kwh, abs(_num(m.group(2))))
         if m.group(1):
             adder_rate, adder_credit = _num(m.group(3)), credit
+    # Prefer the SDG&E "Total Export kWh" line; fall back to the kWh on SDCP's
+    # export-credit lines when a bill layout omits it.
+    export_kwh = abs(_num(exp_kwh.group(1))) if exp_kwh else gen_export_kwh
     tax = re.search(rf"State Surcharge Tax\s+({_NUM})", text, re.I)
     generation_net = gen_charge - gen_export + (_num(tax.group(1)) if tax else 0.0)
 
     vint = re.search(r"(\d{4})\s+Vintage", text, re.I)
+    export_year = re.search(r"Export Pricing:\s*Legacy\s+(\d{4})", text, re.I)
     climate = re.search(rf"California Climate Credit\s+({_NUM})", text, re.I)
 
     return ParsedBill(
@@ -174,6 +188,7 @@ def parse_bill_text(text: str) -> ParsedBill:
         next_read=datetime.strptime(nxt.group(1).replace(".", ""), "%b %d, %Y").date() if nxt else None,
         season=season, pcia_vintage=int(vint.group(1)) if vint else None,
         gen_rates=gen_rates, gen_kwh=gen_kwh, export_kwh=export_kwh,
+        gen_rates_by_season=by_season, export_pricing_year=int(export_year.group(1)) if export_year else None,
         delivery_import=_num(delivery_import.group(1)), nonnettable=_num(nonnet.group(1)),
         delivery_export_credit=delivery_export, total_electric_service=_num(total_es.group(1)),
         gen_export_credit=round(gen_export, 2), generation_net=round(generation_net, 2),

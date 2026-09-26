@@ -977,6 +977,13 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
           f"${bill.implied_pcia_adder if bill.implied_pcia_adder is not None else 0:.4f}/kWh")
     if bill.next_read:
         _info(f"Next meter read {bill.next_read:%b %-d, %Y}")
+    _sched = _get_export_schedule_for_doctor()
+    if (bill.export_pricing_year and _sched is not None and _sched.vintage
+            and _sched.vintage != f"Legacy {bill.export_pricing_year}"):
+        _warn(f"This bill's export pricing is 'Legacy {bill.export_pricing_year}' but the bundled schedule is "
+              f"'{_sched.vintage}' — export credits will be mispriced. Download the matching file from "
+              "sdge.com/solar/solar-billing-plan/export-pricing and rebuild: "
+              "python scripts/build_export_prices.py <file>.csv (see RUNBOOK).")
     scale_entry, scale_note = _learn_export_scale(outdir, bill)
     _info(f"Export pricing: {scale_note}")
     if dry_run:
@@ -994,7 +1001,14 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
                 "rate": rate, "cycle_end": end.isoformat(),
                 "credit": bill.export_credit_total, "kwh": bill.export_kwh,
             }
-        state["learned_import"] = bill.learned_import()
+        learned = bill.learned_import()
+        # Merge seasons across bills: a summer bill must not erase winter rates
+        # learned from an earlier winter bill (only the bill that used a season
+        # prints its rates). The single-season shape older state may hold is folded in first.
+        prev = state.get("learned_import") if isinstance(state.get("learned_import"), dict) else {}
+        merged = dict(prev.get("gen_by_season") or ({prev["season"]: prev["gen"]} if prev.get("season") and isinstance(prev.get("gen"), dict) else {}))
+        merged.update(learned["gen_by_season"])
+        state["learned_import"] = {**learned, "gen_by_season": merged}
         cycles = [c for c in state.get("bill_cycles", []) if isinstance(c, dict) and c.get("end") != end.isoformat()]
         cycles.append({"start": bill.period_start.isoformat(), "end": end.isoformat()})
         state["bill_cycles"] = sorted(cycles, key=lambda c: c["end"])[-24:]

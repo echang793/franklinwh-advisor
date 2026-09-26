@@ -101,20 +101,31 @@ _LEARNED_BASE_RANGE = (0.3, 2.0)  # $/day
 
 
 def set_learned_import(learned) -> None:
-    """Install (or, with None/invalid input, clear) bill-learned import terms."""
+    """Install (or, with None/invalid input, clear) bill-learned import terms.
+
+    Generation is keyed by season: {"gen_by_season": {"summer": {period: r}, "winter": {...}}}.
+    The earlier single-season shape {"season": s, "gen": {period: r}} (already
+    in saved state) is still accepted.
+    """
     global _learned_import
     clean: dict = {}
     if isinstance(learned, dict):
-        season = learned.get("season")
-        gen = learned.get("gen")
-        if season in _GEN_DEFAULT and isinstance(gen, dict):
+        seasons = learned.get("gen_by_season")
+        if not isinstance(seasons, dict) and learned.get("season") in _GEN_DEFAULT:
+            seasons = {learned["season"]: learned.get("gen")}
+        gen_clean: dict = {}
+        for season, rates in (seasons.items() if isinstance(seasons, dict) else []):
+            if season not in _GEN_DEFAULT or not isinstance(rates, dict):
+                continue
             ok = {}
             for period in TouPeriod:
-                v = gen.get(period.value)
+                v = rates.get(period.value)
                 if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v <= _LEARNED_GEN_MAX:
                     ok[period] = float(v)
             if ok:
-                clean["season"], clean["gen"] = season, ok
+                gen_clean[season] = ok
+        if gen_clean:
+            clean["gen"] = gen_clean
         adder = learned.get("pcia_adder")
         if isinstance(adder, (int, float)) and not isinstance(adder, bool) and 0 <= adder <= _LEARNED_ADDER_MAX:
             clean["pcia_adder"] = float(adder)
@@ -130,9 +141,8 @@ def _current_adder() -> float:
 
 
 def _gen_rate(season: str, period: TouPeriod) -> float:
-    if _learned_import.get("season") == season and period in _learned_import.get("gen", {}):
-        return _learned_import["gen"][period]
-    return _GEN_DEFAULT[season][period]
+    learned = _learned_import.get("gen", {}).get(season, {})
+    return learned[period] if period in learned else _GEN_DEFAULT[season][period]
 
 
 class _LiveRates:

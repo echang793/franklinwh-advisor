@@ -7345,7 +7345,7 @@ def test_bill_record_from_text_recalibrates_everything(tmp_path):
     assert st[f"actual_bill_{end.isoformat()}"] == pytest.approx(-15.58, abs=0.005)
     assert st["learned_export_rate"]["rate"] == pytest.approx(0.5139, abs=0.0001)
     li = st["learned_import"]
-    assert li["season"] == "summer" and li["gen"]["super_off_peak"] == 0.0368
+    assert li["gen_by_season"]["summer"]["super_off_peak"] == 0.0368
     assert li["base_daily"] == pytest.approx(0.812, abs=0.0005) and 0.010 <= li["pcia_adder"] <= 0.016
     assert st["bill_cycles"] == [{"start": (end - timedelta(days=29)).isoformat(), "end": end.isoformat()}]
     assert st["next_read_date"] == (end + timedelta(days=29)).isoformat()
@@ -7698,3 +7698,112 @@ def _doctor_lines_plain():
          patch("franklinwh_scraper.cli.AccountClient") as ac:
         ac.side_effect = RuntimeError("skip login")
         return CliRunner().invoke(cli, ["doctor"]).output.splitlines()
+
+
+# ── Parser hardening, export-pricing vintage, alert threshold (2026-09-25) ──
+
+_SEASON_SPLIT_BILL = """\
+Export Pricing: Legacy 2024 Pricing
+Billing Period: 10/16/26 - 11/16/26 Total Days: 32
+Meter Number: 00000000 (Next scheduled read date Dec 15, 2026) Cycle: 12
+Non-Nettable Charges $26.00
+Delivery Import Charges $30.10
+Total Export kWh 40
+Delivery Export Credits -$1.20
+Total Electric Service $54.90
+Generation On-Peak Summer 4 kWh X $0.38242 1.53
+Generation Off-Peak Summer 20 kWh X $0.11828 2.37
+Generation Super Off-Peak Summer 100 kWh X $0.0368 3.68
+Generation On-Peak Winter 2 kWh X $0.14237 0.28
+Generation Off-Peak Winter 10 kWh X $0.09205 0.92
+Generation Super Off-Peak Winter 60 kWh X $0.03039 1.82
+Generation Electricity Export Credits -40 kWh X $0.05 -2.00
+Generation Electricity Export Credits Adder -40 kWh X $0.0075 -.30
+State Surcharge Tax .03
+Your CCA rate is SBP EV-TOU-5 - 2021 Vintage - PowerBase.
+"""
+
+
+def test_parse_bill_that_straddles_the_summer_winter_change_keeps_both_seasons():
+    """A cycle spanning Oct -> Nov bills some usage at summer and some at
+    winter generation rates. Later lines used to overwrite earlier ones, so
+    one season's rates (and kWh) silently vanished."""
+    from franklinwh_scraper.billparse import parse_bill_text
+
+    b = parse_bill_text(_SEASON_SPLIT_BILL)
+    assert b.gen_rates_by_season["summer"] == {"on_peak": 0.38242, "off_peak": 0.11828, "super_off_peak": 0.0368}
+    assert b.gen_rates_by_season["winter"] == {"on_peak": 0.14237, "off_peak": 0.09205, "super_off_peak": 0.03039}
+    assert b.season == "summer"                                    # dominant by kWh (124 vs 72)
+    assert b.import_kwh == pytest.approx(4 + 20 + 100 + 2 + 10 + 60, abs=0.2)   # every line counted, both seasons
+    assert b.export_pricing_year == 2024
+
+
+def test_parse_bill_tolerates_commas_case_and_a_missing_export_total():
+    from franklinwh_scraper.billparse import parse_bill_text
+
+    text = (_SEP_2026_BILL.replace("Non-Nettable Charges $24.36", "NON-NETTABLE CHARGES $1,024.36")
+            .replace("Total Export kWh −126\n", ""))          # no "Total Export kWh" line at all
+    b = parse_bill_text(text)
+    assert b.nonnettable == pytest.approx(1024.36)
+    assert b.export_kwh == 126                                     # recovered from the generation export credit line
+
+
+def test_learned_import_merges_seasons_across_bills_instead_of_overwriting():
+    """A summer bill must not erase winter rates learned from an earlier
+    winter bill (each season's rates only appear on a bill that used them)."""
+    tou.set_learned_import({"gen_by_season": {
+        "summer": {"super_off_peak": 0.05}, "winter": {"super_off_peak": 0.04}}})
+    assert tou.rate_at(datetime(2026, 9, 2, 3, 0)) == pytest.approx(0.05 + tou.DELIVERY_SUPER_OFF + tou._PCIA_NET_ADDER)
+    assert tou.rate_at(datetime(2026, 1, 6, 3, 0)) == pytest.approx(0.04 + tou.DELIVERY_SUPER_OFF + tou._PCIA_NET_ADDER)
+    # the older single-season schema (already in live state) still works
+    tou.set_learned_import({"season": "summer", "gen": {"super_off_peak": 0.06}})
+    assert tou.rate_at(datetime(2026, 9, 2, 3, 0)) == pytest.approx(0.06 + tou.DELIVERY_SUPER_OFF + tou._PCIA_NET_ADDER)
+
+
+def test_bill_record_keeps_previously_learned_seasons(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    end = datetime.now().date() - timedelta(days=5)
+    winter_only = (_bill_with_dates(end).replace("Summer", "Winter")
+                   .replace("0.38242", "0.14237").replace("0.11828", "0.09205").replace("$0.0368", "$0.03039"))
+    assert _run_bill_record(tmp_path, ["--from-text", "-"], stdin=winter_only).exit_code == 0
+    assert _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_bill_with_dates(end + timedelta(days=30))).exit_code == 0
+    gen = _load_peak_state(tmp_path)["learned_import"]["gen_by_season"]
+    assert gen["winter"]["super_off_peak"] == 0.03039 and gen["summer"]["super_off_peak"] == 0.0368
+
+
+def test_export_schedule_knows_its_vintage_and_bill_record_warns_on_a_mismatch(tmp_path):
+    from franklinwh_scraper.exportprices import build_from_csv, load_default
+
+    assert load_default().vintage == "Legacy 2024"
+    csv_path = tmp_path / "LY2026 NBT Pricing Upload MIDAS.csv"
+    _write_midas_csv(csv_path, [("USCA-SDXX-NB24-0000", "9/1/2026", "Sep Weekday HS1", 0.004)])
+    assert build_from_csv(csv_path, require_complete=False)["meta"]["vintage"] == "Legacy 2026"
+    other = tmp_path / "prices.csv"                                   # unrecognizable filename: no claim made
+    _write_midas_csv(other, [("USCA-SDXX-NB24-0000", "9/1/2026", "Sep Weekday HS1", 0.004)])
+    assert "vintage" not in build_from_csv(other, require_complete=False)["meta"]
+
+    tou._reset_export_schedule()      # the suite default disables the schedule; use the real bundled one
+    end = datetime.now().date() - timedelta(days=5)
+    same = _run_bill_record(tmp_path / "a", ["--from-text", "-", "--dry-run"], stdin=_bill_with_dates(end))
+    assert "vintage" not in same.output.lower()
+    mismatch = _run_bill_record(tmp_path / "b", ["--from-text", "-", "--dry-run"],
+                                stdin=_bill_with_dates(end).replace("Legacy 2024 Pricing", "Legacy 2026 Pricing"))
+    assert mismatch.exit_code == 0
+    assert "Legacy 2026" in mismatch.output and "Legacy 2024" in mismatch.output and "build_export_prices" in mismatch.output
+
+
+def test_export_arbitrage_min_credit_is_configurable():
+    import types
+
+    tou.set_export_schedule(_sched(deliv=0.004, gen=0.05, spike_hour=18, spike=(0.1, 0.4)))   # 0.5+adder/kWh evening
+    c = types.SimpleNamespace(battery_soc_pct=95.0)
+    now = datetime(2026, 9, 2, 12, 0)
+    default = alerts._alert_export_arbitrage({}, "2026-09-02", now, c, Config(battery_capacity_kwh=2.0), None)
+    assert default is None                                          # 1.5 kWh x ~$0.51 = $0.76 < the $1 default floor
+    lowered = alerts._alert_export_arbitrage({}, "2026-09-02", now, c,
+                                             Config(battery_capacity_kwh=2.0, export_alert_min_credit=0.5), None)
+    assert lowered and "export" in lowered.lower()
+    raised = alerts._alert_export_arbitrage({}, "2026-09-02", now, c,
+                                            Config(battery_capacity_kwh=13.6, export_alert_min_credit=50.0), None)
+    assert raised is None

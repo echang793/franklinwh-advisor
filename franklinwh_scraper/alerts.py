@@ -1668,7 +1668,7 @@ def _alert_export_arbitrage(
         return None
 
     credit = exportable_kwh * peak_rate
-    if credit < 1.0:
+    if credit < getattr(cfg, "export_alert_min_credit", 1.0):
         # A small exportable surplus (small battery, or usage_forecast
         # already ate most of it) isn't worth a notification even at the
         # real flat rate (tou._NEM3_DEFAULT_EXPORT_RATE).

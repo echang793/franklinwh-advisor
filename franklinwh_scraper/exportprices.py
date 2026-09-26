@@ -28,12 +28,17 @@ _VALUE_NAME = re.compile(r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (W
 class ExportSchedule:
     """{year: {"delivery"|"generation": {month: {"Weekday"|"Weekend": [24 $/kWh]}}}}"""
 
-    def __init__(self, years: dict[str, dict]):
+    def __init__(self, years: dict[str, dict], vintage: str | None = None):
         self._years = {int(y): v for y, v in years.items()}
+        self.vintage = vintage      # e.g. "Legacy 2024"; None when unknown
 
     @classmethod
     def from_dict(cls, data: dict) -> "ExportSchedule":
-        return cls(data.get("years", {}) if isinstance(data, dict) else {})
+        if not isinstance(data, dict):
+            return cls({})
+        meta = data.get("meta")
+        vintage = meta.get("vintage") if isinstance(meta, dict) else None
+        return cls(data.get("years", {}), vintage if isinstance(vintage, str) else None)
 
     def rates(self, dt: datetime, weekend: bool) -> tuple[float, float] | None:
         """(delivery, generation) $/kWh for an export at local time `dt`, or
@@ -93,8 +98,10 @@ def build_from_csv(path: str | Path, require_complete: bool = True) -> dict:
         slot[hour] = round(best, 6)
     if require_complete:
         years = {y: b for y, b in years.items() if _complete(b)}
+    m = re.search(r"LY(\d{4})", Path(path).name, re.I)
     return {
         "meta": {
+            **({"vintage": f"Legacy {m.group(1)}"} if m else {}),
             "source": "SDG&E Solar Billing Plan export pricing, Legacy 2024 (NBT24) — "
                       "sdge.com/solar/solar-billing-plan/export-pricing",
             "unit": "$/kWh exported",
