@@ -44,7 +44,7 @@ from .config import Config, host_matches, load as load_config, save as save_conf
 from .doctor_checks import icloud_path_warning, launchd_health
 from .exporters import export_csv, export_json
 
-from .history import HistoryStore
+from .history import HistoryStore, integrate_intervals
 from .logutil import rotate_known_logs
 from .license import ENFORCE_LICENSE, check_license
 from .notifier import (notify_email, notify_imessage, notify_log,
@@ -52,7 +52,7 @@ from .notifier import (notify_email, notify_imessage, notify_log,
                        fetch_telegram_chat_id, rec_to_text)
 from .predictor import predict
 from .scrapers import FAQScraper, ProductsScraper, SupportScraper
-from .tou import cycle_bounds
+from .tou import _get_export_schedule as _get_export_schedule_for_doctor, cycle_bounds, schedule_export_credit
 from .weather import fetch_solar_outlook_cached as _fetch_outlook_cached, geocode
 
 
@@ -916,6 +916,40 @@ def alerts_report(ctx: click.Context, days: int) -> None:
         _info("Names appear here for alerts sent from now on; use /snooze <name> [hours] in Telegram.")
 
 
+_SCALE_MIN_EXPORT_COVERAGE = 0.6   # history must account for this much of the bill's export kWh
+
+
+def _learn_export_scale(outdir: Path, bill) -> tuple[dict | None, str]:
+    """Fit how the bill's real export credits compare with SDG&E's hourly
+    schedule replayed over this cycle's actual exports: scale = actual /
+    schedule, plus the CCA's flat per-kWh adder as printed. Returns
+    (learned entry or None, human-readable status). Declines when there's no
+    schedule, no readings, or history that covers too little of the bill's
+    exports (advisor down for days) — a partial picture would fit a
+    misleading scale."""
+    db_path = outdir / "history.db"
+    if not db_path.exists():
+        return None, "no history.db here — export schedule scale not calibrated"
+    try:
+        with HistoryStore(db_path) as h:
+            priced = schedule_export_credit(integrate_intervals(
+                h.weekly_readings(bill.period_start.isoformat(), bill.period_end.isoformat())))
+    except Exception as e:  # noqa: BLE001 — calibration is optional; never block recording the bill
+        return None, f"couldn't read history ({e}) — export schedule scale not calibrated"
+    if priced is None:
+        return None, "no export price schedule available — export schedule scale not calibrated"
+    kwh, credit = priced
+    if bill.export_kwh <= 0 or kwh < _SCALE_MIN_EXPORT_COVERAGE * bill.export_kwh or credit <= 0:
+        return None, (f"not enough export history for this cycle ({kwh:.0f} of the bill's "
+                      f"{bill.export_kwh:g} kWh) — export schedule scale not calibrated")
+    scale = round(bill.export_credit_ex_adder / credit, 4)
+    entry = {"scale": scale, "cycle_end": bill.period_end.isoformat()}
+    if bill.gen_export_adder_rate is not None:
+        entry["adder"] = bill.gen_export_adder_rate
+    return entry, (f"export schedule scale {scale:.3f}x "
+                   f"(bill ${bill.export_credit_ex_adder:.2f} vs schedule ${credit:.2f} over {kwh:.0f} kWh)")
+
+
 def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
     """`bill-record --from-text`: parse a pasted bill and recalibrate the
     export rate, import rates, fixed fee and real cycle dates from it."""
@@ -943,12 +977,16 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
           f"${bill.implied_pcia_adder if bill.implied_pcia_adder is not None else 0:.4f}/kWh")
     if bill.next_read:
         _info(f"Next meter read {bill.next_read:%b %-d, %Y}")
+    scale_entry, scale_note = _learn_export_scale(outdir, bill)
+    _info(f"Export pricing: {scale_note}")
     if dry_run:
         _warn("Dry run — nothing saved.")
         return
 
     with _state_lock(outdir):
         state = _load_peak_state(outdir)
+        if scale_entry:
+            state["learned_export_scale"] = scale_entry
         if keep_amount:
             state[f"actual_bill_{end.isoformat()}"] = bill.comparable_amount
         if rate is not None:
@@ -1175,6 +1213,11 @@ def doctor() -> None:
     else:
         _check("Single-host guard", True,
                "optional — set run_on_host so a second Mac can't double every alert")
+
+    _hourly = _get_export_schedule_for_doctor()
+    _check("Export pricing", _hourly is not None,
+           "hourly SDG&E schedule (varies by hour and month)" if _hourly is not None else
+           "flat fallback — the bundled hourly schedule is missing (see scripts/build_export_prices.py)")
 
     _repo = Path(__file__).resolve().parent.parent
     _warn_icloud = icloud_path_warning(_repo) or icloud_path_warning(Path(cfg.output_dir).resolve())

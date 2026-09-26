@@ -24,10 +24,16 @@ def _reset_learned_export_rate():
     tou.set_learned_export_rate(None)
     tou.set_learned_import(None)
     tou.set_learned_cycles(None)
+    tou.set_learned_export_scale(None, None)
+    # Suite default: flat export rate, so the many tests written against it stay
+    # deterministic. Hourly-schedule tests opt in with tou.set_export_schedule(...).
+    tou.set_export_schedule(None)
     yield
     tou.set_learned_export_rate(None)
     tou.set_learned_import(None)
     tou.set_learned_cycles(None)
+    tou.set_learned_export_scale(None, None)
+    tou._reset_export_schedule()
 
 
 # ── TOU ───────────────────────────────────────────────────────────────
@@ -7414,3 +7420,281 @@ def test_doctor_billing_cycle_line_uses_recorded_bill_cycles(tmp_path):
     start = end + timedelta(days=1)
     assert f"{start:%b} {start.day} –" in line.replace("–", "–")     # current cycle starts the day after the last bill
     assert f"{end + timedelta(days=29):%b} {(end + timedelta(days=29)).day}" in line
+
+
+# ── Hourly export pricing from SDG&E's published schedule (item 14) ──────
+# SDG&E publishes hourly Solar Billing Plan export prices (delivery "SDXX" +
+# generation "XXSD", by month / weekday-weekend / hour, per year). Replayed
+# over the real Aug and Sep 2026 cycles the delivery schedule gives $3.31 vs
+# the bill's $3.29 and $29.43 vs $30.17 — versus one flat $/kWh that was off
+# 4x between the same two bills.
+
+def _sched(deliv=0.004, gen=0.05, spike_hour=None, spike=(0.27, 2.1), years=(2026,)):
+    """A schedule constant at (deliv, gen) except optionally one hour."""
+    from franklinwh_scraper.exportprices import ExportSchedule
+
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    def comp(base, idx):
+        hrs = [base] * 24
+        if spike_hour is not None:
+            hrs[spike_hour] = spike[idx]
+        return {m: {"Weekday": list(hrs), "Weekend": [base] * 24} for m in months}
+
+    return ExportSchedule({str(y): {"delivery": comp(deliv, 0), "generation": comp(gen, 1)} for y in years})
+
+
+def _write_midas_csv(path, rows):
+    import csv
+
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["RIN", "RateName", "DateStart", "TimeStart", "DateEnd", "TimeEnd", "DayStart",
+                    "DayEnd", "ValueName", "Value", "Unit", "RateType", "Sector", ""])
+        for rin, date_s, name, value in rows:
+            w.writerow([rin, "NBT24", date_s, "0:00:00", date_s, "0:59:00", 1, 1, name, value,
+                        "Export $/kWh", "TOU", "All", ""])
+
+
+def test_build_from_csv_groups_by_year_month_daytype_hour_and_ignores_year_boundary_rows(tmp_path):
+    from franklinwh_scraper.exportprices import build_from_csv
+
+    sdxx, xxsd = "USCA-SDXX-NB24-0000", "USCA-XXSD-NB24-0000"
+    rows = [(sdxx, f"9/{d}/2026", "Sep Weekday HS18", 0.265) for d in range(1, 22)]
+    rows += [(xxsd, f"9/{d}/2026", "Sep Weekday HS18", 2.109) for d in range(1, 22)]
+    rows += [(sdxx, "9/6/2026", "Sep Weekend HS3", 0.004)]
+    # one stray row: the UTC year rolls over 8h before Pacific, so 1/1/2027 carries a Dec-2026 value
+    rows += [(sdxx, "1/1/2027", "Dec Weekday HS16", 0.111)] + [(sdxx, f"12/{d}/2026", "Dec Weekday HS16", 0.06) for d in range(2, 23)]
+    rows += [(xxsd, "garbage-date", "Sep Weekday HS1", 9.9), (xxsd, "9/1/2026", "not a value name", 9.9)]  # ignored, not fatal
+    csv_path = tmp_path / "midas.csv"
+    _write_midas_csv(csv_path, rows)
+
+    data = build_from_csv(csv_path, require_complete=False)
+    y = data["years"]["2026"]
+    assert y["delivery"]["Sep"]["Weekday"][18] == 0.265 and y["generation"]["Sep"]["Weekday"][18] == 2.109
+    assert y["delivery"]["Sep"]["Weekend"][3] == 0.004
+    assert y["delivery"]["Dec"]["Weekday"][16] == 0.06          # most common value beats the boundary stray
+    assert "2027" in data["years"] and data["years"]["2027"]["delivery"]["Dec"]["Weekday"][16] == 0.111
+    assert data["meta"]["source"] and data["meta"]["unit"] == "$/kWh exported"
+
+
+def test_export_schedule_lookup_clamps_years_and_reports_gaps():
+    from franklinwh_scraper.exportprices import ExportSchedule
+
+    s = _sched(deliv=0.004, gen=0.05, spike_hour=18, years=(2025, 2026))
+    assert s.rates(datetime(2026, 9, 2, 18, 30), weekend=False) == (0.27, 2.1)
+    assert s.rates(datetime(2026, 9, 2, 10, 0), weekend=False) == (0.004, 0.05)
+    assert s.rates(datetime(2026, 9, 6, 18, 0), weekend=True) == (0.004, 0.05)      # weekend table has no spike
+    assert s.rates(datetime(2031, 9, 2, 18, 0), weekend=False) == (0.27, 2.1)       # past the last year: clamp to it
+    assert s.rates(datetime(2020, 9, 2, 18, 0), weekend=False) == (0.27, 2.1)       # before the first: clamp to it
+    assert ExportSchedule({}).rates(datetime(2026, 9, 2, 18, 0), weekend=False) is None
+    assert ExportSchedule.from_dict({"years": {"2026": {"delivery": {}, "generation": {}}}}).rates(
+        datetime(2026, 9, 2, 18, 0), weekend=False) is None                        # incomplete month: unknown, not zero
+
+
+def test_bundled_schedule_matches_published_sdge_values():
+    """Spot checks against SDG&E's Legacy 2024 (NBT24) file — Sep 2026
+    weekday: delivery ~0.004 midday / ~0.265 at 5pm; generation ~2.1 at 6pm."""
+    from franklinwh_scraper.exportprices import load_default
+
+    s = load_default()
+    assert s is not None
+    d10, g10 = s.rates(datetime(2026, 9, 2, 10, 0), weekend=False)
+    d17, g17 = s.rates(datetime(2026, 9, 2, 17, 0), weekend=False)
+    d18, g18 = s.rates(datetime(2026, 9, 2, 18, 0), weekend=False)
+    assert d10 == pytest.approx(0.004, abs=0.002) and g10 == pytest.approx(0.054, abs=0.01)
+    assert d17 == pytest.approx(0.274, abs=0.01)
+    assert g18 == pytest.approx(2.109, abs=0.02) and d18 == pytest.approx(0.265, abs=0.01)
+
+
+def test_export_rate_at_uses_the_hourly_schedule_plus_adder():
+    tou.set_export_schedule(_sched(deliv=0.004, gen=0.05, spike_hour=18))
+    mid = tou.export_rate_at(datetime(2026, 9, 2, 10, 0))
+    eve = tou.export_rate_at(datetime(2026, 9, 2, 18, 0))
+    assert mid == pytest.approx(0.004 + 0.05 + tou._DEFAULT_EXPORT_ADDER)
+    assert eve == pytest.approx(0.27 + 2.1 + tou._DEFAULT_EXPORT_ADDER)
+    assert tou.export_rate_at(datetime(2026, 9, 6, 18, 0)) == pytest.approx(0.004 + 0.05 + tou._DEFAULT_EXPORT_ADDER)  # Sunday
+    assert tou.export_rate_at(datetime(2026, 9, 7, 18, 0)) == pytest.approx(0.004 + 0.05 + tou._DEFAULT_EXPORT_ADDER)  # Labor Day = weekend table
+
+
+def test_learned_export_scale_and_adder_apply_and_validate():
+    tou.set_export_schedule(_sched(deliv=0.10, gen=0.20))
+    dt = datetime(2026, 9, 2, 10, 0)
+    tou.set_learned_export_scale(1.02, 0.0075)
+    assert tou.export_rate_at(dt) == pytest.approx(1.02 * 0.30 + 0.0075)
+    tou.set_learned_export_scale(1.02, None)                       # adder omitted -> default
+    assert tou.export_rate_at(dt) == pytest.approx(1.02 * 0.30 + tou._DEFAULT_EXPORT_ADDER)
+    for bad in (0.0, -1.0, 9.0, float("nan"), "x", None):          # implausible scale -> ignored
+        tou.set_learned_export_scale(bad, 0.0075)
+        assert tou.export_rate_at(dt) == pytest.approx(0.30 + 0.0075), bad
+    tou.set_learned_export_scale(1.0, 5.0)                          # implausible adder -> default
+    assert tou.export_rate_at(dt) == pytest.approx(0.30 + tou._DEFAULT_EXPORT_ADDER)
+
+
+def test_export_rate_falls_back_to_the_flat_rate_without_a_schedule():
+    dt = datetime(2026, 9, 2, 18, 0)
+    tou.set_export_schedule(None)
+    assert tou.export_rate_at(dt) == pytest.approx(0.121)                       # built-in flat default
+    tou.set_learned_export_rate(0.5139)
+    assert tou.export_rate_at(dt) == pytest.approx(0.5139)                      # bill-learned flat rate
+    tou.set_export_schedule(_sched(deliv=0.10, gen=0.20))                        # schedule wins when present
+    assert tou.export_rate_at(dt) == pytest.approx(0.30 + tou._DEFAULT_EXPORT_ADDER)
+
+
+def test_production_default_loads_the_bundled_schedule_and_prices_the_evening_spike():
+    tou._reset_export_schedule()                                    # the real, un-stubbed default path
+    mid = tou.export_rate_at(datetime(2026, 9, 2, 11, 0))
+    eve = tou.export_rate_at(datetime(2026, 9, 2, 18, 0))
+    assert eve > 20 * mid and eve > 2.0                              # Sep 6pm is >$2/kWh vs ~$0.07 at 11am
+    assert mid < 0.15
+
+
+def test_peak_export_hour_follows_the_schedules_best_hour():
+    tou.set_export_schedule(_sched(deliv=0.004, gen=0.05, spike_hour=19, spike=(0.25, 2.4)))
+    hour, rate = tou.peak_export_hour(9)
+    assert hour == 19 and rate == pytest.approx(0.25 + 2.4 + tou._DEFAULT_EXPORT_ADDER)
+    tou.set_export_schedule(None)
+    assert tou.peak_export_hour(9) == (18, tou._NEM3_DEFAULT_EXPORT_RATE)        # flat fallback unchanged
+
+
+def test_build_from_csv_drops_partial_years_by_default(tmp_path):
+    """The UTC/Pacific offset makes stray rows for the *next* year (Jan 1 UTC
+    carries Dec values); a year without every month/day-type/hour is junk."""
+    from franklinwh_scraper.exportprices import MONTHS, build_from_csv
+
+    rows = []
+    for kind in ("USCA-SDXX-NB24-0000", "USCA-XXSD-NB24-0000"):
+        for m in MONTHS:
+            for day in ("Weekday", "Weekend"):
+                rows += [(kind, "6/15/2026", f"{m} {day} HS{h}", 0.05) for h in range(24)]
+    rows += [("USCA-SDXX-NB24-0000", "1/1/2027", "Dec Weekday HS16", 0.111)]     # stray: partial 2027
+    csv_path = tmp_path / "midas.csv"
+    _write_midas_csv(csv_path, rows)
+    assert sorted(build_from_csv(csv_path)["years"]) == ["2026"]
+    assert sorted(build_from_csv(csv_path, require_complete=False)["years"]) == ["2026", "2027"]
+
+
+# ── Learning the export schedule's scale/adder from a bill ───────────────
+
+def test_schedule_export_credit_prices_only_exports_at_their_hour():
+    tou.set_export_schedule(_sched(deliv=0.004, gen=0.05, spike_hour=18))
+    wed_6pm = datetime(2026, 9, 2, 18, 0)
+    intervals = [
+        (wed_6pm, 0.5, -2.0, 1.0, 3.0),                          # exports 1 kWh at the spike hour
+        (datetime(2026, 9, 2, 10, 0), 1.0, -3.0, 1.0, 4.0),      # exports 3 kWh at midday
+        (datetime(2026, 9, 2, 20, 0), 1.0, 4.0, 4.0, 0.0),       # import: not an export
+    ]
+    kwh, credit = tou.schedule_export_credit(intervals)
+    assert kwh == pytest.approx(4.0)
+    assert credit == pytest.approx(1 * (0.27 + 2.1) + 3 * (0.004 + 0.05))   # raw schedule: no scale, no adder
+    tou.set_export_schedule(None)
+    assert tou.schedule_export_credit(intervals) is None                     # no schedule: nothing to calibrate
+
+
+def test_parsed_bill_separates_the_generation_export_adder():
+    from franklinwh_scraper.billparse import parse_bill_text
+
+    b = parse_bill_text(_SEP_2026_BILL)
+    assert b.gen_export_adder_rate == 0.0075
+    assert b.gen_export_adder_credit == pytest.approx(0.95)
+    assert b.gen_export_credit == pytest.approx(34.58, abs=0.005)            # 33.63 credits + 0.95 adder
+    assert b.export_credit_ex_adder == pytest.approx(30.17 + 33.63, abs=0.005)
+
+
+def _insert_export_evenings(db, end, days=25, kw=5.0):
+    """Each of `days` days ending at `end`: readings every 5 min from 17:55 to
+    19:00, exporting `kw` only through the 6 PM hour (~kw kWh/day) and zero
+    grid flow around it — so integrate_intervals sees realistic neighbours
+    instead of a day-long gap it would clamp and pad with extra exports."""
+    for i in range(days):
+        day = end - timedelta(days=i)
+        for step in range(14):                                   # 17:55 .. 19:00
+            ts = datetime(day.year, day.month, day.day, 17, 55) + timedelta(minutes=5 * step)
+            grid = -kw if ts.hour == 18 else 0.0
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+                "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (ts.isoformat(), day.weekday(), ts.hour, 1.0, 3.0, 90.0, grid, "normal", 0.0, 0.0))
+    db._conn.commit()
+
+
+def test_bill_record_from_text_learns_export_scale_from_history(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    end = datetime.now().date() - timedelta(days=5)
+    tou.set_export_schedule(_sched(deliv=0.20, gen=0.32))                     # 0.52/kWh raw
+    db = HistoryStore(tmp_path / "history.db")
+    _insert_export_evenings(db, end)                                          # ~5 kWh/day x 25 days ~ 125 kWh
+    db.close()
+    res = _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_bill_with_dates(end))
+    assert res.exit_code == 0, res.output
+    learned = _load_peak_state(tmp_path)["learned_export_scale"]
+    # actual 30.17 + 33.63 = 63.80 over the ~125 kWh -> ~0.98x of the schedule's 0.52/kWh
+    assert learned["adder"] == 0.0075 and 0.9 <= learned["scale"] <= 1.1
+    assert "schedule" in res.output.lower()
+    tou.set_export_schedule(_sched(deliv=0.20, gen=0.32))
+    assert tou.export_rate_at(datetime(2026, 9, 2, 18, 0)) == pytest.approx(learned["scale"] * 0.52 + 0.0075)
+
+
+def test_bill_record_from_text_skips_scale_without_enough_history(tmp_path):
+    """No readings for the cycle (or far fewer exports than the bill shows,
+    e.g. the advisor was down): don't fit a scale from a partial picture."""
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    end = datetime.now().date() - timedelta(days=5)
+    tou.set_export_schedule(_sched(deliv=0.20, gen=0.32))
+    res = _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_bill_with_dates(end))          # no history.db
+    assert res.exit_code == 0 and "learned_export_scale" not in _load_peak_state(tmp_path)
+    db = HistoryStore(tmp_path / "history.db")
+    _insert_export_evenings(db, end, days=3)                                  # ~15 kWh vs the bill's 126
+    db.close()
+    res = _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_bill_with_dates(end))
+    assert res.exit_code == 0 and "learned_export_scale" not in _load_peak_state(tmp_path)
+    assert "not enough" in res.output.lower()
+
+
+def test_load_peak_state_installs_learned_export_scale(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    tou.set_export_schedule(_sched(deliv=0.20, gen=0.32))
+    dt = datetime(2026, 9, 2, 10, 0)
+    (tmp_path / ".peak_alert_state.json").write_text(json.dumps(
+        {"learned_export_scale": {"scale": 1.05, "adder": 0.01, "cycle_end": "2026-09-17"}}))
+    _load_peak_state(tmp_path)
+    assert tou.export_rate_at(dt) == pytest.approx(1.05 * 0.52 + 0.01)
+    (tmp_path / ".peak_alert_state.json").write_text("{}")                     # absent must clear
+    _load_peak_state(tmp_path)
+    assert tou.export_rate_at(dt) == pytest.approx(0.52 + tou._DEFAULT_EXPORT_ADDER)
+
+
+def test_bundled_export_schedule_is_declared_as_package_data():
+    """`pip install .` (non-editable) drops files setuptools isn't told about;
+    without the JSON the app would silently fall back to the flat rate."""
+    import tomllib
+
+    cfg = tomllib.loads((pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml").read_text())
+    globs = cfg["tool"]["setuptools"]["package-data"]["franklinwh_scraper"]
+    assert any("data/" in g and g.endswith(".json") for g in globs)
+
+
+def test_doctor_reports_export_pricing_source():
+    tou.set_export_schedule(_sched())
+    assert "hourly SDG&E schedule" in next(l for l in _doctor_lines_plain() if "Export pricing" in l)
+    tou.set_export_schedule(None)
+    line = next(l for l in _doctor_lines_plain() if "Export pricing" in l)
+    assert "flat" in line and "✗" in line
+
+
+def _doctor_lines_plain():
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+
+    cfg = Config(email="e", password="p", lat=1.0, lon=1.0, output_dir="/tmp/nonexistent-doctor-test")
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg), \
+         patch("franklinwh_scraper.cli.AccountClient") as ac:
+        ac.side_effect = RuntimeError("skip login")
+        return CliRunner().invoke(cli, ["doctor"]).output.splitlines()

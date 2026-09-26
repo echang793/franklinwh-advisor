@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from enum import Enum
 
+from .exportprices import ExportSchedule, load_default as _load_default_export_schedule
+
 # SDG&E/SDCP revise rates roughly twice per year. If today is more than 180
 # days past this date, bill estimates may be stale — update _RATES below.
 _RATES_EFFECTIVE_DATE = date(2026, 6, 1)  # SDG&E EV-TOU-5 / DR-SES delivery table date
@@ -199,27 +201,115 @@ def set_learned_export_rate(rate) -> None:
 
 
 def _current_export_rate() -> float:
+    """The flat fallback: bill-learned effective $/kWh, else the built-in default."""
     return _learned_export_rate if _learned_export_rate is not None else _NEM3_DEFAULT_EXPORT_RATE
+
+
+# ── Hourly export schedule (preferred over the flat rate) ────────────
+# SDG&E's published hourly Solar Billing Plan export prices (see
+# exportprices.py). total = scale x (delivery + generation) + adder, where
+# `scale` and `adder` are learned from the user's own bills (bill-record
+# --from-text) to absorb metering differences and the CCA's own adder; both
+# default to values that reproduce the Aug/Sep 2026 bills within a few %.
+_UNSET = object()
+_export_schedule = _UNSET          # lazily loaded from the bundled JSON
+_DEFAULT_EXPORT_ADDER = 0.0075     # SDCP's "Export Credits Adder" $/kWh
+_learned_export_scale = 1.0
+_learned_export_adder: float | None = None
+_EXPORT_SCALE_RANGE = (0.5, 2.0)
+_EXPORT_ADDER_MAX = 0.05
+
+
+def set_export_schedule(schedule: ExportSchedule | None) -> None:
+    """Install a schedule, or None to force the flat export rate."""
+    global _export_schedule
+    _export_schedule = schedule
+
+
+def _reset_export_schedule() -> None:
+    """Forget any installed/None schedule: the bundled one loads on next use."""
+    global _export_schedule
+    _export_schedule = _UNSET
+
+
+def _get_export_schedule() -> ExportSchedule | None:
+    global _export_schedule
+    if _export_schedule is _UNSET:
+        _export_schedule = _load_default_export_schedule()
+    return _export_schedule
+
+
+def set_learned_export_scale(scale, adder) -> None:
+    """Install bill-learned schedule calibration; invalid values reset that
+    field to its default individually."""
+    global _learned_export_scale, _learned_export_adder
+    ok = (isinstance(scale, (int, float)) and not isinstance(scale, bool)
+          and _EXPORT_SCALE_RANGE[0] <= scale <= _EXPORT_SCALE_RANGE[1])
+    _learned_export_scale = float(scale) if ok else 1.0
+    ok = (isinstance(adder, (int, float)) and not isinstance(adder, bool) and 0 <= adder <= _EXPORT_ADDER_MAX)
+    _learned_export_adder = float(adder) if ok else None
+
+
+def _schedule_rate(dt: datetime) -> float | None:
+    schedule = _get_export_schedule()
+    if schedule is None:
+        return None
+    rates = schedule.rates(dt, weekend=dt.weekday() >= 5 or _is_holiday(dt))
+    if rates is None:
+        return None
+    adder = _learned_export_adder if _learned_export_adder is not None else _DEFAULT_EXPORT_ADDER
+    return _learned_export_scale * (rates[0] + rates[1]) + adder
 
 
 def export_rate_at(dt: datetime) -> float:
     """Return the export credit rate ($/kWh) for grid export at dt.
 
-    Flat — the latest bill's learned effective rate if one was recorded,
-    else _NEM3_DEFAULT_EXPORT_RATE. `dt` is kept in the signature (unused)
-    so every call site that reasonably expects a time-varying rate doesn't
-    need touching if real hourly data ever replaces this.
+    The hourly schedule when available (it varies ~50x through the day and
+    by month), else the flat bill-learned/built-in rate.
     """
-    return _current_export_rate()
+    rate = _schedule_rate(dt)
+    return rate if rate is not None else _current_export_rate()
+
+
+def schedule_export_credit(intervals) -> tuple[float, float] | None:
+    """(exported kWh, credit $) for `intervals` — (dt, hours, grid_kw, ...)
+    tuples from history.integrate_intervals — priced at the RAW hourly
+    schedule (delivery + generation): no learned scale, no adder. This is
+    what bill-record compares a bill's actual credits against to learn the
+    scale. None when no schedule is available.
+    """
+    if _get_export_schedule() is None:
+        return None
+    kwh = credit = 0.0
+    for dt, hours, grid_kw, *_rest in intervals:
+        if grid_kw >= 0:
+            continue
+        rates = _get_export_schedule().rates(dt, weekend=dt.weekday() >= 5 or _is_holiday(dt))
+        if rates is None:
+            continue
+        exported = -grid_kw * hours
+        kwh += exported
+        credit += exported * (rates[0] + rates[1])
+    return kwh, credit
 
 
 def peak_export_hour(month: int) -> tuple[int, float]:
-    """Highest-value export (hour, $/kWh). Flat rate now (see
-    export_rate_at) so "peak" is nominal — returns a representative
-    evening hour at the one rate, kept as a (hour, rate) pair since
-    callers display both.
+    """Highest-value export (hour, $/kWh) on a weekday of `month` this year
+    from the hourly schedule; without one, a representative evening hour at
+    the flat rate, kept as a (hour, rate) pair since callers display both.
     """
-    return 18, _current_export_rate()
+    today = datetime.now()
+    probe = datetime(today.year, month, 1)
+    while probe.weekday() >= 5 or _is_holiday(probe):    # first plain weekday of the month
+        probe += timedelta(days=1)
+    best = None
+    for hour in range(24):
+        rate = _schedule_rate(probe.replace(hour=hour))
+        if rate is None:
+            return 18, _current_export_rate()
+        if best is None or rate > best[1]:
+            best = (hour, rate)
+    return best
 
 
 def _is_holiday(dt: datetime) -> bool:

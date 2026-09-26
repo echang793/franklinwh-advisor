@@ -51,6 +51,8 @@ class ParsedBill:
     delivery_export_credit: float                # positive $
     total_electric_service: float                # SDG&E electric total (after export credit)
     gen_export_credit: float = 0.0               # positive $ (SDCP export credits + adder)
+    gen_export_adder_rate: float | None = None   # SDCP "Export Credits Adder" $/kWh
+    gen_export_adder_credit: float = 0.0         # positive $ of that adder
     generation_net: float = 0.0                  # SDCP net (negative = credit banked to SBP)
     climate_credit: float = 0.0                  # positive $; NOT part of the usage bill
     notes: list[str] = field(default_factory=list)
@@ -65,6 +67,12 @@ class ParsedBill:
     @property
     def export_credit_total(self) -> float:
         return round(self.delivery_export_credit + self.gen_export_credit, 2)
+
+    @property
+    def export_credit_ex_adder(self) -> float:
+        """Export credits that follow the hourly schedule: delivery + SDCP
+        generation credits, without the flat per-kWh adder."""
+        return round(self.export_credit_total - self.gen_export_adder_credit, 2)
 
     @property
     def export_rate(self) -> float | None:
@@ -148,9 +156,13 @@ def parse_bill_text(text: str) -> ParsedBill:
     delivery_export = abs(_num(deliv_exp.group(1))) if deliv_exp else 0.0
 
     gen_export = 0.0
-    for m in re.finditer(rf"Generation Electricity Export Credits(?: Adder)?\s+({_NUM})\s*kWh\s*X\s*\$?({_NUM})\s+({_NUM})",
+    adder_rate, adder_credit = None, 0.0
+    for m in re.finditer(rf"Generation Electricity Export Credits( Adder)?\s+({_NUM})\s*kWh\s*X\s*\$?({_NUM})\s+({_NUM})",
                          text, re.I):
-        gen_export += abs(_num(m.group(3)))
+        credit = abs(_num(m.group(4)))
+        gen_export += credit
+        if m.group(1):
+            adder_rate, adder_credit = _num(m.group(3)), credit
     tax = re.search(rf"State Surcharge Tax\s+({_NUM})", text, re.I)
     generation_net = gen_charge - gen_export + (_num(tax.group(1)) if tax else 0.0)
 
@@ -165,5 +177,6 @@ def parse_bill_text(text: str) -> ParsedBill:
         delivery_import=_num(delivery_import.group(1)), nonnettable=_num(nonnet.group(1)),
         delivery_export_credit=delivery_export, total_electric_service=_num(total_es.group(1)),
         gen_export_credit=round(gen_export, 2), generation_net=round(generation_net, 2),
+        gen_export_adder_rate=adder_rate, gen_export_adder_credit=round(adder_credit, 2),
         climate_credit=abs(_num(climate.group(1))) if climate else 0.0,
     )

@@ -24,7 +24,8 @@ from .notifier import (notify_email, notify_imessage_text, notify_ntfy,
 from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
                   cycle_bounds, export_rate_at, on_peak_window,
                   peak_export_hour, period_at, rate_at, rates_are_stale,
-                  set_learned_cycles, set_learned_export_rate, set_learned_import)
+                  set_learned_cycles, set_learned_export_rate, set_learned_export_scale,
+                  set_learned_import)
 from .predictor import predict
 from .savings import compare_rate_plans, compute as savings_compute
 from .weather import (_outlook_cache, fetch_nws_storm_alerts)
@@ -673,6 +674,7 @@ def _load_peak_state(out: Path) -> dict:
         state = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
         set_learned_export_rate(None)
+        set_learned_export_scale(None, None)
         set_learned_import(None)
         set_learned_cycles(None)
         return {}
@@ -691,6 +693,8 @@ def _load_peak_state(out: Path) -> dict:
     learned = state.get("learned_export_rate")
     set_learned_export_rate(learned.get("rate") if isinstance(learned, dict) else None)
     # Same for import-side terms and real billing-cycle dates recorded from bills.
+    scale = state.get("learned_export_scale")
+    set_learned_export_scale(*(scale.get("scale"), scale.get("adder")) if isinstance(scale, dict) else (None, None))
     set_learned_import(state.get("learned_import"))
     set_learned_cycles(state.get("bill_cycles"), state.get("next_read_date"))
     return state
@@ -1676,7 +1680,7 @@ def _alert_export_arbitrage(
     return (
         f"💰 <b>FranklinWH: Export opportunity today</b>\n"
         f"Battery {soc:.0f}% — hold and export ~{exportable_kwh:.1f} kWh to grid "
-        f"(${peak_rate:.3f}/kWh flat) ≈ ${credit:.2f} credit\n"
+        f"at {hour_label} (${peak_rate:.3f}/kWh) ≈ ${credit:.2f} credit\n"
         f"Recharge afterward from solar."
     )
 

@@ -119,6 +119,12 @@ franklinwh bill-record --from-text bill.txt --dry-run   # preview only
 
 It reads the billing period, next meter-read date, SDCP generation rates, export credits, fixed charge and the SDG&E delivery charge, then recalibrates: the actual-bill comparison (delivery + net generation, **excluding** the Climate Credit), the effective export $/kWh, the summer/winter generation rates, the fixed charge, the delivery residual (PCIA etc.) and the **real billing-cycle dates** — so cycles follow the meter read instead of a fixed day of the month. Estimates lag by at most one bill. If it says "Couldn't find …", paste the missing page; the old `--amount` form still works.
 
+## Export credit pricing (hourly schedule)
+
+Export credits are priced from SDG&E's published hourly Solar Billing Plan schedule (`franklinwh_scraper/data/export_prices_legacy2024.json`, the **Legacy 2024 / NBT24** vintage): delivery ~$0.004/kWh at midday but ~$0.27 in the evening, generation above $2/kWh at 6–8 PM in September. That is why one flat $/kWh was off 4× between the Aug and Sep 2026 bills; replayed over both real cycles the schedule lands within 1–4%. `bill-record --from-text` also learns a small `scale` (and the CCA's per-kWh adder) from each bill; `franklinwh doctor` shows whether the schedule loaded (`Export pricing`). The "Export opportunity today" alert now names the best export hour and its real rate.
+
+If your bill's `Export Pricing:` line names a different vintage (Legacy 2023/2025/2026), download that file from sdge.com/solar/solar-billing-plan/export-pricing (the `.zip`, unzip it) and run `python scripts/build_export_prices.py "<file>.csv"` to rebuild the JSON. Values past your 9-year lock-in are illustrative.
+
 ## iPhone / Apple Watch glance widget
 
 `GET /api/glance` returns a flat object with a ready-to-display `text` (e.g. `74% 🔋 ☀0.0kW 🏠1.5kW`), plus `soc_pct`, `battery_state` (charging/discharging/idle), `eta_full_min` / `eta_empty_min`, `grid_status` and a `stale` flag (true when the newest reading is over 15 min old — the text is then prefixed `⚠ 90m old`).

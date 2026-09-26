@@ -7,11 +7,21 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from franklinwh_scraper import alerts, notifier
+import pytest
+
+from franklinwh_scraper import alerts, notifier, tou
 from franklinwh_scraper.config import Config
 from franklinwh_scraper.history import HistoryStore
 from franklinwh_scraper.predictor import HourPrediction, UsageForecast  # noqa: F401  used below
 from franklinwh_scraper.weather import HourlyForecast, SolarOutlook
+
+
+@pytest.fixture(autouse=True)
+def _reset_export_schedule():
+    """Tests that pin the flat export rate call tou.set_export_schedule(None);
+    always leave the production default (bundled hourly schedule) behind."""
+    yield
+    tou._reset_export_schedule()
 
 
 def _fake_stats(**cur_over):
@@ -74,9 +84,24 @@ def test_alert_export_arbitrage_inert_below_credit_floor():
     """Stays inert when the exportable surplus is too small to clear the
     $1 minimum credit — a small battery keeps exportable_kwh (and so the
     $ credit) below that floor even at qualifying SoC."""
+    tou.set_export_schedule(None)  # flat fallback rate
     cfg = Config(battery_capacity_kwh=2.0)  # (95-20)/100*2.0 = 1.5 kWh * $0.121 = $0.18, well under $1
     c = _fake_stats(battery_soc_pct=95.0).current
     assert alerts._alert_export_arbitrage({}, "2026-08-15", datetime(2026, 8, 15, 12), c, cfg, None) is None
+
+
+def test_alert_export_arbitrage_uses_the_hourly_schedules_evening_rate():
+    """With SDG&E's hourly export prices the best hour is the 6-7 PM spike
+    (~$2.3/kWh in Aug), not a flat ~$0.12 — so even 1.5 kWh is worth it, and
+    the message must name the hour instead of calling the rate 'flat'."""
+    tou._reset_export_schedule()
+    cfg = Config(battery_capacity_kwh=2.0)
+    c = _fake_stats(battery_soc_pct=95.0).current
+    msg = alerts._alert_export_arbitrage({}, "2026-08-14", datetime(2026, 8, 14, 12), c, cfg, None)
+    assert msg and "flat" not in msg
+    assert ("6 PM" in msg or "7 PM" in msg) and "/kWh" in msg
+    credit = float(msg.split("≈ $")[1].split()[0])
+    assert credit > 2.0  # 1.5 kWh x ~$2.3
 
 
 def test_ev_charge_window():
