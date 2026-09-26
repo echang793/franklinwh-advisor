@@ -39,6 +39,7 @@ from .alerts import (
 )
 from .chatbot import TelegramChatBot
 from .client import FranklinWHClient
+from .billparse import BillParseError, parse_bill_text
 from .config import Config, host_matches, load as load_config, save as save_config
 from .doctor_checks import icloud_path_warning, launchd_health
 from .exporters import export_csv, export_json
@@ -915,9 +916,69 @@ def alerts_report(ctx: click.Context, days: int) -> None:
         _info("Names appear here for alerts sent from now on; use /snooze <name> [hours] in Telegram.")
 
 
+def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
+    """`bill-record --from-text`: parse a pasted bill and recalibrate the
+    export rate, import rates, fixed fee and real cycle dates from it."""
+    try:
+        raw = sys.stdin.read() if source == "-" else Path(source).expanduser().read_text()
+    except OSError as e:
+        raise click.ClickException(f"Can't read {source}: {e}")
+    try:
+        bill = parse_bill_text(raw)
+    except BillParseError as e:
+        raise click.ClickException(str(e))
+
+    end = bill.period_end
+    age_days = (datetime.now().date() - end).days
+    keep_amount = age_days <= 29     # actual_bill_* entries are pruned after 30 days
+    rate = bill.export_rate
+
+    _header(f"Bill {bill.period_start:%b %-d} – {end:%b %-d, %Y} ({bill.days} days, {bill.season})")
+    _info(f"Comparable bill (delivery + net generation): {'-' if bill.comparable_amount < 0 else ''}"
+          f"${abs(bill.comparable_amount):.2f}   (California Climate Credit ${bill.climate_credit:.2f} excluded)")
+    _info(f"Export: {bill.export_kwh:g} kWh, credits ${bill.export_credit_total:.2f}"
+          + (f" → ${rate:.4f}/kWh" if rate else " (no exports)"))
+    _info("SDCP generation: " + ", ".join(f"{k.replace('_', '-')} {v:g}" for k, v in bill.gen_rates.items()))
+    _info(f"Fixed charge ${bill.base_daily:.4f}/day · delivery residual (PCIA etc.) "
+          f"${bill.implied_pcia_adder if bill.implied_pcia_adder is not None else 0:.4f}/kWh")
+    if bill.next_read:
+        _info(f"Next meter read {bill.next_read:%b %-d, %Y}")
+    if dry_run:
+        _warn("Dry run — nothing saved.")
+        return
+
+    with _state_lock(outdir):
+        state = _load_peak_state(outdir)
+        if keep_amount:
+            state[f"actual_bill_{end.isoformat()}"] = bill.comparable_amount
+        if rate is not None:
+            state["learned_export_rate"] = {
+                "rate": rate, "cycle_end": end.isoformat(),
+                "credit": bill.export_credit_total, "kwh": bill.export_kwh,
+            }
+        state["learned_import"] = bill.learned_import()
+        cycles = [c for c in state.get("bill_cycles", []) if isinstance(c, dict) and c.get("end") != end.isoformat()]
+        cycles.append({"start": bill.period_start.isoformat(), "end": end.isoformat()})
+        state["bill_cycles"] = sorted(cycles, key=lambda c: c["end"])[-24:]
+        if bill.next_read:
+            state["next_read_date"] = bill.next_read.isoformat()
+        _save_peak_state(outdir, state)
+
+    _ok("Recalibrated export rate, import rates, fixed charge and billing cycle from this bill")
+    if keep_amount:
+        _ok(f"Recorded ${bill.comparable_amount:.2f} for the cycle ending {end:%b %-d, %Y}")
+    else:
+        _warn(f"Cycle ended {age_days} days ago — too old to keep as an actual-bill entry "
+              "(they expire after 30 days); rates and cycle dates were still updated.")
+
+
 @cli.command("bill-record")
-@click.option("--amount", type=float, required=True,
-              help="Actual utility bill amount in dollars.")
+@click.option("--amount", type=float, default=None,
+              help="Actual utility bill amount in dollars (or use --from-text).")
+@click.option("--from-text", "from_text", default=None, metavar="FILE|-",
+              help="Read the bill's pasted text ('-' = stdin) and recalibrate everything from it: "
+                   "amount, export rate, import rates, fixed fee and real cycle dates.")
+@click.option("--dry-run", is_flag=True, help="With --from-text: show what would be recorded, save nothing.")
 @click.option("--cycle-end", default="",
               help="Billing cycle end date this bill covers (YYYY-MM-DD). "
                    "Defaults to the most recently closed cycle.")
@@ -928,8 +989,8 @@ def alerts_report(ctx: click.Context, days: int) -> None:
 @click.option("--export-kwh", type=float, default=None,
               help="Total kWh exported on the bill (see --export-credit).")
 @click.pass_context
-def bill_record(ctx: click.Context, amount: float, cycle_end: str,
-                export_credit: float | None, export_kwh: float | None) -> None:
+def bill_record(ctx: click.Context, amount: float | None, from_text: str | None, dry_run: bool,
+                cycle_end: str, export_credit: float | None, export_kwh: float | None) -> None:
     """Record your real utility bill to compare against the app's projection.
 
     The app estimates your bill from grid import/export at published TOU
@@ -942,6 +1003,14 @@ def bill_record(ctx: click.Context, amount: float, cycle_end: str,
     if not outdir.is_absolute():
         outdir = Path(__file__).parent.parent / outdir
 
+    if (amount is None) == (from_text is None):
+        raise click.ClickException("Give either --amount or --from-text (not both).")
+    if from_text is not None:
+        _record_bill_from_text(outdir, from_text, dry_run)
+        return
+    if dry_run:
+        raise click.ClickException("--dry-run only applies to --from-text.")
+
     if (export_credit is None) != (export_kwh is None):
         raise click.ClickException("--export-credit and --export-kwh must be given together.")
     learned_rate = None
@@ -951,6 +1020,7 @@ def bill_record(ctx: click.Context, amount: float, cycle_end: str,
         learned_rate = round(export_credit / export_kwh, 4)
 
     today = datetime.now().date()
+    _load_peak_state(outdir)  # installs real bill cycles so "most recently closed" matches the utility
     cur_start, _cur_end = cycle_bounds(today, cfg.billing_cycle_start_day)
     if cycle_end:
         try:
@@ -1079,6 +1149,8 @@ def doctor() -> None:
     _check("Email configured",     bool(cfg.email))
     _check("Password set",         bool(cfg.password))
     _check("Location set",         bool(cfg.lat and cfg.lon),  f"{cfg.lat:.4f}, {cfg.lon:.4f}" if cfg.lat else "")
+    _out = Path(cfg.output_dir)
+    _load_peak_state(_out if _out.is_absolute() else Path(__file__).parent.parent / _out)  # installs real bill cycles
     _bcs, _bce = cycle_bounds(datetime.now().date(), cfg.billing_cycle_start_day)
     _check("Billing cycle", True,
            f"day {cfg.billing_cycle_start_day} — current: {_bcs:%b %-d} – {_bce:%b %-d}")

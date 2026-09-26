@@ -22,8 +22,12 @@ def _reset_learned_export_rate():
     """tou's learned export rate is process-global (set by _load_peak_state);
     keep one test's state from leaking into the next."""
     tou.set_learned_export_rate(None)
+    tou.set_learned_import(None)
+    tou.set_learned_cycles(None)
     yield
     tou.set_learned_export_rate(None)
+    tou.set_learned_import(None)
+    tou.set_learned_cycles(None)
 
 
 # ── TOU ───────────────────────────────────────────────────────────────
@@ -7117,3 +7121,296 @@ def test_glance_text_never_shows_negative_zero_solar(monkeypatch):
     body = _glance_client(monkeypatch, _reading(solar=-0.01, load=-0.004, batt=1.2, soc=60.0)).get("/api/glance").json()
     assert "☀0.0kW" in body["text"] and "-0.0" not in body["text"]
     assert body["solar_kw"] >= 0 and body["load_kw"] >= 0
+
+
+# ── Bill text parser + real cycle dates (items 9 & 10, 2026-09-25) ──────
+# Fixture = the Aug 19 - Sep 17 2026 SDG&E/SDCP bill, REDACTED: only the
+# lines the parser reads, with name/address/account/meter/service-point ids
+# removed (this repo is public).
+
+_SEP_2026_BILL = """\
+Electric Service - Solar Billing Plan
+Rate: Time of Use - EVTOU5-Residential Climate Zone: Inland
+System Size: 3.484 kW
+Export Pricing: Legacy 2024 Pricing
+Billing Period: 8/19/26 - 9/17/26 Total Days: 30
+Meter Number: 00000000 (Next scheduled read date Oct 16, 2026) Cycle: 12
+ELECTRIC CHARGES AND CREDITS
+Electricity Import kWh Current Charges Summary
+Total Import 189
+On-Peak 3
+Off-Peak 14
+Super Off-Peak 172
+Non-Nettable Charges $24.36
+Delivery Import Charges $15.86
+Electricity Export Applied Credits
+Total Export kWh −126
+Delivery Export Credits -$30.17 Delivery Export Credits -$30.17
+Total Electric Service $10.05
+Community Choice Aggregation (CCA) Electric Generation Charges
+Bill Date: Sep 17, 2026 Billing Period: 8/19/26 - 9/17/26
+Amount($)
+Generation On-Peak Summer 3 kWh X $0.38242 .97
+Generation Off-Peak Summer 14 kWh X $0.11828 1.63
+Generation Super Off-Peak Summer 172 kWh X $0.0368 6.33
+Generation Electricity Export Credits -126 kWh X $0.26621 -33.63
+Generation Electricity Export Credits Adder -126 kWh X $0.0075 -.95
+Credited to SBP Balance 25.63
+State Surcharge Tax .02
+Total CCA Electric Generation Charges $.00
+Your CCA rate is SBP EV-TOU-5 - 2021 Vintage - PowerBase.
+Your cumulative SBP Balance credit is now $105.47.
+OTHER CHARGES & CREDITS Amount($)
+California Climate Credit -49.36
+Total Other Charges & Credits -$49.36
+Total Current Charges -$39.31
+"""
+
+
+def test_parse_bill_text_reads_the_sep_2026_bill():
+    from datetime import date
+
+    from franklinwh_scraper.billparse import parse_bill_text
+
+    b = parse_bill_text(_SEP_2026_BILL)
+    assert (b.period_start, b.period_end, b.days) == (date(2026, 8, 19), date(2026, 9, 17), 30)
+    assert b.next_read == date(2026, 10, 16)
+    assert b.season == "summer" and b.pcia_vintage == 2021
+    assert b.gen_rates == {"on_peak": 0.38242, "off_peak": 0.11828, "super_off_peak": 0.0368}
+    # kWh recovered from charge / rate — the bill only prints them rounded (3 / 14 / 172)
+    assert b.gen_kwh["on_peak"] == pytest.approx(2.54, abs=0.01)
+    assert b.gen_kwh["off_peak"] == pytest.approx(13.78, abs=0.01)
+    assert b.gen_kwh["super_off_peak"] == pytest.approx(172.0, abs=0.05)
+    assert b.export_kwh == 126
+    assert (b.delivery_import, b.nonnettable, b.delivery_export_credit, b.total_electric_service) == (
+        15.86, 24.36, 30.17, 10.05)
+    assert b.generation_net == pytest.approx(-25.63, abs=0.005)      # what SDCP banks instead of paying out
+    assert b.climate_credit == 49.36
+
+
+def test_parsed_bill_derives_the_numbers_we_previously_entered_by_hand():
+    from franklinwh_scraper.billparse import parse_bill_text
+
+    b = parse_bill_text(_SEP_2026_BILL)
+    # Comparable to the app's estimate: delivery + net generation, NOT the Climate Credit.
+    assert b.comparable_amount == pytest.approx(-15.58, abs=0.005)
+    assert b.export_credit_total == pytest.approx(64.75, abs=0.005)   # 30.17 + 33.63 + 0.95
+    assert b.export_rate == pytest.approx(0.5139, abs=0.0001)
+    assert b.base_daily == pytest.approx(0.812, abs=0.0005)           # 24.36 non-nettable / 30 days
+    assert 0.010 <= b.implied_pcia_adder <= 0.016                     # ~0.0133 fit we'd hardcoded
+
+
+def test_parse_bill_text_tolerates_formatting_and_reports_what_is_missing():
+    from franklinwh_scraper.billparse import BillParseError, parse_bill_text
+
+    ascii_minus = _SEP_2026_BILL.replace("−126", "-126")
+    assert parse_bill_text(ascii_minus).export_kwh == 126
+    with pytest.raises(BillParseError) as exc:
+        parse_bill_text("Total Electric Service $10.05\nnothing else useful here\n")
+    msg = str(exc.value)
+    assert "billing period" in msg and "generation" in msg.lower()
+
+
+def test_parse_bill_text_handles_a_net_import_winter_bill():
+    """No exports, winter generation rates, a positive amount due."""
+    from franklinwh_scraper.billparse import parse_bill_text
+
+    winter = """\
+Billing Period: 1/20/27 - 2/18/27 Total Days: 30
+Meter Number: 00000000 (Next scheduled read date Mar 19, 2027) Cycle: 12
+Non-Nettable Charges $24.36
+Delivery Import Charges $48.10
+Total Export kWh 0
+Total Electric Service $72.46
+Generation On-Peak Winter 20 kWh X $0.14237 2.85
+Generation Off-Peak Winter 80 kWh X $0.09205 7.36
+Generation Super Off-Peak Winter 300 kWh X $0.03039 9.12
+State Surcharge Tax .05
+Total CCA Electric Generation Charges $19.38
+Your CCA rate is SBP EV-TOU-5 - 2021 Vintage - PowerBase.
+"""
+    b = parse_bill_text(winter)
+    assert b.season == "winter" and b.export_kwh == 0 and b.export_rate is None
+    assert b.comparable_amount == pytest.approx(72.46 + 19.38, abs=0.005)
+
+
+def test_learned_import_overrides_generation_rates_adder_and_base():
+    dt_summer_sop = datetime(2026, 9, 2, 3, 0)       # Wed 3am, super off-peak
+    default = tou.rate_at(dt_summer_sop)
+    tou.set_learned_import({"season": "summer", "gen": {"on_peak": 0.40, "off_peak": 0.13, "super_off_peak": 0.05},
+                            "pcia_adder": 0.02, "base_daily": 0.9})
+    assert tou.rate_at(dt_summer_sop) == pytest.approx(0.05 + 0.04705 + 0.02)
+    assert tou.rate_at(datetime(2026, 9, 2, 17, 0)) == pytest.approx(0.40 + 0.32302 + 0.02)
+    assert tou.rate_at(datetime(2026, 1, 6, 3, 0)) == pytest.approx(0.03039 + 0.04705 + 0.02)  # winter gen untouched, adder shared
+    assert tou.base_service_cost(10) == pytest.approx(9.0)
+    tou.set_learned_import(None)
+    assert tou.rate_at(dt_summer_sop) == pytest.approx(default) and tou.base_service_cost(10) == pytest.approx(8.12)
+
+
+def test_learned_import_rejects_implausible_values_field_by_field():
+    default = tou.rate_at(datetime(2026, 9, 2, 3, 0))
+    tou.set_learned_import({"season": "summer", "gen": {"super_off_peak": 9.0},   # typo-level rate
+                            "pcia_adder": 0.5, "base_daily": 0.0})
+    assert tou.rate_at(datetime(2026, 9, 2, 3, 0)) == pytest.approx(default)
+    assert tou.base_service_cost(10) == pytest.approx(8.12)
+    tou.set_learned_import("junk")
+    assert tou.rate_at(datetime(2026, 9, 2, 3, 0)) == pytest.approx(default)
+
+
+def test_cycle_bounds_prefers_real_bill_cycles_over_the_fixed_start_day():
+    from datetime import date
+
+    tou.set_learned_cycles([{"start": "2026-08-19", "end": "2026-09-17"}], next_read="2026-10-16")
+    assert tou.cycle_bounds(date(2026, 9, 1), 20) == (date(2026, 8, 19), date(2026, 9, 17))   # a real, billed cycle
+    assert tou.cycle_bounds(date(2026, 9, 17), 20) == (date(2026, 8, 19), date(2026, 9, 17))  # inclusive end
+    assert tou.cycle_bounds(date(2026, 9, 23), 20) == (date(2026, 9, 18), date(2026, 10, 16))  # current: ends at the bill's next read date
+    # the cycle after that isn't known yet: projected at the typical length (30 d), contiguous, never overlapping
+    assert tou.cycle_bounds(date(2026, 10, 20), 20) == (date(2026, 10, 17), date(2026, 11, 15))
+    # before the earliest known cycle: falls back to start_day, but must not overlap the known one
+    s, e = tou.cycle_bounds(date(2026, 8, 10), 20)
+    assert s == date(2026, 7, 20) and e == date(2026, 8, 18)
+    tou.set_learned_cycles(None)
+    assert tou.cycle_bounds(date(2026, 9, 23), 20) == (date(2026, 9, 20), date(2026, 10, 19))  # back to the fixed day
+
+
+def test_cycle_bounds_projection_uses_median_length_and_stays_contiguous():
+    from datetime import date
+
+    tou.set_learned_cycles([
+        {"start": "2026-06-19", "end": "2026-07-20"},   # 32
+        {"start": "2026-07-21", "end": "2026-08-18"},   # 29
+        {"start": "2026-08-19", "end": "2026-09-17"},   # 30
+    ], next_read=None)
+    s, e = tou.cycle_bounds(date(2026, 9, 25), 20)
+    assert s == date(2026, 9, 18) and (e - s).days + 1 == 30          # median of 32/29/30
+    s2, _e2 = tou.cycle_bounds(e + timedelta(days=1), 20)
+    assert s2 == e + timedelta(days=1)                                 # next one starts the day after
+
+
+def test_load_peak_state_installs_learned_import_and_cycles(tmp_path):
+    from datetime import date
+
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    (tmp_path / ".peak_alert_state.json").write_text(json.dumps({
+        "learned_import": {"season": "summer", "gen": {"super_off_peak": 0.05}, "pcia_adder": 0.02, "base_daily": 0.9},
+        "bill_cycles": [{"start": "2026-08-19", "end": "2026-09-17"}], "next_read_date": "2026-10-16"}))
+    _load_peak_state(tmp_path)
+    assert tou.base_service_cost(10) == pytest.approx(9.0)
+    assert tou.cycle_bounds(date(2026, 9, 23), 20) == (date(2026, 9, 18), date(2026, 10, 16))
+    (tmp_path / ".peak_alert_state.json").write_text("{}")             # absent keys must clear, not linger
+    _load_peak_state(tmp_path)
+    assert tou.base_service_cost(10) == pytest.approx(8.12)
+    assert tou.cycle_bounds(date(2026, 9, 23), 20) == (date(2026, 9, 20), date(2026, 10, 19))
+
+
+def _bill_with_dates(end, days=30, next_read=None):
+    """The fixture bill re-dated so its cycle ends `end` (a date) — keeps CLI
+    tests independent of the wall clock (actual_bill_* entries expire at 30 d)."""
+    start = end - timedelta(days=days - 1)
+    nxt = next_read or end + timedelta(days=29)
+    return (_SEP_2026_BILL
+            .replace("8/19/26 - 9/17/26", f"{start.month}/{start.day}/{start.year % 100:02d} - "
+                                          f"{end.month}/{end.day}/{end.year % 100:02d}")
+            .replace("Oct 16, 2026", nxt.strftime("%b %-d, %Y")))
+
+
+def _run_bill_record(tmp_path, args, stdin=None):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    cfg = Config(output_dir=str(tmp_path), billing_cycle_start_day=20)
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        return CliRunner().invoke(cli_mod.cli, ["bill-record", *args], input=stdin)
+
+
+def test_bill_record_from_text_recalibrates_everything(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    end = datetime.now().date() - timedelta(days=5)
+    f = tmp_path / "bill.txt"
+    f.write_text(_bill_with_dates(end))
+    res = _run_bill_record(tmp_path, ["--from-text", str(f)])
+    assert res.exit_code == 0, res.output
+    st = _load_peak_state(tmp_path)
+    assert st[f"actual_bill_{end.isoformat()}"] == pytest.approx(-15.58, abs=0.005)
+    assert st["learned_export_rate"]["rate"] == pytest.approx(0.5139, abs=0.0001)
+    li = st["learned_import"]
+    assert li["season"] == "summer" and li["gen"]["super_off_peak"] == 0.0368
+    assert li["base_daily"] == pytest.approx(0.812, abs=0.0005) and 0.010 <= li["pcia_adder"] <= 0.016
+    assert st["bill_cycles"] == [{"start": (end - timedelta(days=29)).isoformat(), "end": end.isoformat()}]
+    assert st["next_read_date"] == (end + timedelta(days=29)).isoformat()
+    for needle in ("-$15.58", "0.5139", "Climate Credit", "excluded"):
+        assert needle in res.output, needle
+    # the very next process to load state prices with the learned values
+    assert tou.export_rate_at(datetime.now()) == pytest.approx(0.5139, abs=0.0001)
+    assert tou.base_service_cost(30) == pytest.approx(24.36, abs=0.02)
+
+
+def test_bill_record_from_text_reads_stdin_and_is_idempotent(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    end = datetime.now().date() - timedelta(days=5)
+    text = _bill_with_dates(end)
+    assert _run_bill_record(tmp_path, ["--from-text", "-"], stdin=text).exit_code == 0
+    assert _run_bill_record(tmp_path, ["--from-text", "-"], stdin=text).exit_code == 0
+    assert len(_load_peak_state(tmp_path)["bill_cycles"]) == 1            # same cycle isn't duplicated
+
+
+def test_bill_record_from_text_dry_run_saves_nothing(tmp_path):
+    end = datetime.now().date() - timedelta(days=5)
+    res = _run_bill_record(tmp_path, ["--from-text", "-", "--dry-run"], stdin=_bill_with_dates(end))
+    assert res.exit_code == 0 and "dry run" in res.output.lower()
+    assert not (tmp_path / ".peak_alert_state.json").exists()
+
+
+def test_bill_record_from_text_old_bill_still_calibrates_but_skips_expiring_entry(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    old_end = datetime.now().date() - timedelta(days=60)
+    res = _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_bill_with_dates(old_end))
+    assert res.exit_code == 0, res.output
+    st = _load_peak_state(tmp_path)
+    assert not any(k.startswith("actual_bill_") for k in st)               # would be pruned at once
+    assert "learned_import" in st and "learned_export_rate" in st and st["bill_cycles"]
+    assert "too old" in res.output
+
+
+def test_bill_record_needs_exactly_one_of_amount_or_from_text(tmp_path):
+    assert _run_bill_record(tmp_path, []).exit_code != 0
+    both = _run_bill_record(tmp_path, ["--amount", "5", "--from-text", "-"], stdin=_SEP_2026_BILL)
+    assert both.exit_code != 0 and "either" in both.output.lower()
+
+
+def test_bill_record_from_text_reports_unparseable_text_without_saving(tmp_path):
+    res = _run_bill_record(tmp_path, ["--from-text", "-"], stdin="this is not a bill")
+    assert res.exit_code != 0 and "Couldn't find" in res.output
+    assert not (tmp_path / ".peak_alert_state.json").exists()
+
+
+def test_doctor_billing_cycle_line_uses_recorded_bill_cycles(tmp_path):
+    """doctor never loaded state, so it kept showing the fixed-day cycle
+    after `bill-record --from-text` had learned the real one."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper.cli import cli
+
+    today = datetime.now().date()
+    end = today - timedelta(days=3)
+    (tmp_path / ".peak_alert_state.json").write_text(json.dumps({
+        "bill_cycles": [{"start": (end - timedelta(days=29)).isoformat(), "end": end.isoformat()}],
+        "next_read_date": (end + timedelta(days=29)).isoformat()}))
+    cfg = Config(email="e", password="p", lat=1.0, lon=1.0, output_dir=str(tmp_path), billing_cycle_start_day=20)
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg), \
+         patch("franklinwh_scraper.cli.AccountClient") as ac:
+        ac.side_effect = RuntimeError("skip login")
+        out = CliRunner().invoke(cli, ["doctor"]).output
+    line = next(l for l in out.splitlines() if "Billing cycle" in l)
+    start = end + timedelta(days=1)
+    assert f"{start:%b} {start.day} –" in line.replace("–", "–")     # current cycle starts the day after the last bill
+    assert f"{end + timedelta(days=29):%b} {(end + timedelta(days=29)).day}" in line

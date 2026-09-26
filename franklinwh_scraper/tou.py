@@ -63,18 +63,87 @@ _SUMMER_MONTHS = {6, 7, 8, 9, 10}  # June–October
 # how much you export — so refine it from further bills.
 _PCIA_NET_ADDER = 0.0133  # $/kWh imported (~PCIA 0.03564 x ~37% net-import share)
 
-_RATES = {
+# SDG&E delivery (UDC + WF-NBC/DWR-BC), EV-TOU-5 effective 6/1/2026 — see above.
+DELIVERY_ON_OFF = 0.31711 + 0.00591
+DELIVERY_SUPER_OFF = 0.04114 + 0.00591
+
+# SDCP generation by season/period (see above for provenance).
+_GEN_DEFAULT = {
     "summer": {
-        TouPeriod.SUPER_OFF_PEAK: 0.0368  + 0.04705 + _PCIA_NET_ADDER,
-        TouPeriod.OFF_PEAK:       0.11828 + 0.32302 + _PCIA_NET_ADDER,
-        TouPeriod.ON_PEAK:        0.38242 + 0.32302 + _PCIA_NET_ADDER,
+        TouPeriod.SUPER_OFF_PEAK: 0.0368,
+        TouPeriod.OFF_PEAK:       0.11828,
+        TouPeriod.ON_PEAK:        0.38242,
     },
     "winter": {
-        TouPeriod.SUPER_OFF_PEAK: 0.03039 + 0.04705 + _PCIA_NET_ADDER,
-        TouPeriod.OFF_PEAK:       0.09205 + 0.32302 + _PCIA_NET_ADDER,
-        TouPeriod.ON_PEAK:        0.14237 + 0.32302 + _PCIA_NET_ADDER,
+        TouPeriod.SUPER_OFF_PEAK: 0.03039,
+        TouPeriod.OFF_PEAK:       0.09205,
+        TouPeriod.ON_PEAK:        0.14237,
     },
 }
+
+
+def _delivery(period: TouPeriod) -> float:
+    return DELIVERY_SUPER_OFF if period == TouPeriod.SUPER_OFF_PEAK else DELIVERY_ON_OFF
+
+
+# Values learned from the user's own bills (bill-record --from-text; installed
+# by alerts._load_peak_state from state["learned_import"]). The tables above
+# go stale every time SDCP/SDG&E revise rates; the newest bill is ground truth.
+#   {"season": "summer", "gen": {"on_peak": r, "off_peak": r, "super_off_peak": r},
+#    "pcia_adder": $/kWh, "base_daily": $/day}
+# Each field is validated on its own, so one bad value can't discard the rest.
+_learned_import: dict = {}
+_LEARNED_GEN_MAX = 1.5      # $/kWh — above this is a parse error, not a rate
+_LEARNED_ADDER_MAX = 0.06   # $/kWh — PCIA-scale; larger means the tariff table moved
+_LEARNED_BASE_RANGE = (0.3, 2.0)  # $/day
+
+
+def set_learned_import(learned) -> None:
+    """Install (or, with None/invalid input, clear) bill-learned import terms."""
+    global _learned_import
+    clean: dict = {}
+    if isinstance(learned, dict):
+        season = learned.get("season")
+        gen = learned.get("gen")
+        if season in _GEN_DEFAULT and isinstance(gen, dict):
+            ok = {}
+            for period in TouPeriod:
+                v = gen.get(period.value)
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v <= _LEARNED_GEN_MAX:
+                    ok[period] = float(v)
+            if ok:
+                clean["season"], clean["gen"] = season, ok
+        adder = learned.get("pcia_adder")
+        if isinstance(adder, (int, float)) and not isinstance(adder, bool) and 0 <= adder <= _LEARNED_ADDER_MAX:
+            clean["pcia_adder"] = float(adder)
+        base = learned.get("base_daily")
+        if (isinstance(base, (int, float)) and not isinstance(base, bool)
+                and _LEARNED_BASE_RANGE[0] <= base <= _LEARNED_BASE_RANGE[1]):
+            clean["base_daily"] = float(base)
+    _learned_import = clean
+
+
+def _current_adder() -> float:
+    return _learned_import.get("pcia_adder", _PCIA_NET_ADDER)
+
+
+def _gen_rate(season: str, period: TouPeriod) -> float:
+    if _learned_import.get("season") == season and period in _learned_import.get("gen", {}):
+        return _learned_import["gen"][period]
+    return _GEN_DEFAULT[season][period]
+
+
+class _LiveRates:
+    """`_RATES[season][period]` — all-in EV-TOU-5 $/kWh, always computed from
+    the current (possibly bill-learned) generation, delivery and adder, so
+    anything reading this table (the chatbot's prompt) can't go stale."""
+
+    def __getitem__(self, season: str) -> dict:
+        return {p: _gen_rate(season, p) + _delivery(p) + _current_adder() for p in TouPeriod}
+
+
+_RATES = _LiveRates()
+
 
 _ON_PEAK_START = 16  # 4 pm
 _ON_PEAK_END   = 21  # 9 pm
@@ -177,7 +246,7 @@ def _is_holiday(dt: datetime) -> bool:
 
 def base_service_cost(days: float) -> float:
     """Fixed basic-service charge over N days (EV-TOU-5)."""
-    return max(0.0, days) * BASE_SERVICE_DAILY
+    return max(0.0, days) * _learned_import.get("base_daily", BASE_SERVICE_DAILY)
 
 
 def period_at(dt: datetime) -> TouPeriod:
@@ -198,9 +267,11 @@ def period_at(dt: datetime) -> TouPeriod:
 
 
 def rate_at(dt: datetime) -> float:
-    """Return $/kWh for grid import at dt."""
+    """Return $/kWh for grid import at dt: SDCP generation + SDG&E delivery
+    + the PCIA adder (bill-learned values win over the built-in tables)."""
     season = "summer" if dt.month in _SUMMER_MONTHS else "winter"
-    return _RATES[season][period_at(dt)]
+    period = period_at(dt)
+    return _gen_rate(season, period) + _delivery(period) + _current_adder()
 
 
 # ── Schedule DR-SES (residential-with-solar alternative to EV-TOU-5) ──────
@@ -229,18 +300,19 @@ def rate_at(dt: datetime) -> float:
 #
 # Same PCIA adder as EV-TOU-5 (_PCIA_NET_ADDER) so the two plans stay
 # comparable — see that comment.
-_DRSES_RATES = {
+_DRSES_GEN = {
     "summer": {
-        TouPeriod.SUPER_OFF_PEAK: 0.04254 + 0.26919 + _PCIA_NET_ADDER,
-        TouPeriod.OFF_PEAK:       0.12411 + 0.26919 + _PCIA_NET_ADDER,
-        TouPeriod.ON_PEAK:        0.38856 + 0.26919 + _PCIA_NET_ADDER,
+        TouPeriod.SUPER_OFF_PEAK: 0.04254,
+        TouPeriod.OFF_PEAK:       0.12411,
+        TouPeriod.ON_PEAK:        0.38856,
     },
     "winter": {
-        TouPeriod.SUPER_OFF_PEAK: 0.03597 + 0.26919 + _PCIA_NET_ADDER,
-        TouPeriod.OFF_PEAK:       0.09763 + 0.26919 + _PCIA_NET_ADDER,
-        TouPeriod.ON_PEAK:        0.14795 + 0.26919 + _PCIA_NET_ADDER,
+        TouPeriod.SUPER_OFF_PEAK: 0.03597,
+        TouPeriod.OFF_PEAK:       0.09763,
+        TouPeriod.ON_PEAK:        0.14795,
     },
 }
+_DRSES_DELIVERY = 0.26328 + 0.00591
 # Base Services Charge is $0.79343/day on DR-SES too (same tariff line item
 # as EV-TOU-5's) — identical in the counterfactual, so
 # compare_rate_plans() ignores it rather than duplicating the constant.
@@ -284,7 +356,7 @@ def _drses_period_at(dt: datetime) -> TouPeriod:
 def drses_rate_at(dt: datetime) -> float:
     """Return $/kWh for grid import at dt under Schedule DR-SES."""
     season = "summer" if dt.month in _SUMMER_MONTHS else "winter"
-    return _DRSES_RATES[season][_drses_period_at(dt)]
+    return _DRSES_GEN[season][_drses_period_at(dt)] + _DRSES_DELIVERY + _current_adder()
 
 
 def cheap_charge_deadline(dt: datetime) -> datetime | None:
@@ -325,8 +397,76 @@ def _clamp_day(year: int, month: int, day: int) -> date:
     return date(year, month, min(day, last))
 
 
+# Real cycle boundaries learned from the user's bills (installed from
+# state["bill_cycles"] / ["next_read_date"] by alerts._load_peak_state). SDG&E
+# bills on the meter read date, which drifts day to day (cycles run 29-33
+# days, starts landed on the 18th-21st), so a fixed day-of-month is only an
+# approximation; recorded bills give the true boundaries.
+_learned_cycles: list[tuple[date, date]] = []
+_learned_next_read: date | None = None
+_DEFAULT_CYCLE_DAYS = 30
+_MAX_LEARNED_CYCLES = 24
+
+
+def _as_date(v) -> date | None:
+    try:
+        return date.fromisoformat(v) if isinstance(v, str) else None
+    except ValueError:
+        return None
+
+
+def set_learned_cycles(cycles, next_read=None) -> None:
+    """Install (or clear, with None/invalid) real billing cycles: a list of
+    {"start": iso, "end": iso} plus the bill's next scheduled read date.
+    Malformed or inverted entries are dropped individually."""
+    global _learned_cycles, _learned_next_read
+    good: list[tuple[date, date]] = []
+    for c in (cycles if isinstance(cycles, list) else []):
+        if not isinstance(c, dict):
+            continue
+        st, en = _as_date(c.get("start")), _as_date(c.get("end"))
+        if st and en and st <= en:
+            good.append((st, en))
+    _learned_cycles = sorted(set(good))[-_MAX_LEARNED_CYCLES:]
+    nr = _as_date(next_read)
+    _learned_next_read = nr if (nr and _learned_cycles and nr > _learned_cycles[-1][1]) else None
+
+
+def _learned_cycle_bounds(d: date, start_day: int) -> tuple[date, date] | None:
+    if not _learned_cycles:
+        return None
+    for st, en in _learned_cycles:
+        if st <= d <= en:
+            return st, en
+    last_end = _learned_cycles[-1][1]
+    if d > last_end:
+        lengths = sorted((en - st).days + 1 for st, en in _learned_cycles)
+        typical = lengths[len(lengths) // 2] or _DEFAULT_CYCLE_DAYS
+        start = last_end + timedelta(days=1)
+        # First projected cycle ends on the bill's own next read date, if given;
+        # after that, chain at the typical length until it contains d.
+        end = _learned_next_read or start + timedelta(days=typical - 1)
+        for _ in range(240):
+            if d <= end:
+                return start, end
+            start = end + timedelta(days=1)
+            end = start + timedelta(days=typical - 1)
+        return None
+    # Earlier than any known cycle: fixed-day fallback, clamped so it can't
+    # overlap the earliest real one.
+    st, en = _fixed_day_cycle_bounds(d, start_day)
+    earliest = _learned_cycles[0][0]
+    return (st, min(en, earliest - timedelta(days=1))) if st < earliest else None
+
+
 def cycle_bounds(d: date, start_day: int = DEFAULT_CYCLE_START_DAY) -> tuple[date, date]:
-    """Return (first_day, last_day) of the billing cycle containing `d`."""
+    """Return (first_day, last_day) of the billing cycle containing `d` —
+    from real recorded bills when known, else the fixed `start_day`."""
+    learned = _learned_cycle_bounds(d, start_day)
+    return learned if learned else _fixed_day_cycle_bounds(d, start_day)
+
+
+def _fixed_day_cycle_bounds(d: date, start_day: int) -> tuple[date, date]:
     start_day = max(1, min(31, int(start_day)))
     anchor = _clamp_day(d.year, d.month, start_day)
     if d >= anchor:

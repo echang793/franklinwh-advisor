@@ -24,7 +24,7 @@ from .notifier import (notify_email, notify_imessage_text, notify_ntfy,
 from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
                   cycle_bounds, export_rate_at, on_peak_window,
                   peak_export_hour, period_at, rate_at, rates_are_stale,
-                  set_learned_export_rate)
+                  set_learned_cycles, set_learned_export_rate, set_learned_import)
 from .predictor import predict
 from .savings import compare_rate_plans, compute as savings_compute
 from .weather import (_outlook_cache, fetch_nws_storm_alerts)
@@ -673,6 +673,8 @@ def _load_peak_state(out: Path) -> dict:
         state = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
         set_learned_export_rate(None)
+        set_learned_import(None)
+        set_learned_cycles(None)
         return {}
     # Migrate renamed key from earlier version
     if "monthly_summary_month" in state and "monthly_summary_date" not in state:
@@ -688,6 +690,9 @@ def _load_peak_state(out: Path) -> dict:
     # an earlier load in the same process can't outlive its state.
     learned = state.get("learned_export_rate")
     set_learned_export_rate(learned.get("rate") if isinstance(learned, dict) else None)
+    # Same for import-side terms and real billing-cycle dates recorded from bills.
+    set_learned_import(state.get("learned_import"))
+    set_learned_cycles(state.get("bill_cycles"), state.get("next_read_date"))
     return state
 
 

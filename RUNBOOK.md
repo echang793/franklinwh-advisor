@@ -108,6 +108,17 @@ launchctl load  ~/Library/LaunchAgents/com.cmrnews.bot.plist
 curl -s "https://api.open-meteo.com/v1/forecast?latitude=32.97&longitude=-117.07&hourly=cloud_cover&forecast_days=1" | python3.13 -c "import sys,json; d=json.load(sys.stdin); print('ok', len(d['hourly']['time']), 'hours')"
 ```
 
+## Recording your bill (keeps every estimate accurate)
+
+When each SDG&E/SDCP bill arrives, copy its text (the "Electric Service – Solar Billing Plan" page **and** the CCA generation page) and run:
+
+```bash
+franklinwh bill-record --from-text -      # paste the text, then press Ctrl-D
+franklinwh bill-record --from-text bill.txt --dry-run   # preview only
+```
+
+It reads the billing period, next meter-read date, SDCP generation rates, export credits, fixed charge and the SDG&E delivery charge, then recalibrates: the actual-bill comparison (delivery + net generation, **excluding** the Climate Credit), the effective export $/kWh, the summer/winter generation rates, the fixed charge, the delivery residual (PCIA etc.) and the **real billing-cycle dates** — so cycles follow the meter read instead of a fixed day of the month. Estimates lag by at most one bill. If it says "Couldn't find …", paste the missing page; the old `--amount` form still works.
+
 ## iPhone / Apple Watch glance widget
 
 `GET /api/glance` returns a flat object with a ready-to-display `text` (e.g. `74% 🔋 ☀0.0kW 🏠1.5kW`), plus `soc_pct`, `battery_state` (charging/discharging/idle), `eta_full_min` / `eta_empty_min`, `grid_status` and a `stale` flag (true when the newest reading is over 15 min old — the text is then prefixed `⚠ 90m old`).
