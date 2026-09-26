@@ -3246,6 +3246,13 @@ def _alert_bill_reconciliation(
             f"the app's estimate."
         )
 
+    # The report is a one-shot per cycle; the per-day key above only
+    # throttles the reminder, so without this it repeated every morning
+    # for the whole 3-10 day window.
+    reported_key = f"bill_reconcile_reported_{prior_end.isoformat()}"
+    if state.get(reported_key):
+        return None
+
     readings = store.weekly_readings(
         prior_start.strftime("%Y-%m-%d"), prior_end.strftime("%Y-%m-%d")
     )
@@ -3271,6 +3278,7 @@ def _alert_bill_reconciliation(
     # via max(estimated, 0.01), and any miss on a ~$0 bill looks enormous.
     pct = (f" ({abs(diff) / abs(estimated) * 100:.0f}%)"
            if abs(estimated) >= _BILL_PCT_MIN_ESTIMATE else "")
+    state[reported_key] = today
     return (
         f"💵 <b>FranklinWH: Bill reconciliation</b>\n"
         f"Cycle ending {prior_end.strftime('%b %-d')}: actual {_usd(actual)} vs "

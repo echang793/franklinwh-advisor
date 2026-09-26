@@ -2317,6 +2317,24 @@ def test_bill_reconciliation_reports_diff_once_actual_recorded(tmp_path):
     assert "Log your real bill" not in msg
 
 
+def test_bill_reconciliation_report_sent_once_per_cycle_not_daily(tmp_path):
+    """Regression: the report re-fired every morning for the whole 3-10 day
+    window because dedup was per-day. Once reported, later days stay quiet."""
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    _insert_cycle_readings(db, 20, "2026-07", range(20, 32))
+    _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
+    cfg = _C(billing_cycle_start_day=20)
+    state = {"actual_bill_2026-08-19": 999.0}
+    day1 = datetime(2026, 8, 24, 8, 30)
+    assert alerts._alert_bill_reconciliation(state, "2026-08-24", day1, cfg, db) is not None
+    day2 = datetime(2026, 8, 25, 8, 30)
+    assert alerts._alert_bill_reconciliation(state, "2026-08-25", day2, cfg, db) is None
+    day3 = datetime(2026, 8, 26, 9, 5)
+    assert alerts._alert_bill_reconciliation(state, "2026-08-26", day3, cfg, db) is None
+
+
 def test_find_actual_bill_tolerates_drifting_read_dates():
     """SDG&E's meter read date drifts a day or two month to month, so the
     cycle end a user records (their bill's Sep 17) rarely equals the end
