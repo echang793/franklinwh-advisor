@@ -146,6 +146,11 @@ def _enforce_run_on_host(cfg: Config, watch: bool, hostname: str | None = None,
 
 
 _STARTUP_NOTICE_MIN_GAP = timedelta(minutes=10)
+# Touch this file in the output dir right before a deliberate restart (deploy,
+# config change) and the next start stays quiet. One-shot; ignored if older
+# than the grace window so a restart that never happened can't mute a crash.
+_PLANNED_RESTART_MARKER = ".planned_restart"
+_PLANNED_RESTART_GRACE_S = 600
 
 
 def _maybe_send_startup_notice(cfg: Config, outdir: Path, hostname: str,
@@ -155,9 +160,19 @@ def _maybe_send_startup_notice(cfg: Config, outdir: Path, hostname: str,
     With more than one Mac able to run it, a second host shows up
     immediately as a second "started on ..." message instead of as
     mysteriously doubled alerts a day later. Rate-limited so a restart
-    storm can't spam the chat. Returns whether a notice was sent.
+    storm can't spam the chat. Skipped for deliberate restarts (see
+    _PLANNED_RESTART_MARKER). Returns whether a notice was sent.
     """
     now = now or datetime.now()
+    marker = outdir / _PLANNED_RESTART_MARKER
+    try:
+        planned = marker.exists() and time.time() - marker.stat().st_mtime <= _PLANNED_RESTART_GRACE_S
+        marker.unlink(missing_ok=True)
+    except OSError:
+        planned = False
+    if planned:
+        logger.info("Planned restart marker found; skipping startup notice")
+        return False
     with _state_lock(outdir):
         state = _load_peak_state(outdir)
         last = state.get("startup_notice_at")

@@ -6639,6 +6639,36 @@ def test_startup_notice_sends_once_then_rate_limits(tmp_path, monkeypatch):
     assert len(sent) == 2
 
 
+def test_startup_notice_skipped_after_planned_restart_marker(tmp_path, monkeypatch):
+    """A deliberate restart (marker touched first) stays quiet; the marker is
+    one-shot so a later unexpected start still notifies, and a stale marker
+    (restart that never happened) doesn't mute a real crash."""
+    import os
+    import time
+    from franklinwh_scraper import cli as cli_mod
+
+    sent = []
+    monkeypatch.setattr(cli_mod, "_send_alert", lambda body, cfg, **kw: sent.append(body))
+    cfg = Config()
+    marker = tmp_path / cli_mod._PLANNED_RESTART_MARKER
+    t0 = datetime(2026, 9, 26, 12, 0)
+
+    marker.write_text("")
+    assert cli_mod._maybe_send_startup_notice(cfg, tmp_path, "Mac-mini", now=t0) is False
+    assert sent == [] and not marker.exists()
+
+    # Unexpected start right after: marker consumed, so it notifies.
+    assert cli_mod._maybe_send_startup_notice(cfg, tmp_path, "Mac-mini", now=t0) is True
+
+    # Stale marker (older than the grace window) is ignored and cleaned up.
+    marker.write_text("")
+    old = time.time() - 3600
+    os.utime(marker, (old, old))
+    assert cli_mod._maybe_send_startup_notice(cfg, tmp_path, "Mac-mini",
+                                              now=t0 + timedelta(minutes=30)) is True
+    assert not marker.exists()
+
+
 def _doctor_output(**cfg_kw):
     from unittest.mock import patch
 

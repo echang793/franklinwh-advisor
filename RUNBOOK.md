@@ -17,7 +17,7 @@
 3. **Stop and disable the agents on the machine that is giving up hosting first**, then confirm nothing is left:
    `for l in com.franklinwh.advisor com.franklinwh.dashboard com.cmrnews.bot; do launchctl bootout gui/$(id -u)/$l 2>/dev/null; launchctl disable gui/$(id -u)/$l; done; launchctl list | grep -Ei "franklinwh|cmrnews"`
 4. On the new host set `run_on_host` to its short hostname, run `franklinwh install-service`, then `xattr -c ~/Library/LaunchAgents/com.franklinwh.*.plist`.
-5. Check: `franklinwh doctor` is all green and one "advisor started on <host>" Telegram message arrives. A second one from another hostname means two hosts are running.
+5. Check: `franklinwh doctor` is all green and one "advisor started on <host>" Telegram message arrives. A second one from another hostname means two hosts are running. The notice is skipped for deliberate restarts: `touch output/.planned_restart` right before restarting (one-shot, valid 10 min), so any notice you do get means an unexpected start.
 
 ---
 
