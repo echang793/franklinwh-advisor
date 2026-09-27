@@ -871,6 +871,20 @@ def test_prune_old_state_covers_previously_unmatched_prefixes():
     assert f"predicted_kwh_{datetime.now().strftime('%Y-%m-%d')}" in pruned
 
 
+def test_prune_old_state_keeps_next_read_date_even_when_overdue():
+    """Regression: the generic '_date'-suffix rule treats an old value as a
+    stale dedup marker (safe to drop) — right for fast_drain_alerted_date,
+    rate_plan_check_date, etc., but next_read_date is a forward-pointing
+    field (the meter's next scheduled read). An old value there means the
+    read is overdue, not that the field is irrelevant; it was getting
+    silently deleted 30 days after every read date, discarding real cycle
+    info bill-record had just recorded until the next bill was pasted in."""
+    old_date = "2026-01-01"  # >30 days before "now" in any real run
+    state = {"next_read_date": old_date}
+    pruned = alerts._prune_old_state(state)
+    assert pruned.get("next_read_date") == old_date
+
+
 # ── alerts.py fast-drain minimum-elapsed floor ────────────────────────
 
 def test_fast_drain_ignores_near_zero_interval():
@@ -7339,7 +7353,7 @@ def test_learned_import_overrides_generation_rates_adder_and_base():
                             "pcia_adder": 0.02, "base_daily": 0.9})
     assert tou.rate_at(dt_summer_sop) == pytest.approx(0.05 + 0.04705 + 0.02)
     assert tou.rate_at(datetime(2026, 9, 2, 17, 0)) == pytest.approx(0.40 + 0.32302 + 0.02)
-    assert tou.rate_at(datetime(2026, 1, 6, 3, 0)) == pytest.approx(0.03039 + 0.04705 + 0.02)  # winter gen untouched, adder shared
+    assert tou.rate_at(datetime(2026, 1, 6, 3, 0)) == pytest.approx(0.03485 + 0.04705 + 0.02)  # winter gen untouched, adder shared
     assert tou.base_service_cost(10) == pytest.approx(9.0)
     tou.set_learned_import(None)
     assert tou.rate_at(dt_summer_sop) == pytest.approx(default) and tou.base_service_cost(10) == pytest.approx(8.12)
@@ -7425,7 +7439,126 @@ def _run_bill_record(tmp_path, args, stdin=None):
         return CliRunner().invoke(cli_mod.cli, ["bill-record", *args], input=stdin)
 
 
+_JAN_2026_BILL = """\
+Electric Service - Solar Billing Plan
+Rate: Time of Use - EVTOU5-Residential Climate Zone: Inland
+System Size: 3.484 kW
+Export Pricing: Legacy 2024 Pricing
+Billing Period: 12/18/25 - 1/19/26 Total Days: 33
+Meter Number: 00000000 (Next scheduled read date Feb 18, 2026) Cycle: 12
+Rate Change This Billing Period:
+There was a rate change on day 15 of your Billing Period. Therefore, your charges for the first 14 days
+were at Rate 1, and the remaining 19 days were at Rate 2.
+ELECTRIC CHARGES AND CREDITS
+Electricity Import kWh Current Charges Summary
+Total Import 54
+On-Peak 2
+Off-Peak 3
+Super Off-Peak 49
+Non-Nettable Charges $28.64
+Delivery Import Charges $4.27
+Electricity Export Applied Credits
+Total Export kWh −134
+Delivery Export Credits -$.44 Delivery Export Credits -$.44
+Total Electric Service $32.47
+Community Choice Aggregation (CCA) Electric Generation Charges
+Bill Date: Jan 19, 2026 Billing Period: 12/18/25 - 1/19/26
+Amount($)
+Generation On-Peak Winter 1 kWh X $0.17916 .14
+Generation Off-Peak Winter 2 kWh X $0.13237 .21
+Generation Super Off-Peak Winter 3 kWh X $0.07501 .19
+Generation On-Peak Winter 1 kWh X $0.15438 .16
+Generation Off-Peak Winter 2 kWh X $0.10067 .19
+Generation Super Off-Peak Winter 46 kWh X $0.03485 1.61
+Generation Electricity Export Credits -134 kWh X $0.05222 -7.01
+Generation Electricity Export Credits Adder -134 kWh X $0.0075 -1.01
+Credited to SBP Balance 5.52
+State Surcharge Tax .00
+Total CCA Electric Generation Charges $.00
+Your CCA rate is SBP EV-TOU-5 - 2021 Vintage.
+Your cumulative SBP Balance credit is now $60.19.
+"""
+
+
+def test_parse_bill_text_reads_the_jan_2026_bill_with_mid_cycle_rate_change():
+    """Winter bill whose rate changed mid-cycle (day 15, old year -> new
+    year tariff): two full sets of Generation ... Winter lines for the same
+    season. gen_kwh must sum both; gen_rates must reflect the SECOND (still
+    in-effect) rate, not the expired first one."""
+    from datetime import date
+
+    from franklinwh_scraper.billparse import parse_bill_text
+
+    b = parse_bill_text(_JAN_2026_BILL)
+    assert (b.period_start, b.period_end, b.days) == (date(2025, 12, 18), date(2026, 1, 19), 33)
+    assert b.next_read == date(2026, 2, 18)
+    assert b.season == "winter" and b.pcia_vintage == 2021
+    # In-effect rate (Rate 2, days 15-33) — not the expired Rate 1.
+    assert b.gen_rates == {"on_peak": 0.15438, "off_peak": 0.10067, "super_off_peak": 0.03485}
+    assert sum(b.gen_kwh.values()) == pytest.approx(54.0, abs=0.5)
+    assert b.export_kwh == 134
+    assert (b.delivery_import, b.nonnettable, b.total_electric_service) == (4.27, 28.64, 32.47)
+
+
+def test_bill_record_skips_pcia_and_base_daily_for_bill_predating_rate_table(tmp_path):
+    """Regression: implied_pcia_adder/base_daily are residuals against
+    tou.DELIVERY_ON_OFF/SUPER_OFF, which only took effect 6/1/2026 — a bill
+    from before then (like the Jan 2026 one) prices delivery under a
+    different, unrecorded table, so applying the residual formula to it
+    computes garbage (observed: ~$0.005/kWh vs the ~$0.013 fit from a bill
+    that's actually under the 6/1/2026 table). bill-record must not let a
+    pre-tariff bill overwrite the live pcia_adder/base_daily, while still
+    recording its (table-independent) generation rates and cycle dates."""
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    res = _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_JAN_2026_BILL)
+    assert res.exit_code == 0, res.output
+    st = _load_peak_state(tmp_path)
+    li = st["learned_import"]
+    assert li["gen_by_season"]["winter"] == {"on_peak": 0.15438, "off_peak": 0.10067, "super_off_peak": 0.03485}
+    assert "pcia_adder" not in li and "base_daily" not in li
+    assert st["bill_cycles"] == [{"start": "2025-12-18", "end": "2026-01-19"}]
+    assert "predates" in res.output.lower()
+
+
+def test_bill_record_does_not_regress_learned_export_rate_from_an_older_bill(tmp_path):
+    """Same class of bug as next_read_date: learned_export_rate has no
+    recency check either (its 'cycle_end' field is stored but never
+    consulted), so recording an older bill after a newer one is already on
+    file would silently replace today's flat-rate fallback with a stale
+    one. It's a dormant fallback (the hourly schedule normally answers
+    export_rate_at first), but should still never move backward."""
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    end = datetime.now().date() - timedelta(days=5)
+    _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_bill_with_dates(end))
+    before = _load_peak_state(tmp_path)["learned_export_rate"]
+
+    res = _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_JAN_2026_BILL)  # older bill, cycle ends 2026-01-19
+    assert res.exit_code == 0, res.output
+    assert _load_peak_state(tmp_path)["learned_export_rate"] == before
+
+
+def test_bill_record_does_not_move_next_read_date_backward(tmp_path):
+    """Regression: recording an OLDER bill (e.g. backfilling a past winter
+    bill after a more recent one is already on file) must not clobber
+    next_read_date with the older bill's now-stale next-read — tou's own
+    set_learned_cycles already ignores a next_read that isn't after the
+    latest cycle, but the raw state value itself should stay consistent
+    with what's actually current."""
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    end = datetime.now().date() - timedelta(days=5)
+    _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_bill_with_dates(end))
+    before = _load_peak_state(tmp_path)["next_read_date"]
+
+    res = _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_JAN_2026_BILL)  # older bill, Feb 2026 next-read
+    assert res.exit_code == 0, res.output
+    assert _load_peak_state(tmp_path)["next_read_date"] == before
+
+
 def test_bill_record_from_text_recalibrates_everything(tmp_path):
+
     from franklinwh_scraper.alerts import _load_peak_state
 
     end = datetime.now().date() - timedelta(days=5)

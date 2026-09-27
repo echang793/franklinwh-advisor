@@ -48,21 +48,32 @@ _SUMMER_MONTHS = {6, 7, 8, 9, 10}  # June–October
 #
 # Generation (SDCP EV-TOU-5, PowerBase). Summer is taken directly from the
 # customer's Aug 19 - Sep 17 2026 SDCP itemization (0.38242 / 0.11828 /
-# 0.0368 — within 0.4% of SDCP's published 1/1/2026 table, so SDCP's
-# mid-year update is small). Winter is still SDCP's published 1/1/2026
-# table (sdcommunitypower.org/wp-content/uploads/2026/01/Res_2021V_2026.pdf)
-# — refresh from a winter bill when one is available.
+# 0.0368). Winter is taken from the customer's Dec 18 2025 - Jan 19 2026
+# bill (2026-09-27) — that bill's cycle straddled a rate change (day 15),
+# so it printed two full sets of Generation ... Winter lines; these are the
+# second (post-Jan-1, still in-effect) set. They replaced SDCP's "published
+# 1/1/2026 table" this comment used to cite, which the real bill showed was
+# ~8-15% low across all three periods (stale/wrong source, not a mid-year
+# revision) — refresh again from a fresher winter bill when one is available.
 #   summer: on-peak 0.38242, off-peak 0.11828, super-off-peak 0.0368
-#   winter: on-peak 0.14237, off-peak 0.09205, super-off-peak 0.03039
+#   winter: on-peak 0.15438, off-peak 0.10067, super-off-peak 0.03485
 #
 # PCIA (Power Charge Indifference Adjustment, CCA 2021 vintage 0.03564
-# $/kWh per the 6/1/2026 tariff): the bill's "Delivery Import Charges"
+# $/kWh per the 6/1/2026 tariff): the Sep bill's "Delivery Import Charges"
 # ($15.86) exceed UDC + WF-NBC priced at the bill's kWh ($13.36) by ~$2.50.
 # That residual is consistent with PCIA applying to net imports (import
 # minus export, ~62 kWh this cycle) rather than all imports, so it is
 # modeled as one small per-import-kWh adder (_PCIA_NET_ADDER) folded into
 # every period. It is an empirical fit to ONE bill — it will drift with
 # how much you export — so refine it from further bills.
+#
+# The Jan 2026 bill could NOT be used to refine this: it predates
+# _RATES_EFFECTIVE_DATE (6/1/2026), so DELIVERY_ON_OFF/SUPER_OFF below
+# weren't the rates it was actually priced under, and the residual against
+# them is meaningless (~$0.005/kWh — nowhere near the pattern below).
+# bill-record --from-text now detects and skips this case (see cli.py's
+# _record_bill_from_text) rather than let a pre-tariff bill silently
+# overwrite this adder with a wrong-era number.
 _PCIA_NET_ADDER = 0.0133  # $/kWh imported (~PCIA 0.03564 x ~37% net-import share)
 
 # SDG&E delivery (UDC + WF-NBC/DWR-BC), EV-TOU-5 effective 6/1/2026 — see above.
@@ -77,9 +88,9 @@ _GEN_DEFAULT = {
         TouPeriod.ON_PEAK:        0.38242,
     },
     "winter": {
-        TouPeriod.SUPER_OFF_PEAK: 0.03039,
-        TouPeriod.OFF_PEAK:       0.09205,
-        TouPeriod.ON_PEAK:        0.14237,
+        TouPeriod.SUPER_OFF_PEAK: 0.03485,
+        TouPeriod.OFF_PEAK:       0.10067,
+        TouPeriod.ON_PEAK:        0.15438,
     },
 }
 

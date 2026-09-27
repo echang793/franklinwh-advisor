@@ -52,7 +52,7 @@ from .notifier import (notify_email, notify_imessage, notify_log,
                        fetch_telegram_chat_id, rec_to_text)
 from .predictor import predict
 from .scrapers import FAQScraper, ProductsScraper, SupportScraper
-from .tou import _get_export_schedule as _get_export_schedule_for_doctor, cycle_bounds, schedule_export_credit
+from .tou import (_get_export_schedule as _get_export_schedule_for_doctor, cycle_bounds, schedule_export_credit)
 from .weather import fetch_solar_outlook_cached as _fetch_outlook_cached, geocode
 
 
@@ -1052,6 +1052,23 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
               "python scripts/build_export_prices.py <file>.csv (see RUNBOOK).")
     scale_entry, scale_note = _learn_export_scale(outdir, bill)
     _info(f"Export pricing: {scale_note}")
+
+    # implied_pcia_adder/base_daily are residuals against tou.DELIVERY_ON_OFF/
+    # SUPER_OFF, which only took effect _RATES_EFFECTIVE_DATE — a bill from
+    # before then priced delivery under a different, unrecorded table, so the
+    # residual formula computes garbage for it (observed on a real Jan 2026
+    # bill: ~$0.005/kWh vs the ~$0.013 a bill actually under the current
+    # table fits). Drop those two fields rather than let a pre-tariff bill
+    # overwrite live state with them; its generation rates and cycle dates
+    # are table-independent and still get recorded below.
+    from .tou import _RATES_EFFECTIVE_DATE
+    predates_tariff = end < _RATES_EFFECTIVE_DATE
+    if predates_tariff:
+        _warn(f"This bill's cycle (ending {end:%b %-d, %Y}) predates the "
+              f"{_RATES_EFFECTIVE_DATE:%b %-d, %Y} delivery tariff this app models — its implied fixed "
+              "fee/PCIA residual would be computed against rates that weren't yet in effect, so it "
+              "wasn't saved. Generation rates and cycle dates were still recorded.")
+
     if dry_run:
         _warn("Dry run — nothing saved.")
         return
@@ -1062,12 +1079,19 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
             state["learned_export_scale"] = scale_entry
         if keep_amount:
             state[f"actual_bill_{end.isoformat()}"] = bill.comparable_amount
-        if rate is not None:
+        # Same backward-in-time guard as next_read_date below: cycle_end is
+        # stored but was never actually consulted, so an older bill could
+        # silently replace today's flat-rate fallback with a stale one.
+        prev_rate_cycle_end = (state.get("learned_export_rate") or {}).get("cycle_end") \
+            if isinstance(state.get("learned_export_rate"), dict) else None
+        if rate is not None and (not prev_rate_cycle_end or end.isoformat() > prev_rate_cycle_end):
             state["learned_export_rate"] = {
                 "rate": rate, "cycle_end": end.isoformat(),
                 "credit": bill.export_credit_total, "kwh": bill.export_kwh,
             }
         learned = bill.learned_import()
+        if predates_tariff:
+            learned = {k: v for k, v in learned.items() if k not in ("pcia_adder", "base_daily")}
         # Merge seasons across bills: a summer bill must not erase winter rates
         # learned from an earlier winter bill (only the bill that used a season
         # prints its rates). The single-season shape older state may hold is folded in first.
@@ -1078,7 +1102,11 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
         cycles = [c for c in state.get("bill_cycles", []) if isinstance(c, dict) and c.get("end") != end.isoformat()]
         cycles.append({"start": bill.period_start.isoformat(), "end": end.isoformat()})
         state["bill_cycles"] = sorted(cycles, key=lambda c: c["end"])[-24:]
-        if bill.next_read:
+        # Only advance next_read_date, never move it backward — recording an
+        # older bill (backfilling a past one) must not clobber a newer,
+        # already-known next read with this bill's now-stale one.
+        prev_next_read = state.get("next_read_date")
+        if bill.next_read and (not prev_next_read or bill.next_read.isoformat() > prev_next_read):
             state["next_read_date"] = bill.next_read.isoformat()
         _save_peak_state(outdir, state)
 

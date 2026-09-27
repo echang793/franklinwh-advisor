@@ -718,6 +718,14 @@ _DATE_KEYED_PREFIXES = (
 )
 
 
+# "_date"-suffixed keys the generic rule below must NOT treat as stale dedup
+# markers: their value is a forward-pointing date (the next expected event),
+# not a "last fired on" timestamp, so an old value means overdue, not
+# irrelevant. Found via next_read_date silently vanishing 30 days after
+# every meter read date, discarding real cycle info bill-record had recorded.
+_FORWARD_POINTING_DATE_KEYS = frozenset({"next_read_date"})
+
+
 def _prune_old_state(state: dict) -> dict:
     """Drop date-keyed entries older than 30 days (or week-keyed dedup
     markers older than ~4 weeks) to prevent unbounded growth."""
@@ -725,7 +733,8 @@ def _prune_old_state(state: dict) -> dict:
     cutoff_week = (datetime.now() - timedelta(days=30)).strftime("%G-W%V")
     pruned = {}
     for k, v in state.items():
-        if k.endswith("_date") and isinstance(v, str) and v < cutoff:
+        if (k.endswith("_date") and k not in _FORWARD_POINTING_DATE_KEYS
+                and isinstance(v, str) and v < cutoff):
             continue
         # Weekly dedup markers (solar_degradation_alerted_week, etc.) store an
         # ISO "YYYY-Www" string, which sorts lexically the same way dates do.
