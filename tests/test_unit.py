@@ -6639,6 +6639,50 @@ def test_startup_notice_sends_once_then_rate_limits(tmp_path, monkeypatch):
     assert len(sent) == 2
 
 
+def test_restart_advisor_sets_planned_marker_and_retries_transient_bootstrap_error(tmp_path, monkeypatch):
+    """restart-advisor: touches the planned-restart marker before doing
+    anything else (so the resulting startup skips the Telegram notice), and
+    retries `launchctl bootstrap` once on the transient
+    'Bootstrap failed: 5: Input/output error' RUNBOOK.md documents."""
+    import subprocess
+    import types
+    from click.testing import CliRunner
+    from franklinwh_scraper import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.sys, "platform", "darwin")
+    plist_dir = tmp_path / "Library" / "LaunchAgents"
+    plist_dir.mkdir(parents=True)
+    (plist_dir / "com.franklinwh.advisor.plist").write_text("x")
+    monkeypatch.setattr(cli_mod.Path, "home", lambda: tmp_path)
+
+    calls = []
+    bootstrap_n = {"n": 0}
+
+    def _fake_run(cmd, **kw):
+        calls.append(cmd)
+        if cmd[:2] == ["launchctl", "bootstrap"]:
+            bootstrap_n["n"] += 1
+            if bootstrap_n["n"] == 1:
+                return types.SimpleNamespace(returncode=1, stderr="Bootstrap failed: 5: Input/output error")
+            return types.SimpleNamespace(returncode=0, stderr="")
+        return types.SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    monkeypatch.setattr(cli_mod, "load_config", lambda: Config(output_dir=str(tmp_path / "output")))
+
+    runner = CliRunner()
+    res = runner.invoke(cli_mod.cli, ["restart-advisor"])
+    assert res.exit_code == 0, res.output
+
+    assert (tmp_path / "output" / cli_mod._PLANNED_RESTART_MARKER).exists()
+    bootout_calls    = [c for c in calls if c[:2] == ["launchctl", "bootout"]]
+    xattr_calls      = [c for c in calls if c[0] == "xattr"]
+    bootstrap_calls  = [c for c in calls if c[:2] == ["launchctl", "bootstrap"]]
+    assert len(bootout_calls) == 1
+    assert len(xattr_calls) == 1
+    assert len(bootstrap_calls) == 2  # first failed transiently, retried once
+
+
 def test_startup_notice_skipped_after_planned_restart_marker(tmp_path, monkeypatch):
     """A deliberate restart (marker touched first) stays quiet; the marker is
     one-shot so a later unexpected start still notifies, and a stale marker

@@ -931,6 +931,57 @@ def alerts_report(ctx: click.Context, days: int) -> None:
         _info("Names appear here for alerts sent from now on; use /snooze <name> [hours] in Telegram.")
 
 
+@cli.command("restart-advisor")
+@click.option("--dashboard", "with_dashboard", is_flag=True, default=False,
+              help="Also restart the dashboard LaunchAgent.")
+@click.pass_context
+def cmd_restart_advisor(ctx: click.Context, with_dashboard: bool) -> None:
+    """Restart the advisor (and optionally dashboard) LaunchAgent for a deliberate
+    code/config change, without triggering the "advisor started" Telegram notice.
+
+    Does the bootout -> xattr -c -> bootstrap dance RUNBOOK.md previously had
+    you do by hand, including the one retry on the transient
+    "Bootstrap failed: 5: Input/output error" launchd sometimes throws. Sets
+    the planned-restart marker first (see _maybe_send_startup_notice) so the
+    resulting startup stays quiet — a notice after this command means an
+    *unexpected* second start, worth investigating.
+    """
+    import subprocess
+
+    if sys.platform != "darwin":
+        _err("restart-advisor is only supported on macOS.")
+        sys.exit(1)
+
+    cfg = ctx.obj["config"]
+    outdir = Path(cfg.output_dir)
+    if not outdir.is_absolute():
+        outdir = Path(__file__).parent.parent / outdir
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / _PLANNED_RESTART_MARKER).touch()
+
+    domain = f"gui/{os.getuid()}"
+    plist_dir = Path.home() / "Library" / "LaunchAgents"
+    labels = ["com.franklinwh.advisor"]
+    if with_dashboard:
+        labels.append("com.franklinwh.dashboard")
+
+    _header("Restarting LaunchAgent(s)")
+    for label in labels:
+        plist_path = plist_dir / f"{label}.plist"
+        if not plist_path.exists():
+            _warn(f"{plist_path} not found — skipping {label}")
+            continue
+        subprocess.run(["launchctl", "bootout", domain, str(plist_path)], capture_output=True, text=True)
+        subprocess.run(["xattr", "-c", str(plist_path)], capture_output=True, text=True)
+        res = subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)], capture_output=True, text=True)
+        if res.returncode != 0 and "Input/output error" in (res.stderr or ""):
+            res = subprocess.run(["launchctl", "bootstrap", domain, str(plist_path)], capture_output=True, text=True)
+        if res.returncode != 0:
+            _err(f"{label}: bootstrap failed — {res.stderr.strip()}")
+        else:
+            _ok(f"{label} restarted")
+
+
 _SCALE_MIN_EXPORT_COVERAGE = 0.6   # history must account for this much of the bill's export kWh
 
 
