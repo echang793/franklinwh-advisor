@@ -7881,11 +7881,16 @@ def test_fetch_solar_outlook_requests_three_forecast_days(monkeypatch):
 
 def test_multiday_cloudy_alert_silent_when_day_after_forecast_missing():
     """No day-after hours = unknown, not 0.0 kWh; never send a made-up number."""
+    from datetime import timezone
     from franklinwh_scraper.config import Config as _C
     import types
 
     outlook = _outlook_with(20.0, 95.0)  # cloudy today+tomorrow only
     state = {"solar_cal_samples": [8.0, 8.0, 8.0]}
     c = types.SimpleNamespace(battery_soc_pct=28.0)
-    now = datetime.now().replace(hour=8, minute=0)
+    # Anchor to the same UTC wall-clock date _outlook_with used, not local
+    # time — otherwise a local/UTC date mismatch near midnight can make
+    # "day after" accidentally land on a date the outlook does have data
+    # for, and this test would flake independent of the code under test.
+    now = datetime.now(timezone.utc).replace(tzinfo=None, hour=8, minute=0)
     assert alerts._alert_multiday_cloudy_precharge(state, "x", now, c, outlook, _C()) is None
