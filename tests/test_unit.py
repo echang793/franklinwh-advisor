@@ -639,7 +639,7 @@ def test_license_clock_rollback_detected(tmp_path, monkeypatch):
 
 
 def test_tou_rates_stale_alert_fires_once():
-    stale_now = datetime(2027, 1, 1)  # well past 180 days from tou._RATES_EFFECTIVE_DATE (6/1/2026)
+    stale_now = datetime(2027, 3, 1)  # well past 180 days from tou._RATES_EFFECTIVE_DATE (8/1/2026)
     state: dict = {}
     msg = alerts._alert_tou_rates_stale(state, "2027-01-01", stale_now)
     assert msg is not None and "outdated" in msg
@@ -3846,22 +3846,22 @@ def test_import_rates_reproduce_sep_2026_bill():
 
 
 def test_ev_tou_5_summer_rates_are_current_delivery_plus_sdcp_generation():
-    """SDG&E EV-TOU-5 effective 6/1/2026: UDC 0.31711 (on/off-peak) and
+    """SDG&E EV-TOU-5 effective 8/1/2026: UDC 0.31218 (on/off-peak) and
     0.04114 (super-off-peak) + WF-NBC/DWR-BC 0.00591; SDCP summer generation
     from the Sep 2026 bill: 0.38242 / 0.11828 / 0.0368."""
     adder = tou._PCIA_NET_ADDER
-    assert abs(tou.rate_at(datetime(2026, 9, 2, 17, 0)) - (0.38242 + 0.31711 + 0.00591 + adder)) < 1e-9
-    assert abs(tou.rate_at(datetime(2026, 9, 2, 7, 0)) - (0.11828 + 0.31711 + 0.00591 + adder)) < 1e-9
+    assert abs(tou.rate_at(datetime(2026, 9, 2, 17, 0)) - (0.38242 + 0.31218 + 0.00591 + adder)) < 1e-9
+    assert abs(tou.rate_at(datetime(2026, 9, 2, 7, 0)) - (0.11828 + 0.31218 + 0.00591 + adder)) < 1e-9
     assert abs(tou.rate_at(datetime(2026, 9, 2, 3, 0)) - (0.0368 + 0.04114 + 0.00591 + adder)) < 1e-9
 
 
-def test_drses_delivery_uses_6_1_2026_udc():
-    """DR-SES 6/1/2026: UDC 0.26328 flat + WF-NBC/DWR-BC 0.00591. Kept
+def test_drses_delivery_uses_8_1_2026_udc():
+    """DR-SES 8/1/2026: UDC 0.25957 flat + WF-NBC/DWR-BC 0.00591. Kept
     current so compare_rate_plans doesn't favour whichever plan's table is
     staler."""
     adder = tou._PCIA_NET_ADDER
     dt = datetime(2026, 9, 2, 17, 0)  # weekday on-peak
-    assert abs(tou.drses_rate_at(dt) - (0.38856 + 0.26328 + 0.00591 + adder)) < 1e-9
+    assert abs(tou.drses_rate_at(dt) - (0.38856 + 0.25957 + 0.00591 + adder)) < 1e-9
 
 
 def test_base_service_matches_sep_2026_bill():
@@ -6354,18 +6354,18 @@ def test_drses_period_at_march_carveout():
 
 
 def test_drses_rate_at_on_peak_matches_verified_table():
-    """Pinned against the real unbundled DR-SES numbers (SDG&E 6/1/2026
-    delivery 0.26919 + SDCP generation + PCIA adder) — catches an accidental
+    """Pinned against the real unbundled DR-SES numbers (SDG&E 8/1/2026
+    delivery 0.26548 + SDCP generation + PCIA adder) — catches an accidental
     edit to the hardcoded schedule."""
-    assert tou.drses_rate_at(datetime(2026, 7, 8, 17)) == pytest.approx(0.38856 + 0.26919 + tou._PCIA_NET_ADDER)
-    assert tou.drses_rate_at(datetime(2026, 1, 8, 17)) == pytest.approx(0.14795 + 0.26919 + tou._PCIA_NET_ADDER)
+    assert tou.drses_rate_at(datetime(2026, 7, 8, 17)) == pytest.approx(0.38856 + 0.26548 + tou._PCIA_NET_ADDER)
+    assert tou.drses_rate_at(datetime(2026, 1, 8, 17)) == pytest.approx(0.14795 + 0.26548 + tou._PCIA_NET_ADDER)
 
 
 def test_compare_rate_plans_prices_each_period_on_current_tables():
     from franklinwh_scraper.savings import compare_rate_plans
 
-    # With the 6/1/2026 delivery tables, DR-SES's flat delivery (0.26919) is
-    # below EV-TOU-5's on/off-peak delivery (0.32302), so DR-SES is cheaper
+    # With the 8/1/2026 delivery tables, DR-SES's flat delivery (0.26548) is
+    # below EV-TOU-5's on/off-peak delivery (0.31809), so DR-SES is cheaper
     # for on-peak imports — the older 10/1/2025 EV-TOU-5 table (0.30715)
     # wrongly made EV-TOU-5 look cheaper there too. EV-TOU-5 still wins
     # decisively at super-off-peak (delivery 0.04705), which is where this
@@ -7352,7 +7352,7 @@ def test_learned_import_overrides_generation_rates_adder_and_base():
     tou.set_learned_import({"season": "summer", "gen": {"on_peak": 0.40, "off_peak": 0.13, "super_off_peak": 0.05},
                             "pcia_adder": 0.02, "base_daily": 0.9})
     assert tou.rate_at(dt_summer_sop) == pytest.approx(0.05 + 0.04705 + 0.02)
-    assert tou.rate_at(datetime(2026, 9, 2, 17, 0)) == pytest.approx(0.40 + 0.32302 + 0.02)
+    assert tou.rate_at(datetime(2026, 9, 2, 17, 0)) == pytest.approx(0.40 + 0.31809 + 0.02)
     assert tou.rate_at(datetime(2026, 1, 6, 3, 0)) == pytest.approx(0.03485 + 0.04705 + 0.02)  # winter gen untouched, adder shared
     assert tou.base_service_cost(10) == pytest.approx(9.0)
     tou.set_learned_import(None)
@@ -7502,13 +7502,14 @@ def test_parse_bill_text_reads_the_jan_2026_bill_with_mid_cycle_rate_change():
 
 def test_bill_record_skips_pcia_and_base_daily_for_bill_predating_rate_table(tmp_path):
     """Regression: implied_pcia_adder/base_daily are residuals against
-    tou.DELIVERY_ON_OFF/SUPER_OFF, which only took effect 6/1/2026 — a bill
-    from before then (like the Jan 2026 one) prices delivery under a
-    different, unrecorded table, so applying the residual formula to it
-    computes garbage (observed: ~$0.005/kWh vs the ~$0.013 fit from a bill
-    that's actually under the 6/1/2026 table). bill-record must not let a
-    pre-tariff bill overwrite the live pcia_adder/base_daily, while still
-    recording its (table-independent) generation rates and cycle dates."""
+    tou.DELIVERY_ON_OFF/SUPER_OFF, which only took effect at whatever
+    tou._RATES_EFFECTIVE_DATE currently is — a bill from before then (like
+    the Jan 2026 one, which predates even the earliest table this app has
+    ever modeled) prices delivery under a different, unrecorded table, so
+    applying the residual formula to it computes garbage. bill-record must
+    not let a pre-tariff bill overwrite the live pcia_adder/base_daily,
+    while still recording its (table-independent) generation rates and
+    cycle dates."""
     from franklinwh_scraper.alerts import _load_peak_state
 
     res = _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_JAN_2026_BILL)
