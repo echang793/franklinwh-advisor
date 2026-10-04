@@ -240,6 +240,27 @@ def _alert_vpp_event_started(state: dict, today: str, now: datetime, cfg: Config
     )
 
 
+# The advisor polls every ~5 min. A hole in the event window bigger than a few
+# cycles means it wasn't running or couldn't log in, and totals computed from
+# what's left are lower bounds, not the event's real numbers.
+_VPP_MAX_READING_GAP = timedelta(minutes=20)
+
+
+def _window_max_gap(readings, start: datetime, end: datetime) -> timedelta:
+    """Longest stretch inside [start, end] with no reading (the window's edges
+    count: nothing from the first minutes, or nothing near the end, is a gap)."""
+    stamps = []
+    for r in readings:
+        try:
+            t = datetime.fromisoformat(r[0])
+        except (ValueError, TypeError, IndexError):
+            continue
+        if start <= t <= end:
+            stamps.append(t)
+    points = [start] + sorted(stamps) + [end]
+    return max(b - a for a, b in zip(points, points[1:]))
+
+
 def _alert_vpp_event_ended(state: dict, today: str, now: datetime, cfg: Config, store) -> str | None:
     """Fires once after the event window closes — reports real exported and
     discharged kWh during the window (from history, not a forecast).
@@ -274,6 +295,7 @@ def _alert_vpp_event_ended(state: dict, today: str, now: datetime, cfg: Config, 
     rate = ev_raw.get("rate_per_kwh")
     export_kwh = 0.0
     discharge_kwh = 0.0
+    max_gap = timedelta(0)
     if store is not None:
         try:
             # readings_between's upper bound is exclusive, so a query ending
@@ -283,6 +305,7 @@ def _alert_vpp_event_ended(state: dict, today: str, now: datetime, cfg: Config, 
             # trim intervals back to the real event window before summing.
             slack = timedelta(minutes=15)
             readings = store.readings_between(start.isoformat(), (end + slack).isoformat())
+            max_gap = _window_max_gap(readings, start, end)
             for dt0, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(readings):
                 if dt0 >= end:
                     continue
@@ -297,6 +320,19 @@ def _alert_vpp_event_ended(state: dict, today: str, now: datetime, cfg: Config, 
             _chg, discharge_kwh = store.battery_kwh_between(start.isoformat(), end.isoformat())
         except Exception:
             logger.exception("VPP event summary: readings query failed")
+
+    if max_gap > _VPP_MAX_READING_GAP:
+        # Don't present partial totals as the event's result (2026-10-03: a
+        # 3.4 h login outage made a ~10 kWh discharge read as 1.7 kWh).
+        logger.warning("VPP event summary incomplete: longest reading gap %s in the window", max_gap)
+        gap_min = int(max_gap.total_seconds() // 60)
+        return (
+            f"⚠️ <b>FranklinWH: VPP event ended — data incomplete</b>\n"
+            f"{start.strftime('%-I:%M %p')} – {end.strftime('%-I:%M %p')}: the advisor was offline for part of "
+            f"this window (longest gap ~{gap_min} min), so these are lower bounds only: at least "
+            f"~{export_kwh:.1f} kWh exported, ~{discharge_kwh:.1f} kWh discharged.\n"
+            f"Check the FranklinWH app for the real numbers."
+        )
 
     # DSGS settles annually via Visa gift card, not a per-event cash payment
     # (confirmed by user 2026-08-25) — "estimated payout" reads like money

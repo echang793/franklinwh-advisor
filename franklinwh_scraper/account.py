@@ -186,6 +186,10 @@ class AccountClient:
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return None
 
+    def has_saved_token(self) -> bool:
+        """True if a restart could reuse a saved token instead of logging in."""
+        return self._load_cached_token() is not None
+
     def _save_cached_token(self) -> None:
         try:
             payload = json.dumps({"email": self.email, "token": self._token,

@@ -150,6 +150,40 @@ _STARTUP_NOTICE_MIN_GAP = timedelta(minutes=10)
 # Touch this file in the output dir right before a deliberate restart (deploy,
 # config change) and the next start stays quiet. One-shot; ignored if older
 # than the grace window so a restart that never happened can't mute a crash.
+def _poll_error_alert_text(threshold: int, error: Exception) -> str:
+    """The "N poll errors in a row" Telegram text. When it's FranklinWH's login
+    route that is failing, say so and say not to restart: the running advisor
+    can't recover by restarting, and a restart needs a fresh login (2026-10-03:
+    restarts during a login-route outage are what stopped polling)."""
+    text = (
+        f"⚠️ FranklinWH Advisor: {threshold} poll errors in a row\n"
+        f"Error: {error}\n"
+        f"Alerts paused until fixed. Check advisor log for details."
+    )
+    if "appUserOrInstallerLogin" in str(error):
+        text += (
+            "\n\nThis is FranklinWH's login route failing on their side. Restarting the advisor won't "
+            "help (a restart needs a fresh login), so leave it running: it retries every cycle and "
+            "resumes by itself when the login recovers."
+        )
+    return text
+
+
+def _restart_login_problem(cfg: Config) -> str | None:
+    """Why restarting the advisor right now would leave it unable to poll, or
+    None if it's safe. A restart reuses the saved login token when there is
+    one; otherwise it needs a fresh login, which is probed here (and the token
+    saved, so the restart then reuses it)."""
+    try:
+        with AccountClient(cfg.email, cfg.password) as client:
+            if client.has_saved_token():
+                return None
+            client.login()
+    except Exception as e:
+        return str(e)
+    return None
+
+
 _PLANNED_RESTART_MARKER = ".planned_restart"
 _PLANNED_RESTART_GRACE_S = 600
 
@@ -935,8 +969,10 @@ def alerts_report(ctx: click.Context, days: int) -> None:
 @cli.command("restart-advisor")
 @click.option("--dashboard", "with_dashboard", is_flag=True, default=False,
               help="Also restart the dashboard LaunchAgent.")
+@click.option("--force", is_flag=True, default=False,
+              help="Restart even if FranklinWH's login is failing and no login token is saved.")
 @click.pass_context
-def cmd_restart_advisor(ctx: click.Context, with_dashboard: bool) -> None:
+def cmd_restart_advisor(ctx: click.Context, with_dashboard: bool, force: bool) -> None:
     """Restart the advisor (and optionally dashboard) LaunchAgent for a deliberate
     code/config change, without triggering the "advisor started" Telegram notice.
 
@@ -954,6 +990,17 @@ def cmd_restart_advisor(ctx: click.Context, with_dashboard: bool) -> None:
         sys.exit(1)
 
     cfg = ctx.obj["config"]
+    # A restart needs a FranklinWH login unless a saved token exists. If the login
+    # route is down, restarting would stop polling although the running advisor is
+    # fine on its current session — so refuse (2026-10-03 outage).
+    if not force:
+        problem = _restart_login_problem(cfg)
+        if problem:
+            _err(f"Not restarting: a restart needs a FranklinWH login, there's no saved token, and the "
+                 f"login is failing right now ({problem}).")
+            _info("The running advisor is unaffected. A restart would stop polling until FranklinWH's "
+                  "login recovers. Re-run with --force to restart anyway.")
+            sys.exit(1)
     outdir = Path(cfg.output_dir)
     if not outdir.is_absolute():
         outdir = Path(__file__).parent.parent / outdir
@@ -2338,11 +2385,7 @@ def cmd_advise(
                     except Exception:
                         pass
                 if _consec_errors == _ERROR_THRESHOLD:
-                    _err_msg = (
-                        f"⚠️ FranklinWH Advisor: {_ERROR_THRESHOLD} poll errors in a row\n"
-                        f"Error: {e}\n"
-                        f"Alerts paused until fixed. Check advisor log for details."
-                    )
+                    _err_msg = _poll_error_alert_text(_ERROR_THRESHOLD, e)
                     _send_alert(_err_msg, cfg, urgent=True)
 
             # Unconditional — fires whether this cycle's gateway call

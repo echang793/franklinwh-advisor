@@ -2559,11 +2559,13 @@ def test_alert_vpp_event_ended_reports_export_and_payout(tmp_path):
 
     db = HistoryStore(tmp_path / "h.db")
     # 2 hours exporting 3 kW steady -> 6 kWh exported (grid_use_kw negative =
-    # export). The 18:05 reading is the "past end" point readings_between's
-    # exclusive upper bound needs to close the 17:00-18:00 interval — it
-    # falls within the alert's own 15-min slack window and gets trimmed
-    # back out before summing (its own 18:00-18:05 interval isn't counted).
-    for ts in ("16:00", "17:00", "18:00", "18:05"):
+    # export), at the real ~5-minute polling cadence (the summary refuses to
+    # present totals when the window has a hole larger than a few polls). The
+    # 18:05 reading is the "past end" point readings_between's exclusive upper
+    # bound needs to close the final interval — it falls within the alert's
+    # own 15-min slack window and gets trimmed back out before summing.
+    for minute in range(16 * 60, 18 * 60 + 10, 5):
+        ts = f"{minute // 60:02d}:{minute % 60:02d}"
         db._conn.execute(
             "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
             "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
@@ -2581,12 +2583,69 @@ def test_alert_vpp_event_ended_reports_export_and_payout(tmp_path):
     assert "VPP event ended" in msg
     assert "6.0 kWh exported" in msg
     # discharge_kwh's query has no slack past `end` (exclusive upper bound
-    # accepted as a small undercount, see the code comment) — only the
-    # 16:00-17:00 interval is captured here, 1h * 2.5kW = 2.5 kWh.
-    assert "2.5 kWh discharged" in msg
-    assert "$5.00 toward this year's gift card (at discharge)" in msg
+    # accepted as a small undercount, see the code comment) — the last
+    # 17:55-18:00 interval is dropped: 23 five-minute intervals * 2.5 kW = 4.79 kWh.
+    assert "4.8 kWh discharged" in msg
+    assert "$9.58 toward this year's gift card (at discharge)" in msg
+    assert "incomplete" not in msg
     # Fires once.
     assert alerts._alert_vpp_event_ended(state, "2026-08-25", now, cfg, db) is None
+
+
+def _seed_event_readings(db, date_str, minutes, grid_kw=-4.5, batt_kw=5.0):
+    """Readings at the given minute-of-day offsets (real polling is every 5 min)."""
+    for m in minutes:
+        hh, mm = divmod(m, 60)
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"{date_str}T{hh:02d}:{mm:02d}:00", 5, hh, 0.4, 0.0, 60.0, grid_kw, "normal", 0.0, batt_kw))
+    db._conn.commit()
+
+
+def _event_state(start="2026-10-03T17:00:00", end="2026-10-03T19:00:00"):
+    return {"vpp_event": {"start": start, "end": end, "rate_per_kwh": None}}
+
+
+def test_vpp_event_summary_admits_when_the_advisor_was_offline(tmp_path):
+    """Regression (2026-10-03): the advisor lost its FranklinWH login for 3.4 h
+    mid-event; the end-of-event alert then reported '0.4 kWh exported, 1.7 kWh
+    discharged' as though complete (the real discharge was ~10 kWh) because it
+    only saw the 17:00-17:23 readings."""
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_event_readings(db, "2026-10-03", range(17 * 60, 17 * 60 + 25, 5))      # 17:00-17:20, then nothing
+    _seed_event_readings(db, "2026-10-03", [20 * 60 + 48], grid_kw=0.0, batt_kw=0.7)   # advisor back at 20:48
+    msg = alerts._alert_vpp_event_ended(_event_state(), "2026-10-03", datetime(2026, 10, 3, 20, 48),
+                                        _C(vpp_enrolled=True), db)
+    assert msg is not None and "data incomplete" in msg
+    assert "offline" in msg and "at least" in msg
+    assert "app" in msg                         # tells the user where the real numbers are
+    assert "gift card" not in msg and "toward" not in msg
+
+
+def test_vpp_event_summary_flags_a_hole_in_the_middle_of_the_window(tmp_path):
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_event_readings(db, "2026-10-03", list(range(17 * 60, 17 * 60 + 35, 5)) +
+                         list(range(18 * 60 + 30, 19 * 60 + 10, 5)))                # a 55-minute hole
+    msg = alerts._alert_vpp_event_ended(_event_state(), "2026-10-03", datetime(2026, 10, 3, 19, 6),
+                                        _C(vpp_enrolled=True), db)
+    assert "data incomplete" in msg
+
+
+def test_vpp_event_summary_is_normal_when_the_window_is_fully_covered(tmp_path):
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_event_readings(db, "2026-10-03", range(17 * 60, 19 * 60 + 10, 5))
+    msg = alerts._alert_vpp_event_ended(_event_state(), "2026-10-03", datetime(2026, 10, 3, 19, 6),
+                                        _C(vpp_enrolled=True), db)
+    assert msg is not None and "VPP event ended" in msg and "incomplete" not in msg
+    assert "9.0 kWh exported" in msg or "9.1 kWh exported" in msg or "8.9 kWh exported" in msg   # ~4.5 kW x 2 h
 
 
 def test_alert_vpp_event_ended_waits_for_end_time():
@@ -6767,6 +6826,103 @@ def test_startup_notice_sends_once_then_rate_limits(tmp_path, monkeypatch):
     assert len(sent) == 2
 
 
+def _save_fresh_login_token(email="a@b.c"):
+    from franklinwh_scraper import account
+
+    account._TOKEN_PATH.write_text(json.dumps(
+        {"email": email, "token": "tok", "saved_at": datetime.now().isoformat()}))
+
+
+def _restart_env(tmp_path, monkeypatch, login_error):
+    """restart-advisor wired to fakes: records subprocess calls; AccountClient
+    either logs in fine or raises `login_error` (FranklinWH's login route down)."""
+    import subprocess
+    import types
+
+    from franklinwh_scraper import cli as cli_mod
+    from franklinwh_scraper import account
+
+    monkeypatch.setattr(cli_mod.sys, "platform", "darwin")
+    (tmp_path / "Library" / "LaunchAgents").mkdir(parents=True)
+    (tmp_path / "Library" / "LaunchAgents" / "com.franklinwh.advisor.plist").write_text("x")
+    monkeypatch.setattr(cli_mod.Path, "home", lambda: tmp_path)
+    calls, logins = [], []
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: calls.append(cmd) or types.SimpleNamespace(returncode=0, stderr=""))
+
+    class _FakeClient(account.AccountClient):
+        def login(self):
+            logins.append(1)
+            if login_error:
+                raise login_error
+            self._token = "fresh"
+            self._save_cached_token()
+            return self._token
+
+    monkeypatch.setattr(cli_mod, "AccountClient", _FakeClient)
+    monkeypatch.setattr(cli_mod, "load_config",
+                        lambda: Config(email="a@b.c", password="pw", output_dir=str(tmp_path / "output")))
+    return cli_mod, calls, logins
+
+
+def test_restart_advisor_refuses_when_it_would_need_a_login_that_is_failing(tmp_path, monkeypatch):
+    """2026-10-03: the login route returned 502; the running advisor was fine on
+    its saved token, but each restart needed a fresh login and stopped polling.
+    With no saved token and a failing login, restart-advisor must not restart."""
+    import requests
+    from click.testing import CliRunner
+
+    cli_mod, calls, logins = _restart_env(tmp_path, monkeypatch, requests.HTTPError("502 Bad Gateway"))
+    res = CliRunner().invoke(cli_mod.cli, ["restart-advisor"])
+    assert res.exit_code != 0
+    assert "502" in res.output and "--force" in res.output
+    assert calls == [] and logins == [1]                         # probed once, restarted nothing
+    assert not (tmp_path / "output" / cli_mod._PLANNED_RESTART_MARKER).exists()
+
+
+def test_restart_advisor_force_overrides_the_login_check(tmp_path, monkeypatch):
+    import requests
+    from click.testing import CliRunner
+
+    cli_mod, calls, _ = _restart_env(tmp_path, monkeypatch, requests.HTTPError("502 Bad Gateway"))
+    res = CliRunner().invoke(cli_mod.cli, ["restart-advisor", "--force"])
+    assert res.exit_code == 0, res.output
+    assert any(c[:2] == ["launchctl", "bootstrap"] for c in calls)
+
+
+def test_restart_advisor_skips_the_login_probe_when_a_saved_token_exists(tmp_path, monkeypatch):
+    import requests
+    from click.testing import CliRunner
+
+    cli_mod, calls, logins = _restart_env(tmp_path, monkeypatch, requests.HTTPError("502 Bad Gateway"))
+    _save_fresh_login_token()
+    res = CliRunner().invoke(cli_mod.cli, ["restart-advisor"])
+    assert res.exit_code == 0, res.output
+    assert logins == []                                          # no login attempted: the restart reuses the token
+    assert any(c[:2] == ["launchctl", "bootstrap"] for c in calls)
+
+
+def test_restart_advisor_logs_in_first_when_no_token_is_saved_and_login_works(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    cli_mod, calls, logins = _restart_env(tmp_path, monkeypatch, None)
+    res = CliRunner().invoke(cli_mod.cli, ["restart-advisor"])
+    assert res.exit_code == 0, res.output
+    assert logins == [1] and any(c[:2] == ["launchctl", "bootstrap"] for c in calls)
+
+
+def test_poll_error_alert_says_not_to_restart_when_the_login_route_is_down():
+    from franklinwh_scraper import cli as cli_mod
+
+    login_err = Exception("502 Server Error: Bad Gateway for url: "
+                          "https://energy.franklinwh.com/hes-gateway/terminal/initialize/appUserOrInstallerLogin")
+    text = cli_mod._poll_error_alert_text(8, login_err)
+    assert "8 poll errors in a row" in text and "502" in text
+    assert "login" in text.lower() and "restart" in text.lower()          # the guidance
+    other = cli_mod._poll_error_alert_text(8, Exception("Empty runtimeData from API"))
+    assert "restart" not in other.lower()                                 # generic errors keep the old text
+
+
 def test_restart_advisor_sets_planned_marker_and_retries_transient_bootstrap_error(tmp_path, monkeypatch):
     """restart-advisor: touches the planned-restart marker before doing
     anything else (so the resulting startup skips the Telegram notice), and
@@ -6778,6 +6934,7 @@ def test_restart_advisor_sets_planned_marker_and_retries_transient_bootstrap_err
     from franklinwh_scraper import cli as cli_mod
 
     monkeypatch.setattr(cli_mod.sys, "platform", "darwin")
+    _save_fresh_login_token()                       # a normal day: a restart can reuse the saved token
     plist_dir = tmp_path / "Library" / "LaunchAgents"
     plist_dir.mkdir(parents=True)
     (plist_dir / "com.franklinwh.advisor.plist").write_text("x")
@@ -6796,7 +6953,8 @@ def test_restart_advisor_sets_planned_marker_and_retries_transient_bootstrap_err
         return types.SimpleNamespace(returncode=0, stderr="")
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
-    monkeypatch.setattr(cli_mod, "load_config", lambda: Config(output_dir=str(tmp_path / "output")))
+    monkeypatch.setattr(cli_mod, "load_config",
+                        lambda: Config(email="a@b.c", password="pw", output_dir=str(tmp_path / "output")))
 
     runner = CliRunner()
     res = runner.invoke(cli_mod.cli, ["restart-advisor"])
