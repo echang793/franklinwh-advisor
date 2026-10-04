@@ -3688,6 +3688,41 @@ def test_accuracy_excludes_pre_bias_fix_days(tmp_path):
     assert "Overall: 2 day(s)" in res.output
 
 
+def test_ewma_vs_constant_backtest_picks_the_right_winner():
+    """Replays stored ratios: predict each from the ones before it, with the
+    EWMA vs a plain running mean. A drifting series (the regime changes)
+    favours the EWMA; a steady noisy one (autumn marine layer) favours the
+    mean — the 2026-10-03 review found the latter on real data."""
+    drifting = [0.80 + 0.01 * i for i in range(30)]                    # steady climb
+    noisy = [1.0 + (0.06 if i % 2 else -0.06) for i in range(30)]      # alternating noise, no trend
+    d = alerts.ewma_vs_constant_backtest(drifting)
+    n = alerts.ewma_vs_constant_backtest(noisy)
+    assert d["n"] == n["n"] == 27 and d["ewma_err_pct"] < d["const_err_pct"]
+    assert n["const_err_pct"] < n["ewma_err_pct"]
+    assert alerts.ewma_vs_constant_backtest([1.0, 1.0, 1.0]) is None    # too little history to judge
+
+
+def test_accuracy_reports_ewma_vs_constant_baseline(tmp_path):
+    import json as _json
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    state = {
+        "daily_pr_2026-09-10": 1.0,
+        "perf_ratio_samples": [1.0 + (0.06 if i % 2 else -0.06) for i in range(30)],
+    }
+    (tmp_path / ".peak_alert_state.json").write_text(_json.dumps(state))
+    cfg = Config(output_dir=str(tmp_path))
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = CliRunner().invoke(cli_mod.cli, ["account", "accuracy"])
+    assert res.exit_code == 0, res.output
+    assert "constant-mean" in res.output and "EWMA" in res.output
+    assert "not earning its keep" in res.output        # the mean wins on this series
+
+
 def test_bill_record_rejects_bad_date(tmp_path):
     from unittest.mock import patch
 

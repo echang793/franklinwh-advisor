@@ -26,6 +26,7 @@ from .alerts import (
     _PR_BIAS_FIX_DATE,
     _SOLAR_CAL_LOG_FILE,
     _check_peak_alerts,
+    ewma_vs_constant_backtest,
     _get_hourly_bias,
     _get_performance_ratio,
     _get_system_peak_kw,
@@ -2678,6 +2679,21 @@ def cmd_accuracy(ctx: click.Context, out: str | None) -> None:
     click.echo()
     _info(f"Overall: {len(all_errs)} day(s), mean error {sum(all_errs)/len(all_errs):.1f}%, "
           f"{within_5}/{len(all_errs)} within 5%")
+
+    # Is the EWMA calibration still earning its keep? Replays the stored
+    # sunny-day ratios against a plain running mean (see
+    # alerts.ewma_vs_constant_backtest). Informational only — never changes
+    # calibration; steady seasons favour the mean, frontal ones the EWMA.
+    bt = ewma_vs_constant_backtest(state.get("perf_ratio_samples") or [])
+    if bt:
+        diff = bt["const_err_pct"] - bt["ewma_err_pct"]
+        _info(f"Calibration check ({bt['n']} day replay): EWMA α={bt['alpha']:g} "
+              f"{bt['ewma_err_pct']:.1f}% vs constant-mean {bt['const_err_pct']:.1f}%")
+        if bt["n"] >= 20 and diff < -0.5:
+            _info("The constant mean is beating the EWMA — it's not earning its keep in "
+                  "this steady stretch. Recheck when fronts return before touching alpha.")
+        elif bt["n"] >= 20 and diff > 0.5:
+            _info("The EWMA is beating the constant mean — it's tracking real day-to-day change.")
 
 
 @grp_account.command("solar-audit")

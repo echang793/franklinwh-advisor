@@ -88,6 +88,43 @@ def _ewma(samples: list[float]) -> float:
     return est
 
 
+_BACKTEST_MIN_HISTORY = 3   # samples needed before the first one-step-ahead prediction
+
+
+def ewma_vs_constant_backtest(samples: list[float], alpha: float | None = None) -> dict | None:
+    """One-step-ahead replay of the stored perf-ratio samples: predict each
+    from the ones before it, once with the EWMA the app uses and once with a
+    plain running mean. Returns {"n", "ewma_err_pct", "const_err_pct",
+    "alpha"} (mean absolute % error of the predicted ratio), or None if there
+    is too little history to judge.
+
+    Why it exists (2026-10-03 monthly review): the EWMA's alpha was
+    hand-picked, and in steady autumn sun a constant mean beat it (8.0% vs
+    9.0% over 29 days). Whether that holds changes with the season, so
+    `account accuracy` re-runs this instead of someone guessing at alpha.
+    """
+    a = _PR_EWMA_ALPHA if alpha is None else alpha
+    ewma_errs: list[float] = []
+    const_errs: list[float] = []
+    for i in range(_BACKTEST_MIN_HISTORY, len(samples)):
+        actual = samples[i]
+        if actual <= 0:
+            continue
+        est = samples[0]
+        for v in samples[1:i]:
+            est = a * v + (1 - a) * est
+        mean = sum(samples[:i]) / i
+        ewma_errs.append(abs(est - actual) / actual * 100)
+        const_errs.append(abs(mean - actual) / actual * 100)
+    if not ewma_errs:
+        return None
+    return {
+        "n": len(ewma_errs), "alpha": a,
+        "ewma_err_pct": sum(ewma_errs) / len(ewma_errs),
+        "const_err_pct": sum(const_errs) / len(const_errs),
+    }
+
+
 def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
     """Return empirical PR (actual / GHI-baseline-predicted daily kWh, at
     perf_ratio=1.0) for sunny or cloudy days.
