@@ -10,6 +10,8 @@
 
 **One host only.** The advisor and both bots must run on exactly one machine (currently the Mac mini, `run_on_host: Erics-Mini` in `~/.franklinwh.json` — this is the hostname, not the friendly "Eric's Mini" name shown in System Settings; if you ever rename the Mac there, its hostname changes too and `run_on_host` must be updated to match, or the guard thinks it's the wrong host and stands down — this happened 2026-09-30, a silent no-op outage from a restart until caught). Two copies double every alert and fight over the Telegram token. Keep repos under `~/Projects`, **not** `~/Desktop` / `~/Documents` (iCloud sync locks files — see incidents below). `franklinwh doctor` checks the host guard, the iCloud path and both LaunchAgents. Logs rotate at 5 MB (3 copies kept) from inside the advisor loop.
 
+**Login token cache.** The FranklinWH login token is saved to `~/.franklinwh_token.json` (owner-only, never in the repo) and reused after a restart, so a restart no longer depends on FranklinWH's login route being up (2026-10-03: it returned 502 for hours while the old process's token was still valid, and a routine restart turned that into a polling outage). It is ignored if it belongs to another account or is older than 7 days, and dropped when the API rejects it. To force a fresh login, delete the file and restart. If polling stops with `502 ... appUserOrInstallerLogin` and there's no saved token, FranklinWH's side is down: wait, don't keep restarting.
+
 ## Adding or moving to another machine
 
 1. Clone to `~/Projects/<repo>` (not Desktop/Documents), then `pip install -e .` — or run `./install.sh`.

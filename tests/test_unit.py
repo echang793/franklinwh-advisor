@@ -18,6 +18,15 @@ from franklinwh_scraper.predictor import predict
 
 
 @pytest.fixture(autouse=True)
+def _isolate_login_token_cache(tmp_path_factory, monkeypatch):
+    """AccountClient caches its login token on disk. Point that at a per-test
+    temp file so no test can read or overwrite the real ~/.franklinwh_token.json."""
+    from franklinwh_scraper import account
+
+    monkeypatch.setattr(account, "_TOKEN_PATH", tmp_path_factory.mktemp("tokcache") / "login_token.json")
+
+
+@pytest.fixture(autouse=True)
 def _reset_learned_export_rate():
     """tou's learned export rate is process-global (set by _load_peak_state);
     keep one test's state from leaking into the next."""
@@ -8324,3 +8333,109 @@ def test_chatbot_without_history_store_sends_no_tools(monkeypatch, tmp_path):
     bot._hist_store = None
     assert bot._call_claude("c1", "q", "ctx") == "ok"
     assert "tools" not in _FakeAnthropic.last.calls[0]
+
+
+# ── login token cache (survives restarts; 2026-10-03 login-route outage) ─
+
+class _JsonResp:
+    def __init__(self, js, status=200):
+        self._js, self.status = js, status
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            import requests
+            raise requests.HTTPError(f"{self.status} Server Error: Bad Gateway")
+
+    def json(self):
+        return self._js
+
+
+def _login_ok(token):
+    return _JsonResp({"code": 200, "result": {"token": token}})
+
+
+def test_login_saves_the_token_privately():
+    from franklinwh_scraper import account
+
+    client = account.AccountClient("a@b.c", "pw")
+    client.session.post = lambda *a, **kw: _login_ok("tok-1")
+    assert client.login() == "tok-1"
+    data = json.loads(account._TOKEN_PATH.read_text())
+    assert data["email"] == "a@b.c" and data["token"] == "tok-1" and data["saved_at"]
+    assert account._TOKEN_PATH.stat().st_mode & 0o077 == 0          # owner-only, like a credential
+
+
+def test_restart_reuses_saved_token_even_when_the_login_route_is_down():
+    """The failure this exists for: after a restart the advisor needed a fresh
+    login, FranklinWH's login route was returning 502, and polling stopped
+    though a valid token was available the whole time."""
+    from franklinwh_scraper import account
+
+    first = account.AccountClient("a@b.c", "pw")
+    first.session.post = lambda *a, **kw: _login_ok("tok-1")
+    first.login()
+
+    restarted = account.AccountClient("a@b.c", "pw")
+    posts, seen = [], []
+    restarted.session.post = lambda *a, **kw: posts.append(1) or _JsonResp({}, status=502)   # login is down
+    restarted.session.get = lambda url, **kw: seen.append(kw["headers"]["loginToken"]) or _JsonResp({"code": 200})
+    restarted._get("some/path")
+    assert posts == [] and seen == ["tok-1"]                         # never tried to log in
+
+
+def test_saved_token_is_ignored_for_another_account_or_when_too_old():
+    from franklinwh_scraper import account
+
+    old = account.AccountClient("a@b.c", "pw")
+    old.session.post = lambda *a, **kw: _login_ok("tok-1")
+    old.login()
+
+    other = account.AccountClient("someone@else.com", "pw")           # different account
+    other.session.post = lambda *a, **kw: _login_ok("tok-other")
+    other.session.get = lambda url, **kw: _JsonResp({"code": 200})
+    other._get("p")
+    assert other._token == "tok-other"
+
+    data = json.loads(account._TOKEN_PATH.read_text())
+    data.update(email="a@b.c", saved_at=(datetime.now() - timedelta(days=10)).isoformat())
+    account._TOKEN_PATH.write_text(json.dumps(data))
+    stale = account.AccountClient("a@b.c", "pw")
+    stale.session.post = lambda *a, **kw: _login_ok("tok-new")
+    stale.session.get = lambda url, **kw: _JsonResp({"code": 200})
+    stale._get("p")
+    assert stale._token == "tok-new"                                  # >7 days old: not trusted
+
+
+def test_rejected_saved_token_is_replaced_by_a_fresh_login():
+    from franklinwh_scraper import account
+
+    seed = account.AccountClient("a@b.c", "pw")
+    seed.session.post = lambda *a, **kw: _login_ok("tok-1")
+    seed.login()
+
+    client = account.AccountClient("a@b.c", "pw")
+    client.session.post = lambda *a, **kw: _login_ok("tok-2")
+    replies = [_JsonResp({"code": 401, "message": "expired"}), _JsonResp({"code": 200})]
+    tokens = []
+    client.session.get = lambda url, **kw: tokens.append(kw["headers"]["loginToken"]) or replies.pop(0)
+    client._get("p")
+    assert tokens == ["tok-1", "tok-2"]                               # tried the saved one, then re-logged in
+    assert json.loads(account._TOKEN_PATH.read_text())["token"] == "tok-2"
+
+
+def test_token_cache_failures_never_break_login(caplog):
+    import logging
+
+    from franklinwh_scraper import account
+
+    account._TOKEN_PATH.write_text("{not json")                        # corrupt cache: ignored
+    client = account.AccountClient("a@b.c", "pw")
+    client.session.post = lambda *a, **kw: _login_ok("tok-secret-123")
+    client.session.get = lambda url, **kw: _JsonResp({"code": 200})
+    with caplog.at_level(logging.DEBUG):
+        client._get("p")
+        account._TOKEN_PATH = account._TOKEN_PATH / "no" / "such" / "dir"   # unwritable: login still works
+        again = account.AccountClient("a@b.c", "pw")
+        again.session.post = lambda *a, **kw: _login_ok("tok-secret-123")
+        assert again.login() == "tok-secret-123"
+    assert "tok-secret-123" not in caplog.text                        # the token is never logged

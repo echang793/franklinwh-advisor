@@ -9,9 +9,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 import zlib
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -19,6 +22,15 @@ import requests
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://energy.franklinwh.com/"
+
+# The login token is cached here so a restart doesn't need a fresh login. A
+# restart used to be the only thing that forced one (the token otherwise lasts
+# days), so when FranklinWH's login route started returning 502 on 2026-10-03,
+# a routine restart turned that into a polling outage even though the old
+# process's token was still valid. Home dir, owner-only: it's a credential and
+# must never end up in the repo. Failures here are never fatal.
+_TOKEN_PATH = Path.home() / ".franklinwh_token.json"
+_TOKEN_MAX_AGE = timedelta(days=7)   # beyond this, log in again rather than trust it
 
 
 def _safe_json(resp) -> dict:
@@ -145,11 +157,55 @@ class AccountClient:
             raise RuntimeError(f"Login failed, code {js.get('code')}: {js.get('message')}")
         self._token = js["result"]["token"]
         logger.info("Logged in as %s", self.email)
+        self._save_cached_token()
         return self._token
 
     def _ensure_token(self):
         if not self._token:
-            self.login()
+            cached = self._load_cached_token()
+            if cached:
+                self._token = cached
+            else:
+                self.login()
+
+    # -------------------------------------------------------------- #
+    # Token cache (best-effort — never raises, never logs the token)   #
+    # -------------------------------------------------------------- #
+
+    def _load_cached_token(self) -> str | None:
+        """A previously saved token for THIS account, if recent enough."""
+        try:
+            data = json.loads(_TOKEN_PATH.read_text())
+            if data.get("email") != self.email or not data.get("token"):
+                return None
+            age = datetime.now() - datetime.fromisoformat(data["saved_at"])
+            if age > _TOKEN_MAX_AGE or age < timedelta(0):
+                return None
+            logger.info("Reusing saved FranklinWH login token (saved %s ago)", str(age).split(".")[0])
+            return str(data["token"])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+
+    def _save_cached_token(self) -> None:
+        try:
+            payload = json.dumps({"email": self.email, "token": self._token,
+                                  "saved_at": datetime.now().isoformat()})
+            tmp = _TOKEN_PATH.with_name(_TOKEN_PATH.name + ".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(payload)
+            os.replace(tmp, _TOKEN_PATH)                   # atomic: readers never see a partial file
+        except OSError as e:
+            logger.warning("Couldn't save the login token cache (%s) — continuing without it", type(e).__name__)
+
+    def _forget_token(self) -> None:
+        """The server rejected our token: drop it from memory and disk so
+        neither this process nor a later restart reuses it."""
+        self._token = None
+        try:
+            _TOKEN_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     # -------------------------------------------------------------- #
     # HTTP helpers                                                     #
@@ -171,6 +227,7 @@ class AccountClient:
         if js.get("code") == 401:
             if _retried:
                 raise ConnectionError(f"Still unauthorized after re-login: {js.get('message')}")
+            self._forget_token()
             self.login()
             return self._get(path, params, _retried=True)
         if js.get("code") not in (200, None):
@@ -224,6 +281,7 @@ class AccountClient:
         if js.get("code") == 401:
             if _retried:
                 raise ConnectionError(f"Still unauthorized after re-login: {js.get('message')}")
+            self._forget_token()
             self.login()
             return self._mqtt_send(payload, gateway, _retried=True)
         if js.get("code") == 102:
