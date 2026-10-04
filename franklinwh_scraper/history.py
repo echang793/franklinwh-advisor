@@ -277,6 +277,27 @@ class HistoryStore:
         ).fetchall()
         return round(sum(s * hours for _dt, hours, _g, _h, s in integrate_intervals(rows)), 2)
 
+    def day_has_solar_coverage(self, date_str: str, end_hour: int = 17) -> bool:
+        """True if polling lasted through the solar day: some reading at or
+        after `end_hour`:00 (default 5 PM — solar is ~nil after that even in
+        December, when sunset is ~4:45 PM).
+
+        daily_solar_kwh_api's MAX(solar_total_kwh) equals the day's real
+        production only if the poller was still running when the cumulative
+        counter peaked. A mid-day hole is harmless (the counter still climbs
+        past it); a day whose readings simply stop in the morning (gateway or
+        advisor outage — 2026-09-16 ended at 08:27) reports a fraction of the
+        real total. Callers use this to avoid grading the forecast against
+        such a day. No readings at all counts as not covered.
+        """
+        row = self._conn.execute(
+            "SELECT MAX(timestamp) FROM readings WHERE timestamp >= ? AND timestamp < ?",
+            (date_str, _next_day(date_str)),
+        ).fetchone()
+        if not row or not row[0]:
+            return False
+        return datetime.fromisoformat(row[0]).hour >= end_hour
+
     _RESET_TOLERANCE_KWH = 0.05  # float noise floor when checking monotonicity
 
     def daily_solar_kwh_api(self, date_str: str) -> float:

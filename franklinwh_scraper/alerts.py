@@ -1031,6 +1031,17 @@ def _alert_morning_preview(
         yest_actual = store.daily_solar_kwh_api(yesterday)
         if yest_actual <= 0.0:
             yest_actual = store.daily_solar_kwh(yesterday)
+        # A day the poller stopped covering early (outage) reports a fraction
+        # of the real production; grading the forecast against it stores a
+        # ~0.03 daily_pr_ that the drift watchdog, weekly summary and
+        # `account accuracy` all average in (2026-09-16: 0.6 kWh "actual" vs
+        # 21.3 predicted). Treat it as no data. Pop the per-day stashes the
+        # normal path would have popped so they can't linger in state.
+        if not store.day_has_solar_coverage(yesterday):
+            logger.info("PR update skipped (%s): history doesn't cover the solar day", yesterday)
+            state.pop(f"predicted_cloudy_{yesterday}", None)
+            state.pop(f"perf_ratio_used_{yesterday}", None)
+            yest_pred = 0.0
         yesterday_ghi = state.get(f"predicted_avg_ghi_{yesterday}", 400.0)
         # Read back the post-override verdict the prediction actually used
         # (see _alert_morning_preview's own predicted_cloudy_ write, below) —

@@ -3351,6 +3351,7 @@ class _AttrStore:
     def weekly_readings(self, s, e): return self._readings
     def daily_attribution(self, d): return self._attr
     def soc_near(self, ts): return None
+    def day_has_solar_coverage(self, d, end_hour=17): return True
 
 
 def test_eod_digest_uses_measured_attribution_for_self_sufficiency():
@@ -4948,6 +4949,58 @@ def test_morning_preview_pr_calibration_undoes_yesterdays_correction():
     assert state[f"daily_pr_{yesterday}"] == 1.2                    # display: raw residual, unchanged
     assert state["perf_ratio_samples"] == [1.2 * 1.1]                # EWMA input: undone (true) ratio
     assert f"perf_ratio_used_{yesterday}" not in state                # cleaned up
+
+
+def _add_readings(db, date_str, times, solar_total=5.0):
+    for hhmm in times:
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"{date_str}T{hhmm}:00", 0, int(hhmm[:2]), 1.0, 0.0, 50.0, 1.0, "normal", solar_total, 0.0),
+        )
+    db._conn.commit()
+
+
+def test_day_has_solar_coverage_detects_a_day_that_stops_early(tmp_path):
+    """The API counter's MAX only equals the day's production if polling
+    lasted through the solar day. 2026-09-16 stopped at 08:27 (gateway
+    outage), so 'actual' was 0.6 kWh against ~21 predicted."""
+    db = HistoryStore(tmp_path / "h.db")
+    _add_readings(db, "2026-09-16", ["00:04", "04:00", "08:27"])
+    _add_readings(db, "2026-09-17", ["01:13", "12:00", "17:30", "23:55"])
+    # A mid-day hole is fine: the cumulative counter still reaches its peak.
+    _add_readings(db, "2026-09-22", ["00:04", "06:00", "16:59", "17:05", "23:58"])
+    assert db.day_has_solar_coverage("2026-09-16") is False
+    assert db.day_has_solar_coverage("2026-09-17") is True
+    assert db.day_has_solar_coverage("2026-09-22") is True
+    assert db.day_has_solar_coverage("2026-09-30") is False   # no readings at all
+
+
+def test_morning_preview_skips_daily_pr_when_yesterday_has_a_data_gap():
+    """Regression for the 2026-10-03 review: a data-gap day stored
+    daily_pr_ 0.029 (0.6 kWh 'actual' vs 21.3 predicted). The EWMA already
+    rejects it via _PR_MIN, but daily_pr_ also feeds the prediction-drift
+    watchdog, the weekly summary and `account accuracy`, which have no such
+    guard. A day the poller didn't cover isn't evidence about the forecast."""
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    state = {
+        f"predicted_kwh_{yesterday}": 21.3,
+        f"predicted_avg_ghi_{yesterday}": 500.0,
+    }
+    store = _AttrStore(attr=(0.0, 0.0, 0.0))
+    store.daily_solar_kwh_api = lambda d: 0.6
+    store.day_has_solar_coverage = lambda d: False
+
+    c = types.SimpleNamespace(battery_soc_pct=50.0, solar_production_kw=0.0)
+    alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+
+    assert f"daily_pr_{yesterday}" not in state
+    assert "perf_ratio_samples" not in state
 
 
 def test_morning_preview_pr_calibration_defaults_to_1_when_perf_ratio_used_missing():
