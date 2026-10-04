@@ -8597,3 +8597,98 @@ def test_token_cache_failures_never_break_login(caplog):
         again.session.post = lambda *a, **kw: _login_ok("tok-secret-123")
         assert again.login() == "tok-secret-123"
     assert "tok-secret-123" not in caplog.text                        # the token is never logged
+
+
+# ── poll timing (is FranklinWH's API slow during VPP events? 2026-10-03) ─
+
+def test_poll_timing_is_recorded_and_old_rows_pruned(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime(2026, 10, 4, 12, 0)
+    db.record_poll_timing(1.25, True, now=now - timedelta(days=100))      # older than the 90-day window
+    db.record_poll_timing(9.5, False, "502 Bad Gateway", now=now - timedelta(days=1))
+    db.record_poll_timing(0.8, True, now=now)
+    rows = db.poll_timing_since((now - timedelta(days=200)).isoformat())
+    assert [(r[1], r[2], r[3]) for r in rows] == [(9.5, 0, "502 Bad Gateway"), (0.8, 1, "")]   # the 100-day-old row is gone
+
+
+def test_vpp_events_are_stored_with_their_windows(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    db.record_vpp_event("2026-10-03T17:00:00", "2026-10-03T19:00:00")
+    assert db.vpp_events_since("2026-10-01T00:00:00") == [("2026-10-03T17:00:00", "2026-10-03T19:00:00")]
+    assert db.vpp_events_since("2026-10-04T00:00:00") == []
+
+
+def test_latency_summary_separates_slow_polls_from_failures():
+    from franklinwh_scraper import latency
+
+    rows = [("2026-10-03T12:00:00", d, 1, "") for d in (1.0, 1.0, 1.2, 1.1, 9.0)] + \
+           [("2026-10-03T12:30:00", 15.0, 0, "502 Bad Gateway")]
+    s = latency.summarize(rows)
+    assert s["n"] == 6 and s["failures"] == 1
+    assert s["median_s"] == pytest.approx(1.1)            # medians over successful polls only
+    assert s["max_s"] == pytest.approx(9.0)
+    assert latency.summarize([])["n"] == 0                 # empty input is fine, not a crash
+
+
+def test_latency_compares_event_windows_with_the_same_hours_on_other_days():
+    from franklinwh_scraper import latency
+
+    def day(d, secs, ok=1):
+        return [(f"2026-10-{d:02d}T{h:02d}:{m:02d}:00", secs, ok, "" if ok else "502")
+                for h in (17, 18) for m in range(0, 60, 5)]
+
+    rows = day(1, 1.0) + day(2, 1.1) + day(3, 6.0)          # 10/03 is slow
+    ev = [("2026-10-03T17:00:00", "2026-10-03T19:00:00")]
+    inside, outside = latency.compare_events(rows, ev)
+    assert inside["n"] == 24 and outside["n"] == 48         # the same 17:00-19:00 hours on the other days
+    assert inside["median_s"] == pytest.approx(6.0) and outside["median_s"] == pytest.approx(1.05)
+
+
+def test_account_latency_command_reports_hours_and_event_comparison(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    db = HistoryStore(tmp_path / "history.db")
+    today = datetime.now().replace(minute=0, second=0, microsecond=0)
+    for k in range(6):
+        db.record_poll_timing(1.0, True, now=today - timedelta(hours=3, minutes=5 * k))
+    for k in range(6):
+        db.record_poll_timing(12.0, k % 2 == 0, "" if k % 2 == 0 else "502 Bad Gateway",
+                              now=today - timedelta(hours=1, minutes=5 * k))
+    db.record_vpp_event((today - timedelta(hours=1, minutes=30)).isoformat(), today.isoformat())
+    db._conn.commit()
+    cfg = Config(output_dir=str(tmp_path))
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = CliRunner().invoke(cli_mod.cli, ["account", "latency", "--days", "2"])
+    assert res.exit_code == 0, res.output
+    assert "12 polls" in res.output and "3 failed" in res.output
+    assert "VPP event" in res.output and "12.0" in res.output       # slow inside the event window
+
+
+def test_recording_poll_timing_can_never_break_polling():
+    from franklinwh_scraper import cli as cli_mod
+
+    class _Broken:
+        def record_poll_timing(self, *a, **kw):
+            raise RuntimeError("database is locked")
+
+    cli_mod._record_poll_timing(_Broken(), time.monotonic(), True)        # must swallow it
+    cli_mod._record_poll_timing(None, time.monotonic(), False, "boom")    # even a missing store
+
+
+def test_vpp_event_command_keeps_the_window_for_latency_analysis(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    cfg = Config(output_dir=str(tmp_path), vpp_enrolled=True)
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = CliRunner().invoke(cli_mod.cli, ["vpp-event", "--start", "2026-10-05T17:00", "--end", "2026-10-05T19:00"])
+    assert res.exit_code == 0, res.output
+    with HistoryStore(tmp_path / "history.db") as db:
+        assert db.vpp_events_since("2026-10-01T00:00:00") == [("2026-10-05T17:00:00", "2026-10-05T19:00:00")]

@@ -46,6 +46,8 @@ from .doctor_checks import icloud_path_warning, launchd_health
 from .exporters import export_csv, export_json
 
 from .history import HistoryStore, integrate_intervals
+from .latency import (by_hour as latency_by_hour, compare_events as latency_compare_events,
+                      summarize as latency_summarize)
 from .logutil import rotate_known_logs
 from .license import ENFORCE_LICENSE, check_license
 from .notifier import (notify_email, notify_imessage, notify_log,
@@ -150,6 +152,15 @@ _STARTUP_NOTICE_MIN_GAP = timedelta(minutes=10)
 # Touch this file in the output dir right before a deliberate restart (deploy,
 # config change) and the next start stays quiet. One-shot; ignored if older
 # than the grace window so a restart that never happened can't mute a crash.
+def _record_poll_timing(history, started: float, ok: bool, error: str = "") -> None:
+    """Store how long this poll took (started = time.monotonic() at its start).
+    Diagnostics only — it must never be able to break polling."""
+    try:
+        history.record_poll_timing(time.monotonic() - started, ok, error)
+    except Exception:
+        logger.debug("Poll timing not recorded", exc_info=True)
+
+
 def _poll_error_alert_text(threshold: int, error: Exception) -> str:
     """The "N poll errors in a row" Telegram text. When it's FranklinWH's login
     route that is failing, say so and say not to restart: the running advisor
@@ -1312,6 +1323,13 @@ def vpp_event(ctx: click.Context, start: str, end: str, rate: float | None, clea
         state.pop("vpp_event_started_alerted", None)
         state.pop("vpp_event_ended_alerted", None)
         _save_peak_state(outdir, state)
+    # The state file only keeps the latest event; keep every window so
+    # `account latency` can compare API speed during events with other times.
+    try:
+        with HistoryStore(outdir / "history.db") as _db:
+            _db.record_vpp_event(start_dt.isoformat(), end_dt.isoformat())
+    except Exception:
+        logger.warning("Couldn't record the VPP event window for latency analysis", exc_info=True)
 
     rate_str = f" @ ${rate:.2f}/kWh" if rate else ""
     _ok(f"Logged VPP event: {start_dt.strftime('%-I:%M %p')} – {end_dt.strftime('%-I:%M %p')}{rate_str}")
@@ -2235,8 +2253,12 @@ def cmd_advise(
                         _warn(_lic.message)
                         _lic_msg = f"🔒 {_lic.message}"
                         _send_alert(_lic_msg, cfg, urgent=False)
+            _poll_t0 = time.monotonic()
+            _poll_timed = False
             try:
                 stats = client.get_stats(gateway)
+                _record_poll_timing(history, _poll_t0, True)
+                _poll_timed = True
                 _last_stats = stats
                 history.record(stats)
 
@@ -2358,6 +2380,8 @@ def cmd_advise(
 
             except Exception as e:
                 _consec_errors += 1
+                if not _poll_timed:
+                    _record_poll_timing(history, _poll_t0, False, f"{type(e).__name__}: {e}")
                 logger.exception("Watch loop error")
                 _err(str(e))
                 _write_health_marker(outdir, _consec_errors, str(e))
@@ -2650,6 +2674,54 @@ def cmd_ev_status(ctx: click.Context, out: str | None, live: bool,
                        f"{v.charger_max_amps} max")
         except Exception as e:
             click.echo(click.style(f" FAILED: {e}", fg="red"))
+    click.echo()
+
+
+@grp_account.command("latency")
+@click.option("--days", default=7, show_default=True, type=click.IntRange(1, 90),
+              help="Look back this many days.")
+@click.option("--out", "-o", default=None)
+@click.pass_context
+def cmd_latency(ctx: click.Context, days: int, out: str | None) -> None:
+    """How long FranklinWH API polls take, how many fail, and whether it's worse
+    during logged VPP events (compared with the same hours on other days).
+
+    Timing is recorded by the advisor on every poll (history.db, kept ~90
+    days) and event windows by `franklinwh vpp-event`.
+    """
+    cfg = ctx.obj["config"]
+    outdir = Path(out or cfg.output_dir)
+    since = (datetime.now() - timedelta(days=days)).isoformat()
+    with HistoryStore(outdir / "history.db") as db:
+        rows = db.poll_timing_since(since)
+        events = db.vpp_events_since(since)
+    if not rows:
+        raise click.ClickException("No poll timing recorded yet — the advisor records it on every poll from now on.")
+
+    def _fmt(sm: dict) -> str:
+        if sm["median_s"] is None:
+            return f"{sm['n']} polls, {sm['failures']} failed (no successful polls to time)"
+        return (f"{sm['n']} polls, {sm['failures']} failed · median {sm['median_s']:.1f}s · "
+                f"p95 {sm['p95_s']:.1f}s · max {sm['max_s']:.1f}s")
+
+    _header(f"FranklinWH API poll latency — last {days} day(s)")
+    _info(_fmt(latency_summarize(rows)))
+    click.echo()
+    click.echo(click.style("  Hour   Polls  Failed   Median     p95", bold=True))
+    _hr()
+    for hour, sm in latency_by_hour(rows).items():
+        med = f"{sm['median_s']:.1f}s" if sm["median_s"] is not None else "-"
+        p95 = f"{sm['p95_s']:.1f}s" if sm["p95_s"] is not None else "-"
+        click.echo(f"  {hour:02d}:00  {sm['n']:>5}  {sm['failures']:>6}  {med:>7}  {p95:>7}")
+    if events:
+        inside, outside = latency_compare_events(rows, events)
+        click.echo()
+        _info(f"During VPP event windows ({len(events)} event(s)): {_fmt(inside)}")
+        _info(f"Same hours, no event:               {_fmt(outside)}")
+        if inside["median_s"] and outside["median_s"] and inside["median_s"] >= 2 * outside["median_s"]:
+            _info("Polls were at least 2x slower during events — consistent with event load on the API.")
+        elif inside["n"] and outside["n"] and inside["failures"] / inside["n"] > 2 * (outside["failures"] / outside["n"]) + 0.02:
+            _info("More polls failed during events than at the same hours otherwise.")
     click.echo()
 
 

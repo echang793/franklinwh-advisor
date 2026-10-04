@@ -12,6 +12,8 @@
 
 **Login token cache.** The FranklinWH login token is saved to `~/.franklinwh_token.json` (owner-only, never in the repo) and reused after a restart, so a restart no longer depends on FranklinWH's login route being up (2026-10-03: it returned 502 for hours while the old process's token was still valid, and a routine restart turned that into a polling outage). It is ignored if it belongs to another account or is older than 7 days, and dropped when the API rejects it. To force a fresh login, delete the file and restart. If polling stops with `502 ... appUserOrInstallerLogin` and there's no saved token, FranklinWH's side is down: wait, don't keep restarting.
 
+**API latency.** Every poll's duration and outcome is stored in `history.db` (`poll_timing`, ~90 days) and `franklinwh vpp-event` keeps every event window. `franklinwh account latency [--days N]` shows median/p95/max and failures by hour of day, and compares polls during logged VPP events with the same hours on other days (added after the 2026-10-03 outage to test whether FranklinWH's API slows down during events; data starts 2026-10-04, so it needs a few events to say anything).
+
 ## Adding or moving to another machine
 
 1. Clone to `~/Projects/<repo>` (not Desktop/Documents), then `pip install -e .` — or run `./install.sh`.

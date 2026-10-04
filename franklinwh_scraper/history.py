@@ -35,6 +35,27 @@ CREATE TABLE IF NOT EXISTS readings (
 );
 CREATE INDEX IF NOT EXISTS idx_slot ON readings(day_of_week, hour_of_day);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON readings(timestamp);
+
+-- How long each FranklinWH API poll took and whether it worked. Added after the
+-- 2026-10-03 login-route outage, to tell whether the API slows down during VPP
+-- events. Kept ~90 days (see record_poll_timing).
+CREATE TABLE IF NOT EXISTS poll_timing (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp  TEXT    NOT NULL,
+    duration_s REAL    NOT NULL,
+    ok         INTEGER NOT NULL,
+    error      TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_poll_timing_ts ON poll_timing(timestamp);
+
+-- Every VPP event window logged with `franklinwh vpp-event` (the advisor's state
+-- file only keeps the latest one), so latency can be compared against them later.
+CREATE TABLE IF NOT EXISTS vpp_events (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    start     TEXT NOT NULL,
+    "end"     TEXT NOT NULL,
+    logged_at TEXT NOT NULL
+);
 """
 
 # Per-column migrations for pre-existing DBs. Each runs in its own try/except
@@ -131,6 +152,36 @@ class HistoryStore:
         self._conn = conn
 
     # ---------------------------------------------------------------- #
+
+    _POLL_TIMING_KEEP = timedelta(days=90)
+
+    def record_poll_timing(self, duration_s: float, ok: bool, error: str = "",
+                           now: datetime | None = None) -> None:
+        """One row per poll: seconds taken, success, and a short error if it failed.
+        Rows older than 90 days are dropped here, so the table can't grow unbounded."""
+        now = now or datetime.now()
+        self._conn.execute(
+            "INSERT INTO poll_timing (timestamp, duration_s, ok, error) VALUES (?,?,?,?)",
+            (now.isoformat(), float(duration_s), 1 if ok else 0, (error or "")[:200]),
+        )
+        self._conn.execute("DELETE FROM poll_timing WHERE timestamp < ?",
+                           ((now - self._POLL_TIMING_KEEP).isoformat(),))
+        self._conn.commit()
+
+    def poll_timing_since(self, since_iso: str) -> list[tuple[str, float, int, str]]:
+        return [(r[0], float(r[1]), int(r[2]), r[3]) for r in self._conn.execute(
+            "SELECT timestamp, duration_s, ok, error FROM poll_timing WHERE timestamp >= ? ORDER BY timestamp",
+            (since_iso,),
+        ).fetchall()]
+
+    def record_vpp_event(self, start_iso: str, end_iso: str) -> None:
+        self._conn.execute('INSERT INTO vpp_events (start, "end", logged_at) VALUES (?,?,?)',
+                           (start_iso, end_iso, datetime.now().isoformat()))
+        self._conn.commit()
+
+    def vpp_events_since(self, since_iso: str) -> list[tuple[str, str]]:
+        return [(r[0], r[1]) for r in self._conn.execute(
+            'SELECT start, "end" FROM vpp_events WHERE "end" >= ? ORDER BY start', (since_iso,)).fetchall()]
 
     def record(self, stats: Stats) -> None:
         now = datetime.now()
