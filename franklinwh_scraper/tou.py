@@ -49,17 +49,22 @@ _SUMMER_MONTHS = {6, 7, 8, 9, 10}  # June–October
 #   on-peak = off-peak: 0.31218 (UDC) + 0.00591 (WF-NBC/DWR-BC) = 0.31809
 #   super-off-peak:     0.04114 (UDC) + 0.00591 (WF-NBC/DWR-BC) = 0.04705
 #
-# Generation (SDCP EV-TOU-5, PowerBase). Summer is taken directly from the
-# customer's Aug 19 - Sep 17 2026 SDCP itemization (0.38242 / 0.11828 /
-# 0.0368). Winter is taken from the customer's Dec 18 2025 - Jan 19 2026
-# bill (2026-09-27) — that bill's cycle straddled a rate change (day 15),
-# so it printed two full sets of Generation ... Winter lines; these are the
-# second (post-Jan-1, still in-effect) set. They replaced SDCP's "published
-# 1/1/2026 table" this comment used to cite, which the real bill showed was
-# ~8-15% low across all three periods (stale/wrong source, not a mid-year
-# revision) — refresh again from a fresher winter bill when one is available.
+# Generation (SDCP EV-TOU-5, 2021 vintage, PowerBase tier), from SDCP's
+# published table (sdcommunitypower.org/residential-rates/2021v, effective
+# May 1, 2026; checked 2026-10-03). The customer's Aug 19 - Sep 17 2026 bill
+# names PowerBase and its summer lines equal this table to the digit, so the
+# published PowerBase column is trustworthy for this account.
 #   summer: on-peak 0.38242, off-peak 0.11828, super-off-peak 0.0368
-#   winter: on-peak 0.15438, off-peak 0.10067, super-off-peak 0.03485
+#   winter: on-peak 0.14210, off-peak 0.09183, super-off-peak 0.03024
+#
+# History/gotcha: on 9/27 winter was changed to 0.15438/0.10067/0.03485 taken
+# from the Dec 2025 - Jan 2026 bill, concluding the published table was 8-15%
+# low. Wrong: that bill's rates are SDCP's PowerOn column (the more expensive
+# tier; the bill's CCA line names no tier, unlike the Sep bill's "PowerBase"),
+# so it compared two different products. The earlier 0.14237/0.09205/0.03039
+# was the right tier. Winter PowerOn today: 0.15409/0.10044/0.03469.
+# Lesson: before replacing a published rate with a bill's, check the bill's
+# tier name (PowerBase vs PowerOn vs Power100).
 #
 # PCIA (Power Charge Indifference Adjustment, CCA 2021 vintage — the
 # tariff's published rate for that vintage moved slightly too, 0.03564 to
@@ -92,9 +97,9 @@ _GEN_DEFAULT = {
         TouPeriod.ON_PEAK:        0.38242,
     },
     "winter": {
-        TouPeriod.SUPER_OFF_PEAK: 0.03485,
-        TouPeriod.OFF_PEAK:       0.10067,
-        TouPeriod.ON_PEAK:        0.15438,
+        TouPeriod.SUPER_OFF_PEAK: 0.03024,
+        TouPeriod.OFF_PEAK:       0.09183,
+        TouPeriod.ON_PEAK:        0.14210,
     },
 }
 
@@ -409,24 +414,25 @@ def rate_at(dt: datetime) -> float:
 # 0.26328.
 #   every period, every season: 0.25957 (UDC) + 0.00591 (WF-NBC/DWR-BC) = 0.26548
 #
-# Generation (SDCP DR-SES, PowerBase column, SDCP's published 1/1/2026
-# table — SDCP's small mid-year update isn't itemized for DR-SES on any
-# bill, so this is not refreshed the way EV-TOU-5's summer column is):
-#   summer: on-peak 0.38856, off-peak 0.12411, super-off-peak 0.04254
-#   winter: on-peak 0.14795, off-peak 0.09763, super-off-peak 0.03597
+# Generation (SDCP DR-SES, 2021 vintage PowerBase): SDCP publishes DR-SES
+# with exactly the same generation rates as EV-TOU-5 (see _GEN_DEFAULT; its
+# 2021v page, checked 2026-10-03), so this mirrors them. Until 2026-10-03 this
+# table held 0.38856/0.12411/0.04254 (summer) and 0.14795/0.09763/0.03597
+# (winter) — those are the 2022 VINTAGE PowerBase rates, the wrong vintage for
+# this account (2021 vintage on the bill).
 #
 # Same PCIA adder as EV-TOU-5 (_PCIA_NET_ADDER) so the two plans stay
 # comparable — see that comment.
 _DRSES_GEN = {
     "summer": {
-        TouPeriod.SUPER_OFF_PEAK: 0.04254,
-        TouPeriod.OFF_PEAK:       0.12411,
-        TouPeriod.ON_PEAK:        0.38856,
+        TouPeriod.SUPER_OFF_PEAK: 0.0368,
+        TouPeriod.OFF_PEAK:       0.11828,
+        TouPeriod.ON_PEAK:        0.38242,
     },
     "winter": {
-        TouPeriod.SUPER_OFF_PEAK: 0.03597,
-        TouPeriod.OFF_PEAK:       0.09763,
-        TouPeriod.ON_PEAK:        0.14795,
+        TouPeriod.SUPER_OFF_PEAK: 0.03024,
+        TouPeriod.OFF_PEAK:       0.09183,
+        TouPeriod.ON_PEAK:        0.14210,
     },
 }
 _DRSES_DELIVERY = 0.25957 + 0.00591

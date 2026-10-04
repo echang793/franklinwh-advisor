@@ -8,7 +8,7 @@
 | FranklinWH Dashboard (web UI, :8093) | `~/Projects/franklinwh` | `~/Library/Logs/franklinwh-dashboard.log` | LaunchAgent `com.franklinwh.dashboard` |
 | CMR News Bot | `~/Projects/cmr-news` | `bot.log` in the repo | LaunchAgent `com.cmrnews.bot` |
 
-**One host only.** The advisor and both bots must run on exactly one machine (currently the Mac mini, `run_on_host: Mac-mini` in `~/.franklinwh.json`). Two copies double every alert and fight over the Telegram token. Keep repos under `~/Projects`, **not** `~/Desktop` / `~/Documents` (iCloud sync locks files — see incidents below). `franklinwh doctor` checks the host guard, the iCloud path and both LaunchAgents. Logs rotate at 5 MB (3 copies kept) from inside the advisor loop.
+**One host only.** The advisor and both bots must run on exactly one machine (currently the Mac mini, `run_on_host: Erics-Mini` in `~/.franklinwh.json` — this is the hostname, not the friendly "Eric's Mini" name shown in System Settings; if you ever rename the Mac there, its hostname changes too and `run_on_host` must be updated to match, or the guard thinks it's the wrong host and stands down — this happened 2026-09-30, a silent no-op outage from a restart until caught). Two copies double every alert and fight over the Telegram token. Keep repos under `~/Projects`, **not** `~/Desktop` / `~/Documents` (iCloud sync locks files — see incidents below). `franklinwh doctor` checks the host guard, the iCloud path and both LaunchAgents. Logs rotate at 5 MB (3 copies kept) from inside the advisor loop.
 
 ## Adding or moving to another machine
 

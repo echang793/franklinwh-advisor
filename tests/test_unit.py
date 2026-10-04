@@ -3855,13 +3855,30 @@ def test_ev_tou_5_summer_rates_are_current_delivery_plus_sdcp_generation():
     assert abs(tou.rate_at(datetime(2026, 9, 2, 3, 0)) - (0.0368 + 0.04114 + 0.00591 + adder)) < 1e-9
 
 
+def test_generation_defaults_are_sdcp_2021v_powerbase():
+    """Regression: pinned to SDCP's published 2021V EV-TOU-5 / DR-SES PowerBase
+    rates (sdcommunitypower.org/residential-rates/2021v, effective May 1,
+    2026). The Sep 2026 bill confirms the customer is on PowerBase (summer
+    matches to the digit). Two earlier mistakes this guards against: winter
+    was set from the Jan 2026 bill, whose rates were PowerOn-tier (~8% high),
+    and DR-SES generation was copied from the 2022V table (wrong vintage).
+    SDCP maps DR-SES and EV-TOU-5 to identical generation rates."""
+    P = tou.TouPeriod
+    expect = {
+        "summer": {P.ON_PEAK: 0.38242, P.OFF_PEAK: 0.11828, P.SUPER_OFF_PEAK: 0.0368},
+        "winter": {P.ON_PEAK: 0.14210, P.OFF_PEAK: 0.09183, P.SUPER_OFF_PEAK: 0.03024},
+    }
+    assert tou._GEN_DEFAULT == expect
+    assert tou._DRSES_GEN == expect
+
+
 def test_drses_delivery_uses_8_1_2026_udc():
     """DR-SES 8/1/2026: UDC 0.25957 flat + WF-NBC/DWR-BC 0.00591. Kept
     current so compare_rate_plans doesn't favour whichever plan's table is
     staler."""
     adder = tou._PCIA_NET_ADDER
     dt = datetime(2026, 9, 2, 17, 0)  # weekday on-peak
-    assert abs(tou.drses_rate_at(dt) - (0.38856 + 0.25957 + 0.00591 + adder)) < 1e-9
+    assert abs(tou.drses_rate_at(dt) - (0.38242 + 0.25957 + 0.00591 + adder)) < 1e-9
 
 
 def test_base_service_matches_sep_2026_bill():
@@ -6357,8 +6374,8 @@ def test_drses_rate_at_on_peak_matches_verified_table():
     """Pinned against the real unbundled DR-SES numbers (SDG&E 8/1/2026
     delivery 0.26548 + SDCP generation + PCIA adder) — catches an accidental
     edit to the hardcoded schedule."""
-    assert tou.drses_rate_at(datetime(2026, 7, 8, 17)) == pytest.approx(0.38856 + 0.26548 + tou._PCIA_NET_ADDER)
-    assert tou.drses_rate_at(datetime(2026, 1, 8, 17)) == pytest.approx(0.14795 + 0.26548 + tou._PCIA_NET_ADDER)
+    assert tou.drses_rate_at(datetime(2026, 7, 8, 17)) == pytest.approx(0.38242 + 0.26548 + tou._PCIA_NET_ADDER)
+    assert tou.drses_rate_at(datetime(2026, 1, 8, 17)) == pytest.approx(0.14210 + 0.26548 + tou._PCIA_NET_ADDER)
 
 
 def test_compare_rate_plans_prices_each_period_on_current_tables():
@@ -7353,7 +7370,7 @@ def test_learned_import_overrides_generation_rates_adder_and_base():
                             "pcia_adder": 0.02, "base_daily": 0.9})
     assert tou.rate_at(dt_summer_sop) == pytest.approx(0.05 + 0.04705 + 0.02)
     assert tou.rate_at(datetime(2026, 9, 2, 17, 0)) == pytest.approx(0.40 + 0.31809 + 0.02)
-    assert tou.rate_at(datetime(2026, 1, 6, 3, 0)) == pytest.approx(0.03485 + 0.04705 + 0.02)  # winter gen untouched, adder shared
+    assert tou.rate_at(datetime(2026, 1, 6, 3, 0)) == pytest.approx(0.03024 + 0.04705 + 0.02)  # winter gen untouched, adder shared
     assert tou.base_service_cost(10) == pytest.approx(9.0)
     tou.set_learned_import(None)
     assert tou.rate_at(dt_summer_sop) == pytest.approx(default) and tou.base_service_cost(10) == pytest.approx(8.12)
