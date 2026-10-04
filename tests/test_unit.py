@@ -8177,3 +8177,150 @@ def test_multiday_cloudy_alert_silent_when_day_after_forecast_missing():
     # for, and this test would flake independent of the code under test.
     now = datetime.now(timezone.utc).replace(tzinfo=None, hour=8, minute=0)
     assert alerts._alert_multiday_cloudy_precharge(state, "x", now, c, outlook, _C()) is None
+
+
+# ── chatbot tool use (idea 2 of the 2026-10-03 monthly review) ─────────
+
+def _seed_chat_day(db, date_str):
+    """A short synthetic day: solar midday, import evening, SoC falling."""
+    rows = [("06:00", 0.0, 0.4, 0.0, 50.0, 0.0), ("12:00", 3.0, 1.0, -2.0, 70.0, -1.5),
+            ("18:00", 0.0, 1.0, 0.8, 60.0, 0.2), ("23:00", 0.0, 0.5, 0.5, 40.0, 0.0)]
+    for i, (hhmm, solar, load, grid, soc, batt) in enumerate(rows):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,solar_kw,battery_soc,"
+            "grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"{date_str}T{hhmm}:00", 0, int(hhmm[:2]), load, solar, soc, grid, "normal", 12.5 * (i + 1) / 4, batt))
+    db._conn.commit()
+
+
+def test_chat_tool_daily_summary_reports_a_past_day(tmp_path):
+    import math
+
+    from franklinwh_scraper import chat_tools
+
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_chat_day(db, "2026-09-30")
+    out = chat_tools.run_tool(db, "daily_summary", {"date": "2026-09-30"}, now=datetime(2026, 10, 3, 9, 0))
+    assert out["date"] == "2026-09-30" and out["readings"] == 4
+    assert out["solar_kwh"] == pytest.approx(12.5)                 # the API counter's end-of-day value
+    assert out["grid_import_kwh"] > 0 and out["grid_export_kwh"] > 0
+    assert set(out) >= {"home_use_kwh", "battery_charged_kwh", "battery_discharged_kwh",
+                        "import_cost_usd", "export_credit_usd", "covers_solar_day"}
+    assert all(math.isfinite(v) for v in out.values() if isinstance(v, float))   # JSON-safe
+
+
+def test_chat_tool_daily_summary_counts_only_that_day(tmp_path):
+    """Regression (found smoke-testing against the real DB: 9/30 reported 571
+    readings and double the home use): weekly_readings' end date is
+    inclusive, so passing the next day pulled it in too."""
+    from franklinwh_scraper import chat_tools
+
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_chat_day(db, "2026-09-30")
+    _seed_chat_day(db, "2026-10-01")
+    one = chat_tools.run_tool(db, "daily_summary", {"date": "2026-09-30"}, now=datetime(2026, 10, 3))
+    assert one["readings"] == 4
+    both = db.weekly_readings("2026-09-30", "2026-10-01")
+    assert len(both) == 8 and one["home_use_kwh"] < chat_tools.run_tool(
+        db, "daily_summary", {"date": "2026-10-01"}, now=datetime(2026, 10, 3))["home_use_kwh"] * 1.5
+
+
+def test_chat_tool_rejects_bad_input_instead_of_raising(tmp_path):
+    from franklinwh_scraper import chat_tools
+
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime(2026, 10, 3, 9, 0)
+    assert "error" in chat_tools.run_tool(db, "daily_summary", {"date": "last tuesday"}, now=now)
+    assert "error" in chat_tools.run_tool(db, "daily_summary", {"date": "2026-10-04"}, now=now)   # future
+    assert "error" in chat_tools.run_tool(db, "daily_summary", {"date": "2026-09-01"}, now=now)   # no data
+    assert "error" in chat_tools.run_tool(db, "daily_summary", {}, now=now)
+    assert "error" in chat_tools.run_tool(db, "drop_table", {"name": "readings"}, now=now)        # unknown tool
+    assert "error" in chat_tools.run_tool(None, "daily_summary", {"date": "2026-09-30"}, now=now)  # no store
+
+
+def test_chat_tool_soc_at_finds_the_nearest_reading(tmp_path):
+    from franklinwh_scraper import chat_tools
+
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_chat_day(db, "2026-09-30")
+    out = chat_tools.run_tool(db, "soc_at", {"timestamp": "2026-09-30 12:10"}, now=datetime(2026, 10, 3))
+    assert out == {"timestamp": "2026-09-30T12:10:00", "soc_pct": 70.0}
+    assert "error" in chat_tools.run_tool(db, "soc_at", {"timestamp": "2026-09-30T03:00"}, now=datetime(2026, 10, 3))
+    assert "error" in chat_tools.run_tool(db, "soc_at", {"timestamp": "nonsense"}, now=datetime(2026, 10, 3))
+
+
+class _FakeBlock:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class _FakeAnthropic:
+    """Scripted stand-in for anthropic.Anthropic: replays `script` responses."""
+    last = None
+
+    def __init__(self, script):
+        self.script, self.calls = list(script), []
+        _FakeAnthropic.last = self
+        self.messages = self
+
+    def create(self, **kw):
+        import copy
+        self.calls.append(copy.deepcopy({k: v for k, v in kw.items() if k != "messages"}) | {"messages": list(kw["messages"])})
+        return self.script.pop(0) if len(self.script) > 1 else self.script[0]
+
+
+def _chat_bot_with_script(monkeypatch, tmp_path, script):
+    import sys
+    import types
+
+    fake = types.ModuleType("anthropic")
+    fake.Anthropic = lambda api_key=None: _FakeAnthropic(script)
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+    bot = TelegramChatBot(Config(), api_key="x")
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_chat_day(db, "2026-09-30")
+    bot._hist_store = db
+    return bot
+
+
+def _tool_use(day="2026-09-30", name="daily_summary", tid="t1"):
+    return _FakeBlock(type="tool_use", id=tid, name=name, input={"date": day})
+
+
+def test_chatbot_answers_a_history_question_through_a_tool_call(monkeypatch, tmp_path):
+    import json as _json
+
+    script = [
+        _FakeBlock(stop_reason="tool_use", content=[_tool_use()]),
+        _FakeBlock(stop_reason="end_turn", content=[_FakeBlock(type="text", text="You made 12.5 kWh of solar.")]),
+    ]
+    bot = _chat_bot_with_script(monkeypatch, tmp_path, script)
+    reply = bot._call_claude("c1", "how much solar on sept 30?", "ctx")
+    assert reply == "You made 12.5 kWh of solar."
+    calls = _FakeAnthropic.last.calls
+    assert len(calls) == 2 and all("tools" in c for c in calls)
+    assert {t["name"] for t in calls[0]["tools"]} == {"daily_summary", "soc_at"}
+    # the second request carries the tool result back, as JSON
+    result_msg = calls[1]["messages"][-1]
+    assert result_msg["role"] == "user" and result_msg["content"][0]["type"] == "tool_result"
+    assert result_msg["content"][0]["tool_use_id"] == "t1"
+    assert _json.loads(result_msg["content"][0]["content"])["solar_kwh"] == pytest.approx(12.5)
+    # stored conversation keeps plain text turns only (no tool blocks)
+    assert [type(m["content"]) for m in bot._convos["c1"]] == [str, str]
+    assert bot._convos["c1"][-1] == {"role": "assistant", "content": "You made 12.5 kWh of solar."}
+
+
+def test_chatbot_tool_loop_is_bounded(monkeypatch, tmp_path):
+    script = [_FakeBlock(stop_reason="tool_use", content=[_tool_use()])]   # never stops asking
+    bot = _chat_bot_with_script(monkeypatch, tmp_path, script)
+    reply = bot._call_claude("c1", "q", "ctx")
+    assert len(_FakeAnthropic.last.calls) <= 5          # a few rounds, then it gives up
+    assert "couldn't" in reply.lower()
+
+
+def test_chatbot_without_history_store_sends_no_tools(monkeypatch, tmp_path):
+    script = [_FakeBlock(stop_reason="end_turn", content=[_FakeBlock(type="text", text="ok")])]
+    bot = _chat_bot_with_script(monkeypatch, tmp_path, script)
+    bot._hist_store = None
+    assert bot._call_claude("c1", "q", "ctx") == "ok"
+    assert "tools" not in _FakeAnthropic.last.calls[0]

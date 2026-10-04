@@ -60,6 +60,10 @@ Battery modes:
   Emergency Backup  – charges battery from grid (good before on-peak)
   Time-of-Use       – charges off-peak, discharges on-peak
 
+The data block below describes right now only. For anything about a past day or \
+moment, call the history tools (daily_summary, soc_at) instead of guessing; if a tool \
+returns an error or covers_solar_day is false, say the data is missing or incomplete.
+
 Answer in 1-3 short sentences, Telegram-message length. No preamble, no restating \
 the question, no bullet lists unless the user asks for a breakdown. Give the direct \
 answer first. Use the system data block at the start of each message.
@@ -773,6 +777,10 @@ class TelegramChatBot:
             logger.warning("Chatbot handle error: %s", e)
             self._send(chat_id, f"Error: {e}")
 
+    # Tool-use rounds Claude may take per question (history lookups). A bounded
+    # loop: it can't spin, and each extra round counts against the daily cap.
+    _MAX_TOOL_ROUNDS = 3
+
     def _call_claude(self, chat_id: str, question: str, context: str) -> str:
         # Locked read-modify-write: each incoming message runs on its own
         # thread, and an unlocked snapshot-then-write-back here let two
@@ -780,21 +788,47 @@ class TelegramChatBot:
         # starting history and then last-writer-wins on the save, silently
         # dropping one message's turn from the conversation.
         import anthropic
+
+        from .chat_tools import TOOLS, run_tool
+
         client = anthropic.Anthropic(api_key=self._api_key)
+        with self._lock:
+            store = self._hist_store
         with self._convo_lock:
             history = list(self._convos.get(chat_id, []))
 
-            history.append({"role": "user", "content": f"{context}\n\nQuestion: {question}"})
-            resp = client.messages.create(
-                model=_MODEL,
-                max_tokens=200,
-                system=_SYSTEM_PROMPT,
-                messages=history,
-            )
-            reply = resp.content[0].text
-            history.append({"role": "assistant", "content": reply})
+            user_turn = {
+                "role": "user",
+                "content": f"Today is {datetime.now():%A, %Y-%m-%d}.\n\n{context}\n\nQuestion: {question}",
+            }
+            history.append(user_turn)
+            # Tool turns live only in this local list; the saved conversation
+            # keeps plain text turns so it stays small and replayable.
+            messages = list(history)
+            kwargs = {"model": _MODEL, "max_tokens": 300, "system": _SYSTEM_PROMPT}
+            if store is not None:
+                kwargs["tools"] = TOOLS
+
+            reply = None
+            for round_no in range(self._MAX_TOOL_ROUNDS + 1):
+                if round_no and not self._under_daily_cap():
+                    reply = f"Daily question limit ({_DAILY_CALL_CAP}) reached — try again tomorrow."
+                    break
+                resp = client.messages.create(messages=messages, **kwargs)
+                if resp.stop_reason != "tool_use":
+                    reply = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+                    break
+                messages.append({"role": "assistant", "content": resp.content})
+                messages.append({"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": b.id,
+                     "content": json.dumps(run_tool(store, b.name, b.input))}
+                    for b in resp.content if getattr(b, "type", "") == "tool_use"
+                ]})
+            if reply is None:
+                reply = "I couldn't finish looking that up — try asking about a specific date."
+            history.append({"role": "assistant", "content": reply or "(no answer)"})
             self._convos[chat_id] = history[-(_MAX_TURNS * 2):]
-        return reply
+        return reply or "(no answer)"
 
     def _call_ollama(self, chat_id: str, question: str, context: str) -> str:
         with self._convo_lock:
