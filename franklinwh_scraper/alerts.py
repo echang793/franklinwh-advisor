@@ -240,6 +240,72 @@ def _alert_vpp_event_started(state: dict, today: str, now: datetime, cfg: Config
     )
 
 
+# The battery's observed discharge cap during VPP events (5.0 kW flat on every
+# logged event), and the charge it won't go below (matches ev_charge_floor_soc's
+# 10% default). Together they give the SoC a window needs at its start.
+_VPP_DISCHARGE_KW = 5.0
+_VPP_RESERVE_PCT = 10.0
+_VPP_PREP_HORIZON = timedelta(hours=36)     # don't prep an event days away
+_VPP_REMINDER_LEAD = timedelta(minutes=90)  # one reminder this close to the start
+
+
+def _alert_vpp_event_prep(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
+    """Before a logged event: how much charge the window needs, what you have,
+    and what closing a gap would cost. Sent once when the event is first seen,
+    plus one reminder ~90 min before the start if still short.
+
+    Added after 2026-10-03, when a 2 h event needed ~95% SoC at 5 PM and the
+    only way to know was working it out by hand. A full-rate window is
+    hours x 5 kW of the battery's capacity plus the reserve it won't go below;
+    solar still to come isn't counted, so 'short' can be an over-estimate on a
+    sunny morning.
+    """
+    if not getattr(cfg, "vpp_enrolled", False):
+        return None
+    ev = _get_vpp_event(state, now)
+    if ev is None or now >= ev["start"] or ev["start"] - now > _VPP_PREP_HORIZON:
+        return None
+    cap = getattr(cfg, "battery_capacity_kwh", 13.6) or 13.6
+    hours = max(0.0, (ev["end"] - ev["start"]).total_seconds() / 3600)
+    need_kwh = hours * _VPP_DISCHARGE_KW
+    need_pct = min(100.0, _VPP_RESERVE_PCT + need_kwh / cap * 100)
+    soc = c.battery_soc_pct
+    short_pct = need_pct - soc
+    start_str = ev["start"].strftime("%-I:%M %p")
+    window = f"{start_str} – {ev['end'].strftime('%-I:%M %p')}"
+    start_key = ev["start"].isoformat()
+
+    if state.get("vpp_prep_sent") != start_key:
+        state["vpp_prep_sent"] = start_key
+        if short_pct <= 0:
+            return (
+                f"🔋 <b>FranklinWH: VPP event {window} — battery covered</b>\n"
+                f"A full {hours:g} h discharge at ~{_VPP_DISCHARGE_KW:g} kW needs ~{need_pct:.0f}% at the start; "
+                f"you're at {soc:.0f}%."
+            )
+        short_kwh = short_pct / 100 * cap
+        rate = rate_at(now)
+        deadline = cheap_charge_deadline(now)
+        cheap = (f" Super-off-peak ends {deadline.strftime('%-I %p')} today." if deadline is not None else "")
+        return (
+            f"🔋 <b>FranklinWH: VPP event {window} — battery short</b>\n"
+            f"A full {hours:g} h discharge at ~{_VPP_DISCHARGE_KW:g} kW needs ~{need_pct:.0f}% at the start; "
+            f"you're at {soc:.0f}% — about {short_pct:.0f}% (~{short_kwh:.1f} kWh) short. "
+            f"Closing it from the grid at the current ${rate:.2f}/kWh ≈ ${short_kwh * rate:.2f}.{cheap} "
+            f"Solar between now and then isn't counted. Turn Emergency Backup off before {start_str}."
+        )
+
+    if (ev["start"] - now <= _VPP_REMINDER_LEAD and short_pct > 5
+            and state.get("vpp_prep_reminded") != start_key):
+        state["vpp_prep_reminded"] = start_key
+        mins = int((ev["start"] - now).total_seconds() // 60)
+        return (
+            f"⏰ <b>FranklinWH: VPP event starts in {mins} min</b>\n"
+            f"Battery is at {soc:.0f}%; a full {hours:g} h window needs ~{need_pct:.0f}%."
+        )
+    return None
+
+
 # The advisor polls every ~5 min. A hole in the event window bigger than a few
 # cycles means it wasn't running or couldn't log in, and totals computed from
 # what's left are lower bounds, not the event's real numbers.
@@ -344,7 +410,9 @@ def _alert_vpp_event_ended(state: dict, today: str, now: datetime, cfg: Config, 
         f"✅ <b>FranklinWH: VPP event ended</b>\n"
         f"{start.strftime('%-I:%M %p')} – {end.strftime('%-I:%M %p')}: "
         f"~{export_kwh:.1f} kWh exported, ~{discharge_kwh:.1f} kWh discharged{payout_str}\n"
-        f"(not sure which metric your program pays on — showing both. DSGS pays annually via gift card, not per event.)"
+        f"DSGS counts battery <b>discharge</b> (net of your usual use at that hour, baseline-adjusted), whether it "
+        f"ran the house or went to the grid — so the discharged figure is the one that matters. "
+        f"It pays annually via gift card, not per event."
     )
 
 
@@ -538,17 +606,23 @@ def _log_alert(body: str, cfg: Config, urgent: bool, alert_name: str | None = No
         logger.debug("Alert log write failed: %s", e)
 
 
-def _ping_healthcheck(cfg: Config) -> None:
-    """Ping the uptime monitor (e.g. healthchecks.io) after a healthy cycle.
+def _ping_healthcheck(cfg: Config, failing: bool = False) -> None:
+    """Ping the uptime monitor (e.g. healthchecks.io) after a cycle.
 
     Fire-and-forget — if pings stop, the monitor alerts the user that the
-    advisor has gone down. Never raises.
+    advisor has gone down. `failing=True` pings `<url>/fail` instead, which
+    marks the check down at once: used while polling has failed past the
+    error threshold, because the loop being alive isn't the same as the
+    FranklinWH poll working (2026-10-03: 3.4 h without data and the check
+    stayed green). It must be sent every failing cycle, not once, or the next
+    plain ping flips the check back up. Never raises.
     """
     if not cfg.healthcheck_url:
         return
+    url = cfg.healthcheck_url.rstrip("/") + ("/fail" if failing else "")
     try:
         import requests as _rq
-        _rq.get(cfg.healthcheck_url, timeout=5)
+        _rq.get(url, timeout=5)
     except Exception as e:
         logger.debug("Healthcheck ping failed: %s", e)
 
@@ -3940,6 +4014,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),
+            ("vpp_event_prep",       lambda: _alert_vpp_event_prep(state, today, now, c, cfg)),
             ("vpp_event_started",    lambda: _alert_vpp_event_started(state, today, now, cfg)),
             ("vpp_event_ended",      lambda: _alert_vpp_event_ended(state, today, now, cfg, store)),
         ]

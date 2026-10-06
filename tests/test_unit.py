@@ -8692,3 +8692,103 @@ def test_vpp_event_command_keeps_the_window_for_latency_analysis(tmp_path):
     assert res.exit_code == 0, res.output
     with HistoryStore(tmp_path / "history.db") as db:
         assert db.vpp_events_since("2026-10-01T00:00:00") == [("2026-10-05T17:00:00", "2026-10-05T19:00:00")]
+
+
+# ── VPP: pre-event prep alert + accurate event-end wording ────────────────
+
+def _prep_state(start="2026-10-06T17:00:00", end="2026-10-06T19:00:00"):
+    return {"vpp_event": {"start": start, "end": end, "rate_per_kwh": None, "logged_at": "2026-10-06T08:00:00"}}
+
+
+def _prep(state, now, soc, **cfg_kw):
+    import types
+
+    from franklinwh_scraper.config import Config as _C
+
+    return alerts._alert_vpp_event_prep(state, "2026-10-06", now,
+                                        types.SimpleNamespace(battery_soc_pct=soc),
+                                        _C(vpp_enrolled=True, battery_capacity_kwh=13.6, **cfg_kw))
+
+
+def test_vpp_prep_says_how_much_charge_the_window_needs_and_what_you_are_short():
+    """2026-10-03: the event needed ~95% SoC at 5 PM and nothing told me until
+    I worked it out by hand. A 2 h window at the ~5 kW cap is 10 kWh (74% of
+    13.6 kWh) on top of the ~10% reserve, so ~84% needed."""
+    state = _prep_state()
+    msg = _prep(state, datetime(2026, 10, 6, 10, 0), soc=50.0)
+    assert msg is not None and "VPP event" in msg
+    assert "84%" in msg                         # what the window needs at the start
+    assert "50%" in msg                         # what you have
+    assert "short" in msg.lower()
+    assert "$" in msg                           # what closing the gap costs at the current rate
+    assert _prep(state, datetime(2026, 10, 6, 10, 5), soc=50.0) is None     # once per event
+
+
+def test_vpp_prep_confirms_when_the_battery_already_covers_the_window():
+    msg = _prep(_prep_state(), datetime(2026, 10, 6, 10, 0), soc=96.0)
+    assert msg is not None and "covered" in msg.lower() and "short" not in msg.lower()
+
+
+def test_vpp_prep_reminds_again_close_to_the_start_only_if_still_short():
+    state = _prep_state()
+    _prep(state, datetime(2026, 10, 6, 10, 0), soc=50.0)                      # the first notice
+    assert _prep(state, datetime(2026, 10, 6, 13, 0), soc=70.0) is None       # too early to nag
+    reminder = _prep(state, datetime(2026, 10, 6, 15, 40), soc=70.0)          # 80 min before
+    assert reminder is not None and "starts in" in reminder and "70%" in reminder
+    assert _prep(state, datetime(2026, 10, 6, 15, 50), soc=70.0) is None      # one reminder only
+
+    ok = _prep_state()
+    _prep(ok, datetime(2026, 10, 6, 10, 0), soc=96.0)
+    assert _prep(ok, datetime(2026, 10, 6, 15, 40), soc=95.0) is None         # nothing to warn about
+
+
+def test_vpp_prep_stays_quiet_when_not_applicable():
+    from franklinwh_scraper.config import Config as _C
+    import types
+
+    c = types.SimpleNamespace(battery_soc_pct=50.0)
+    assert alerts._alert_vpp_event_prep(_prep_state(), "2026-10-06", datetime(2026, 10, 6, 10, 0), c, _C()) is None   # not enrolled
+    assert _prep(_prep_state(), datetime(2026, 10, 6, 17, 30), soc=50.0) is None       # already started
+    assert _prep({}, datetime(2026, 10, 6, 10, 0), soc=50.0) is None                  # no event logged
+    assert _prep(_prep_state("2026-10-09T17:00:00", "2026-10-09T19:00:00"),
+                 datetime(2026, 10, 6, 10, 0), soc=50.0) is None                      # days away: too early to matter
+
+
+def test_vpp_event_ended_text_names_the_metric_that_counts(tmp_path):
+    """The old text said 'not sure which metric'. The CEC's DSGS rules (Option 3)
+    pay on battery discharge net of a baseline, wherever it went (home or grid)."""
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_event_readings(db, "2026-10-03", range(17 * 60, 19 * 60 + 10, 5))
+    msg = alerts._alert_vpp_event_ended(_event_state(), "2026-10-03", datetime(2026, 10, 3, 19, 6),
+                                        _C(vpp_enrolled=True), db)
+    assert "not sure which metric" not in msg
+    assert "discharg" in msg and "baseline" in msg
+
+
+# ── healthchecks.io: report an outage instead of pinging "healthy" through it ──
+
+def test_healthcheck_ping_goes_to_the_fail_endpoint_while_polling_is_down(monkeypatch):
+    """2026-10-03: polling was down 3.4 h yet healthchecks.io stayed green,
+    because the loop pings every cycle whether or not the poll worked. While
+    the poll-error threshold is exceeded the ping must be the /fail one — and
+    keep being /fail, or the next cycle's plain ping flips the check back up."""
+    import requests
+
+    hits = []
+    monkeypatch.setattr(requests, "get", lambda url, **kw: hits.append(url))
+    cfg = Config(healthcheck_url="https://hc-ping.com/abc-123")
+    alerts._ping_healthcheck(cfg)
+    alerts._ping_healthcheck(cfg, failing=True)
+    alerts._ping_healthcheck(Config(healthcheck_url="https://hc-ping.com/abc-123/"), failing=True)
+    assert hits == ["https://hc-ping.com/abc-123",
+                    "https://hc-ping.com/abc-123/fail",
+                    "https://hc-ping.com/abc-123/fail"]          # trailing slash doesn't double up
+
+
+def test_healthcheck_failing_ping_does_nothing_without_a_url(monkeypatch):
+    import requests
+
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("no URL set")))
+    alerts._ping_healthcheck(Config(), failing=True)

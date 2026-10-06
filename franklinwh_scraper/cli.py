@@ -2425,7 +2425,10 @@ def cmd_advise(
             # own, well before the license-invalid `break` above would ever
             # be hit. A hard process crash or a fully hung loop still won't
             # ping — that's the failure this switch exists to catch.
-            _ping_healthcheck(cfg)
+            # Past _ERROR_THRESHOLD consecutive poll failures (~40 min) the ping
+            # becomes /fail so a long FranklinWH outage reaches healthchecks.io too
+            # (2026-10-03: 3.4 h of no data, check stayed green). Blips stay quiet.
+            _ping_healthcheck(cfg, failing=_consec_errors >= _ERROR_THRESHOLD)
             try:
                 for _rotated in rotate_known_logs(outdir.resolve()):
                     logger.info("Rotated log %s", _rotated)
