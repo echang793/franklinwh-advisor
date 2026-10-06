@@ -34,6 +34,6 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install ruff
-        run: pip install ruff
+        run: pip install ruff==0.15.13   # pinned: an unpinned linter changes what's enforced under you
       - name: Lint
         run: ruff check franklinwh_scraper tests scripts scrape.py

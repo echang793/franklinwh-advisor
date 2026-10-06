@@ -67,6 +67,9 @@ include = ["franklinwh_scraper*"]
 franklinwh_scraper = ["static/*", "data/*.json"]
 
 [tool.ruff.lint]
+# Explicit, so a newer Ruff that changes its defaults (0.16 turned on DTZ, BLE, I,
+# UP, RUF...) can't suddenly fail CI. These are the classic defaults.
+select = ["E4", "E7", "E9", "F"]
 # E701: compact `if h < 6: return X` one-liners are the deliberate layout of the
 # time-of-use period tables (tou.py) and the env overrides (config.py), where
 # aligned one-liners read as a table. Everything else is enforced.
