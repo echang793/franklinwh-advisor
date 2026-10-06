@@ -8894,3 +8894,33 @@ def test_last_stats_load_never_raises(tmp_path):
     (tmp_path / cli_mod._LAST_STATS_FILE).write_text(json.dumps({"saved_at": datetime.now().isoformat(), "stats": {"x": 1}}))
     assert cli_mod._load_last_stats(tmp_path) is None                  # wrong shape
     cli_mod._save_last_stats(tmp_path / "no" / "such" / "dir", _sample_stats())   # unwritable: no raise
+
+
+def test_ev_tou_5_periods_match_sdge_official_table_in_every_season():
+    """Pinned to SDG&E's published EV-TOU5 'Time of Use periods' (sdge.com/total-
+    electric-rates, fetched 2026-10-05). Weekdays are the SAME in summer and
+    winter: on-peak 4-9 PM; off-peak 6-10 AM, 2-4 PM, 9 PM-midnight; super-off-
+    peak midnight-6 AM and 10 AM-2 PM. Weekends/holidays: super-off-peak
+    midnight-2 PM, off-peak 2-4 PM and 9 PM-midnight, on-peak 4-9 PM.
+
+    Why this exists: the Jan 2026 bill printed a different-looking table (10-2
+    super-off-peak only in March/April) and raised the question whether winter
+    weekdays were mis-classified. They aren't — that table was another rate's
+    layout — and the Sep bill's kWh split fits this classification best."""
+    S, O, P = tou.TouPeriod.SUPER_OFF_PEAK, tou.TouPeriod.OFF_PEAK, tou.TouPeriod.ON_PEAK
+
+    def expect(weekday: bool) -> dict[int, tou.TouPeriod]:
+        out = {}
+        for h in range(24):
+            if weekday:
+                out[h] = (S if h < 6 else O if h < 10 else S if h < 14 else O if h < 16 else P if h < 21 else O)
+            else:
+                out[h] = S if h < 14 else O if h < 16 else P if h < 21 else O
+        return out
+
+    for day, weekday in ((datetime(2026, 1, 6), True), (datetime(2026, 7, 7), True),     # Tue winter / summer
+                         (datetime(2026, 1, 10), False), (datetime(2026, 7, 11), False),  # Sat winter / summer
+                         (datetime(2026, 1, 1), False)):                                  # New Year's Day = weekend schedule
+        want = expect(weekday)
+        for h in range(24):
+            assert tou.period_at(day.replace(hour=h)) == want[h], (day.date(), h)
