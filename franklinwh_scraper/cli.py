@@ -18,7 +18,7 @@ import click
 
 logger = logging.getLogger(__name__)
 
-from .account import AccountClient
+from .account import AccountClient, Stats
 from .advisor import Mode, recommend
 from .alerts import (
     _BATTERY_CAPACITY_KWH,
@@ -159,6 +159,34 @@ def _record_poll_timing(history, started: float, ok: bool, error: str = "") -> N
         history.record_poll_timing(time.monotonic() - started, ok, error)
     except Exception:
         logger.debug("Poll timing not recorded", exc_info=True)
+
+
+_LAST_STATS_FILE = ".last_stats.json"
+_LAST_STATS_MAX_AGE = timedelta(hours=6)    # older than this can't stand in for "now"
+
+
+def _save_last_stats(outdir: Path, stats: Stats) -> None:
+    """Keep the last good readings on disk. The outage fallback that still sends
+    the morning/evening digest from 'last known' readings only lived in memory,
+    so a restart during an outage (2026-10-03) lost it. Never raises."""
+    try:
+        target = outdir / _LAST_STATS_FILE
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"saved_at": datetime.now().isoformat(), "stats": stats.to_dict()}))
+        tmp.replace(target)
+    except (OSError, TypeError, ValueError):
+        logger.debug("Couldn't save last stats", exc_info=True)
+
+
+def _load_last_stats(outdir: Path) -> Stats | None:
+    """The saved readings, or None if missing, malformed or older than 6 h."""
+    try:
+        data = json.loads((outdir / _LAST_STATS_FILE).read_text())
+        if datetime.now() - datetime.fromisoformat(data["saved_at"]) > _LAST_STATS_MAX_AGE:
+            return None
+        return Stats.from_dict(data["stats"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def _poll_error_alert_text(threshold: int, error: Exception) -> str:
@@ -2214,7 +2242,7 @@ def cmd_advise(
         # "N poll errors in a row" alert being structurally unreachable.
         _consec_errors   = _read_consec_errors(outdir)
         _ERROR_THRESHOLD = 8
-        _last_stats      = None  # cached for time-gated alerts during API outages
+        _last_stats      = _load_last_stats(outdir)  # cached for time-gated alerts during API outages; survives a restart
         _lic_warn_date   = ""    # one grace-period Telegram warning per day
 
         # Crash-loop detection runs once per process start, before anything
@@ -2260,6 +2288,7 @@ def cmd_advise(
                 _record_poll_timing(history, _poll_t0, True)
                 _poll_timed = True
                 _last_stats = stats
+                _save_last_stats(outdir, stats)
                 history.record(stats)
 
                 # Weekly readings.db rollup — downsamples data older than 180

@@ -8792,3 +8792,52 @@ def test_healthcheck_failing_ping_does_nothing_without_a_url(monkeypatch):
 
     monkeypatch.setattr(requests, "get", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("no URL set")))
     alerts._ping_healthcheck(Config(), failing=True)
+
+
+# ── persist the last good readings across restarts (outage fallback digests) ──
+
+def _sample_stats(ts=None):
+    from franklinwh_scraper.account import Current, Stats, Totals
+
+    return Stats(
+        timestamp=ts or datetime.now().isoformat(), gateway_id="GW1",
+        current=Current(solar_production_kw=1.5, generator_production_kw=0.0, generator_enabled=False,
+                        battery_use_kw=-0.5, grid_use_kw=0.2, home_load_kw=1.2, battery_soc_pct=63.0,
+                        grid_status="normal"),
+        totals=Totals(battery_charge_kwh=4.0, battery_discharge_kwh=3.0, grid_import_kwh=2.0, grid_export_kwh=1.0,
+                      grid_load_kwh=1.5, solar_kwh=12.0, home_use_kwh=20.0, battery_load_kwh=3.0, solar_load_kwh=9.0),
+    )
+
+
+def test_stats_round_trip_through_a_dict():
+    from franklinwh_scraper.account import Stats
+
+    s = _sample_stats()
+    assert Stats.from_dict(s.to_dict()) == s
+
+
+def test_last_stats_survive_a_restart_but_not_when_stale(tmp_path):
+    """The 'use the last known readings for the morning/evening digest while
+    the API is down' fallback lived only in memory, so a restart during an
+    outage (2026-10-03) lost it and the digest couldn't be sent."""
+    from franklinwh_scraper import cli as cli_mod
+
+    cli_mod._save_last_stats(tmp_path, _sample_stats())
+    got = cli_mod._load_last_stats(tmp_path)
+    assert got is not None and got.current.battery_soc_pct == 63.0 and got.totals.solar_kwh == 12.0
+
+    old = json.loads((tmp_path / cli_mod._LAST_STATS_FILE).read_text())
+    old["saved_at"] = (datetime.now() - timedelta(hours=7)).isoformat()
+    (tmp_path / cli_mod._LAST_STATS_FILE).write_text(json.dumps(old))
+    assert cli_mod._load_last_stats(tmp_path) is None                  # too old to stand in for "now"
+
+
+def test_last_stats_load_never_raises(tmp_path):
+    from franklinwh_scraper import cli as cli_mod
+
+    assert cli_mod._load_last_stats(tmp_path) is None                  # no file
+    (tmp_path / cli_mod._LAST_STATS_FILE).write_text("{not json")
+    assert cli_mod._load_last_stats(tmp_path) is None                  # corrupt
+    (tmp_path / cli_mod._LAST_STATS_FILE).write_text(json.dumps({"saved_at": datetime.now().isoformat(), "stats": {"x": 1}}))
+    assert cli_mod._load_last_stats(tmp_path) is None                  # wrong shape
+    cli_mod._save_last_stats(tmp_path / "no" / "such" / "dir", _sample_stats())   # unwritable: no raise

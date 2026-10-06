@@ -104,6 +104,15 @@ class Stats:
     current: Current
     totals: Totals
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Stats":
+        """Inverse of to_dict (used to restore the last readings after a restart)."""
+        return cls(timestamp=d["timestamp"], gateway_id=d["gateway_id"],
+                   current=Current(**d["current"]), totals=Totals(**d["totals"]))
+
     def to_flat_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"timestamp": self.timestamp, "gateway_id": self.gateway_id}
         for k, v in asdict(self.current).items():
