@@ -16,8 +16,6 @@ from pathlib import Path
 
 import click
 
-logger = logging.getLogger(__name__)
-
 from .account import AccountClient, Stats
 from .advisor import Mode, recommend
 from .alerts import (
@@ -57,6 +55,8 @@ from .predictor import predict
 from .scrapers import FAQScraper, ProductsScraper, SupportScraper
 from .tou import (_get_export_schedule as _get_export_schedule_for_doctor, cycle_bounds, schedule_export_credit)
 from .weather import fetch_solar_outlook_cached as _fetch_outlook_cached, geocode
+
+logger = logging.getLogger(__name__)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

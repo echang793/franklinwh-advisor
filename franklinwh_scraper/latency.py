@@ -8,7 +8,7 @@ is slow" with "the API is down", so failures are counted separately.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
 def percentile(values: list[float], p: float) -> float:

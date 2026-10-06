@@ -919,7 +919,6 @@ def test_tou_eb_plan_uses_window_confidence_not_aggregate():
     from franklinwh_scraper.predictor import HourPrediction, UsageForecast
 
     now = datetime(2026, 7, 15, 10, 0, 0)
-    peak_start = now.replace(hour=16, minute=0, second=0, microsecond=0)
     peak_end = now.replace(hour=21, minute=0, second=0, microsecond=0)
     hours = []
     t = now
@@ -7020,7 +7019,7 @@ def test_doctor_reports_single_host_guard():
     ok = _doctor_output(run_on_host="Mac-mini")
     assert "runs only on Mac-mini" in ok and "✗" not in ok.split("Single-host guard")[0].splitlines()[-1]
     other = _doctor_output(run_on_host="Erics-MacBook-Air")
-    line = next(l for l in other.splitlines() if "Single-host guard" in l)
+    line = next(row for row in other.splitlines() if "Single-host guard" in row)
     assert "✗" in line and "Mac-mini.local" in line  # this machine would stand down
 
 
@@ -7180,7 +7179,7 @@ def _doctor_lines(monkeypatch, icloud=None, health=None, **cfg_kw):
 
 
 def _line(lines, needle):
-    return next(l for l in lines if needle in l)
+    return next(row for row in lines if needle in row)
 
 
 def test_doctor_flags_icloud_synced_install(monkeypatch):
@@ -7967,7 +7966,7 @@ def test_doctor_billing_cycle_line_uses_recorded_bill_cycles(tmp_path):
          patch("franklinwh_scraper.cli.AccountClient") as ac:
         ac.side_effect = RuntimeError("skip login")
         out = CliRunner().invoke(cli, ["doctor"]).output
-    line = next(l for l in out.splitlines() if "Billing cycle" in l)
+    line = next(row for row in out.splitlines() if "Billing cycle" in row)
     start = end + timedelta(days=1)
     assert f"{start:%b} {start.day} –" in line.replace("–", "–")     # current cycle starts the day after the last bill
     assert f"{end + timedelta(days=29):%b} {(end + timedelta(days=29)).day}" in line
@@ -8231,9 +8230,9 @@ def test_bundled_export_schedule_is_declared_as_package_data():
 
 def test_doctor_reports_export_pricing_source():
     tou.set_export_schedule(_sched())
-    assert "hourly SDG&E schedule" in next(l for l in _doctor_lines_plain() if "Export pricing" in l)
+    assert "hourly SDG&E schedule" in next(row for row in _doctor_lines_plain() if "Export pricing" in row)
     tou.set_export_schedule(None)
-    line = next(l for l in _doctor_lines_plain() if "Export pricing" in l)
+    line = next(row for row in _doctor_lines_plain() if "Export pricing" in row)
     assert "flat" in line and "✗" in line
 
 
@@ -8907,15 +8906,15 @@ def test_ev_tou_5_periods_match_sdge_official_table_in_every_season():
     super-off-peak only in March/April) and raised the question whether winter
     weekdays were mis-classified. They aren't — that table was another rate's
     layout — and the Sep bill's kWh split fits this classification best."""
-    S, O, P = tou.TouPeriod.SUPER_OFF_PEAK, tou.TouPeriod.OFF_PEAK, tou.TouPeriod.ON_PEAK
+    S, OFF, P = tou.TouPeriod.SUPER_OFF_PEAK, tou.TouPeriod.OFF_PEAK, tou.TouPeriod.ON_PEAK
 
     def expect(weekday: bool) -> dict[int, tou.TouPeriod]:
         out = {}
         for h in range(24):
             if weekday:
-                out[h] = (S if h < 6 else O if h < 10 else S if h < 14 else O if h < 16 else P if h < 21 else O)
+                out[h] = (S if h < 6 else OFF if h < 10 else S if h < 14 else OFF if h < 16 else P if h < 21 else OFF)
             else:
-                out[h] = S if h < 14 else O if h < 16 else P if h < 21 else O
+                out[h] = S if h < 14 else OFF if h < 16 else P if h < 21 else OFF
         return out
 
     for day, weekday in ((datetime(2026, 1, 6), True), (datetime(2026, 7, 7), True),     # Tue winter / summer

@@ -65,3 +65,13 @@ include = ["franklinwh_scraper*"]
 
 [tool.setuptools.package-data]
 franklinwh_scraper = ["static/*", "data/*.json"]
+
+[tool.ruff.lint]
+# E701: compact `if h < 6: return X` one-liners are the deliberate layout of the
+# time-of-use period tables (tou.py) and the env overrides (config.py), where
+# aligned one-liners read as a table. Everything else is enforced.
+ignore = ["E701"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests put the repo root on sys.path before importing the package.
+"tests/*" = ["E402"]

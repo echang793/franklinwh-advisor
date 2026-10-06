@@ -10,10 +10,14 @@ import time
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import requests
 
 from .advisor import Recommendation
+
+if TYPE_CHECKING:
+    from .config import Config
 
 logger = logging.getLogger(__name__)
 

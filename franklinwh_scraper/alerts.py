@@ -1721,7 +1721,6 @@ def _alert_cloudy_eb_target(
     target_med, target_p75 = calc["target_med"], calc["target_p75"]
     switch_med, switch_p75 = calc["switch_med"], calc["switch_p75"]
     peak_start = calc["peak_start"]
-    cap        = calc["cap"]
 
     # Sunday: P75 is the realistic baseline (dryer day, see docstring), not
     # the outlier — swap which target/switch-time is framed as "typical".
@@ -3886,7 +3885,8 @@ def _alert_solar_back_to_baseline(
         return None
 
     def _med(lst: list[float]) -> float:
-        s = sorted(lst); return s[len(s) // 2]
+        s = sorted(lst)
+        return s[len(s) // 2]
 
     baseline = _med(all_pr)
     recent   = _med(recent_pr)
