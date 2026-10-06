@@ -147,3 +147,11 @@ The token is a shared secret: it sits in the Shortcut, so don't share the shortc
 
 - **Telegram**: chat ID `5650189923` (FranklinWH advisor + CMR News bot both configured)
 - **iMessage**: not configured
+
+## Wall display (a tablet that shows the dashboard all day)
+
+**Wall mode:** open `http://<mac-mini-LAN-IP>:8093/?wall=1` (add `&zoom=1.2` to force a size, `&panels=battery,flow,touclock,forecast,vpp,alerts` to choose panels). No toolbar or editing controls, three columns (battery + forecast / energy flow / tariff clock + VPP), sound off, cursor hidden, and it fits itself to the screen (re-checked each minute and on resize). It reloads itself every 6 h. It never writes the saved layout, so the normal dashboard in the same browser is untouched. Try it without a token at `/?demo=1&wall=1`. The first load asks for the dashboard token once (`dashboard_token` in `~/.franklinwh.json`) and remembers it.
+
+**Fixed LAN address (so the tablet's bookmark keeps working):** the Mac mini is on Wi-Fi (`en1`) behind an AT&T gateway at `192.168.1.254`. Best: reserve its address in the gateway (Home Network > IP Allocation, set the Mac mini to a fixed/allocated address, usually 192.168.1.246) rather than setting it on the Mac. Set the Mac's Wi-Fi *Private Wi-Fi address* for this network to *Fixed* or *Off* so its MAC doesn't change and break the reservation. Ethernet would be more reliable than Wi-Fi for a 24/7 host.
+
+**Tablet:** keep it awake while charging (Fire OS developer option *Stay awake*, or a kiosk browser such as Fully Kiosk), and put a timer plug on its charger so it isn't held at 100% all year.
