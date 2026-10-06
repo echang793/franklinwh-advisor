@@ -1103,7 +1103,7 @@ def _learn_export_scale(outdir: Path, bill) -> tuple[dict | None, str]:
                    f"(bill ${bill.export_credit_ex_adder:.2f} vs schedule ${credit:.2f} over {kwh:.0f} kWh)")
 
 
-def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
+def _record_bill_from_text(outdir: Path, source: str, dry_run: bool, trust_generation_rates: bool = False) -> None:
     """`bill-record --from-text`: parse a pasted bill and recalibrate the
     export rate, import rates, fixed fee and real cycle dates from it."""
     try:
@@ -1148,8 +1148,18 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
     # table fits). Drop those two fields rather than let a pre-tariff bill
     # overwrite live state with them; its generation rates and cycle dates
     # are table-independent and still get recorded below.
-    from .tou import _RATES_EFFECTIVE_DATE
+    from .tou import _RATES_EFFECTIVE_DATE, GENERATION_TIER
     predates_tariff = end < _RATES_EFFECTIVE_DATE
+    # Generation rates differ by SDCP tier. Only learn them from a bill that
+    # names OUR tier: the 9/27 "correction" came from a PowerOn-tier bill (the
+    # CCA line named no tier) and made winter ~8% too high on a PowerBase account.
+    tier_ok = trust_generation_rates or bill.gen_tier == GENERATION_TIER
+    if not tier_ok:
+        _warn(("This bill names no SDCP tier" if bill.gen_tier is None
+               else f"This bill is on SDCP's {bill.gen_tier} tier")
+              + f", but this app prices {GENERATION_TIER}. Generation rates from it were NOT saved "
+              "(PowerOn runs ~8% higher, so they'd skew estimates). Everything else was recorded. "
+              "If the bill really is yours on this tier, re-run with --trust-generation-rates.")
     if predates_tariff:
         _warn(f"This bill's cycle (ending {end:%b %-d, %Y}) predates the "
               f"{_RATES_EFFECTIVE_DATE:%b %-d, %Y} delivery tariff this app models — its implied fixed "
@@ -1179,12 +1189,14 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
         learned = bill.learned_import()
         if predates_tariff:
             learned = {k: v for k, v in learned.items() if k not in ("pcia_adder", "base_daily")}
+        if not tier_ok:
+            learned = {k: v for k, v in learned.items() if k != "gen_by_season"}
         # Merge seasons across bills: a summer bill must not erase winter rates
         # learned from an earlier winter bill (only the bill that used a season
         # prints its rates). The single-season shape older state may hold is folded in first.
         prev = state.get("learned_import") if isinstance(state.get("learned_import"), dict) else {}
         merged = dict(prev.get("gen_by_season") or ({prev["season"]: prev["gen"]} if prev.get("season") and isinstance(prev.get("gen"), dict) else {}))
-        merged.update(learned["gen_by_season"])
+        merged.update(learned.get("gen_by_season", {}))
         state["learned_import"] = {**learned, "gen_by_season": merged}
         cycles = [c for c in state.get("bill_cycles", []) if isinstance(c, dict) and c.get("end") != end.isoformat()]
         cycles.append({"start": bill.period_start.isoformat(), "end": end.isoformat()})
@@ -1212,6 +1224,9 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
               help="Read the bill's pasted text ('-' = stdin) and recalibrate everything from it: "
                    "amount, export rate, import rates, fixed fee and real cycle dates.")
 @click.option("--dry-run", is_flag=True, help="With --from-text: show what would be recorded, save nothing.")
+@click.option("--trust-generation-rates", is_flag=True,
+              help="With --from-text: learn the bill's SDCP generation rates even though it doesn't name "
+                   "the PowerBase tier this app prices (see the tier warning).")
 @click.option("--cycle-end", default="",
               help="Billing cycle end date this bill covers (YYYY-MM-DD). "
                    "Defaults to the most recently closed cycle.")
@@ -1223,7 +1238,8 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool) -> None:
               help="Total kWh exported on the bill (see --export-credit).")
 @click.pass_context
 def bill_record(ctx: click.Context, amount: float | None, from_text: str | None, dry_run: bool,
-                cycle_end: str, export_credit: float | None, export_kwh: float | None) -> None:
+                trust_generation_rates: bool, cycle_end: str, export_credit: float | None,
+                export_kwh: float | None) -> None:
     """Record your real utility bill to compare against the app's projection.
 
     The app estimates your bill from grid import/export at published TOU
@@ -1239,7 +1255,7 @@ def bill_record(ctx: click.Context, amount: float | None, from_text: str | None,
     if (amount is None) == (from_text is None):
         raise click.ClickException("Give either --amount or --from-text (not both).")
     if from_text is not None:
-        _record_bill_from_text(outdir, from_text, dry_run)
+        _record_bill_from_text(outdir, from_text, dry_run, trust_generation_rates)
         return
     if dry_run:
         raise click.ClickException("--dry-run only applies to --from-text.")

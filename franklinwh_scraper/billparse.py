@@ -57,6 +57,7 @@ class ParsedBill:
     climate_credit: float = 0.0                  # positive $; NOT part of the usage bill
     gen_rates_by_season: dict[str, dict[str, float]] = field(default_factory=dict)  # a cycle can straddle Oct/Nov
     export_pricing_year: int | None = None       # "Export Pricing: Legacy 2024 Pricing" -> 2024
+    gen_tier: str | None = None                  # "PowerBase" | "PowerOn" | "Power100" from the CCA line; None if unnamed
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -179,6 +180,10 @@ def parse_bill_text(text: str) -> ParsedBill:
     tax = re.search(rf"State Surcharge Tax\s+({_NUM})", text, re.I)
     generation_net = gen_charge - gen_export + (_num(tax.group(1)) if tax else 0.0)
 
+    tier_m = re.search(r"Your CCA rate is[^\n]*?\b(Power\s?Base|Power\s?On|Power\s?100)\b", text, re.I)
+    gen_tier = {"powerbase": "PowerBase", "poweron": "PowerOn", "power100": "Power100"}[
+        re.sub(r"\s", "", tier_m.group(1)).lower()] if tier_m else None
+
     vint = re.search(r"(\d{4})\s+Vintage", text, re.I)
     export_year = re.search(r"Export Pricing:\s*Legacy\s+(\d{4})", text, re.I)
     climate = re.search(rf"California Climate Credit\s+({_NUM})", text, re.I)
@@ -189,6 +194,7 @@ def parse_bill_text(text: str) -> ParsedBill:
         season=season, pcia_vintage=int(vint.group(1)) if vint else None,
         gen_rates=gen_rates, gen_kwh=gen_kwh, export_kwh=export_kwh,
         gen_rates_by_season=by_season, export_pricing_year=int(export_year.group(1)) if export_year else None,
+        gen_tier=gen_tier,
         delivery_import=_num(delivery_import.group(1)), nonnettable=_num(nonnet.group(1)),
         delivery_export_credit=delivery_export, total_electric_service=_num(total_es.group(1)),
         gen_export_credit=round(gen_export, 2), generation_net=round(generation_net, 2),

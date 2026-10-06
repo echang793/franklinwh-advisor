@@ -85,6 +85,12 @@ _SUMMER_MONTHS = {6, 7, 8, 9, 10}  # June–October
 # overwrite this adder with a wrong-era number.
 _PCIA_NET_ADDER = 0.0133  # $/kWh imported (~PCIA 0.03348 x ~40% net-import share)
 
+# The SDCP generation tier the _GEN_DEFAULT rates (and the account) are on. SDCP
+# publishes a separate, pricier column per tier (PowerOn is ~8% higher; Power100
+# adds $0.01), so a bill on another tier can't teach these rates — see
+# cli._record_bill_from_text, which checks the bill's named tier against this.
+GENERATION_TIER = "PowerBase"
+
 # SDG&E delivery (UDC + WF-NBC/DWR-BC), EV-TOU-5 effective 8/1/2026 — see above.
 DELIVERY_ON_OFF = 0.31218 + 0.00591
 DELIVERY_SUPER_OFF = 0.04114 + 0.00591

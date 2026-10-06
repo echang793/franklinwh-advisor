@@ -7788,7 +7788,9 @@ def test_bill_record_skips_pcia_and_base_daily_for_bill_predating_rate_table(tmp
     assert res.exit_code == 0, res.output
     st = _load_peak_state(tmp_path)
     li = st["learned_import"]
-    assert li["gen_by_season"]["winter"] == {"on_peak": 0.15438, "off_peak": 0.10067, "super_off_peak": 0.03485}
+    # The Jan bill names no SDCP tier (its rates are PowerOn's), so its generation
+    # rates are not learned either — see test_bill_record_does_not_learn_generation_rates_from_a_different_tier.
+    assert not li["gen_by_season"]
     assert "pcia_adder" not in li and "base_daily" not in li
     assert st["bill_cycles"] == [{"start": "2025-12-18", "end": "2026-01-19"}]
     assert "predates" in res.output.lower()
@@ -7828,6 +7830,57 @@ def test_bill_record_does_not_move_next_read_date_backward(tmp_path):
     res = _run_bill_record(tmp_path, ["--from-text", "-"], stdin=_JAN_2026_BILL)  # older bill, Feb 2026 next-read
     assert res.exit_code == 0, res.output
     assert _load_peak_state(tmp_path)["next_read_date"] == before
+
+
+def test_parse_bill_text_reads_the_sdcp_tier():
+    """The CCA line names the tier: Sep 2026 'PowerBase'; the Jan 2026 bill named
+    none (its rates turned out to be PowerOn)."""
+    from franklinwh_scraper.billparse import parse_bill_text
+
+    assert parse_bill_text(_SEP_2026_BILL).gen_tier == "PowerBase"
+    assert parse_bill_text(_JAN_2026_BILL).gen_tier is None
+    on = _SEP_2026_BILL.replace("PowerBase", "PowerOn")
+    assert parse_bill_text(on).gen_tier == "PowerOn"
+    assert parse_bill_text(_SEP_2026_BILL.replace("PowerBase", "Power100")).gen_tier == "Power100"
+
+
+def test_bill_record_does_not_learn_generation_rates_from_a_different_tier(tmp_path):
+    """Regression for the 2026-09-27 mistake: winter rates were 'corrected' from a
+    bill on SDCP's PowerOn tier while the account is PowerBase, replacing the
+    right published rates with ones ~8% too high. A bill that names another tier
+    (or no tier) must not overwrite generation rates; everything else still
+    records."""
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    end = datetime.now().date() - timedelta(days=5)
+    res = _run_bill_record(tmp_path, ["--from-text", "-"],
+                           stdin=_bill_with_dates(end).replace("PowerBase", "PowerOn"))
+    assert res.exit_code == 0, res.output
+    st = _load_peak_state(tmp_path)
+    assert not st["learned_import"]["gen_by_season"]                               # no rates learned...
+    assert st["learned_import"]["base_daily"] and st["bill_cycles"] and st[f"actual_bill_{end.isoformat()}"]   # ...the rest recorded
+    assert "PowerOn" in res.output and "PowerBase" in res.output                   # says why
+
+
+def test_bill_record_warns_when_the_bill_names_no_tier(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    end = datetime.now().date() - timedelta(days=5)
+    res = _run_bill_record(tmp_path, ["--from-text", "-"],
+                           stdin=_bill_with_dates(end).replace(" - PowerBase", ""))
+    assert res.exit_code == 0, res.output
+    assert "names no sdcp tier" in res.output.lower()
+    assert not _load_peak_state(tmp_path)["learned_import"]["gen_by_season"]
+
+
+def test_bill_record_trust_flag_overrides_the_tier_guard(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+
+    end = datetime.now().date() - timedelta(days=5)
+    res = _run_bill_record(tmp_path, ["--from-text", "-", "--trust-generation-rates"],
+                           stdin=_bill_with_dates(end).replace(" - PowerBase", ""))
+    assert res.exit_code == 0, res.output
+    assert _load_peak_state(tmp_path)["learned_import"]["gen_by_season"]["summer"]["super_off_peak"] == 0.0368
 
 
 def test_bill_record_from_text_recalibrates_everything(tmp_path):
