@@ -9253,3 +9253,37 @@ def test_send_evroom_says_so_when_battery_cannot_even_cover_the_night(tmp_path):
     _run_at(now, bot._send_evroom, "123", None)
     assert "no room" in sent["text"].lower()
     assert "short of covering tonight" in sent["text"]
+
+
+def test_parse_evroom_accepts_optional_car_percent_and_trip_target():
+    from franklinwh_scraper.chatbot import _parse_evroom
+
+    assert _parse_evroom("/evroom") == (None, None)
+    assert _parse_evroom("/evroom 45") == (45.0, None)
+    assert _parse_evroom("/evroom 45%") == (45.0, None)
+    assert _parse_evroom("/evroom 30 to 100") == (30.0, 100.0)
+    assert _parse_evroom("/evroom 30 100") == (30.0, 100.0)
+    assert _parse_evroom("/evroom 30% → 95%") == (30.0, 95.0)
+    assert _parse_evroom("/evroom@MyBot 45") == (45.0, None)
+    assert _parse_evroom("/EVROOM 45") == (45.0, None)
+
+
+def test_parse_evroom_rejects_nonsense():
+    from franklinwh_scraper.chatbot import _parse_evroom
+
+    assert _parse_evroom("/evroom 101") is None          # impossible %
+    assert _parse_evroom("/evroom 30 to 130") is None
+    assert _parse_evroom("/evroom 90 to 50") is None     # target below the current charge
+    assert _parse_evroom("/evroom soon") is None
+    assert _parse_evroom("/evrooms") is None
+    assert _parse_evroom("what is my sundown") is None
+
+
+def test_send_evroom_roadtrip_target_overrides_the_usual_limit(tmp_path):
+    bot, now, sent = _evroom_bot(tmp_path, soc=27.0)
+    _run_at(now, bot._send_evroom, "123", 30.0, 100.0)
+    text = sent["text"]
+    # 30% -> 100% = 70% of 75 kWh = 52.5 kWh in the pack / 0.9 = 58.3 kWh from the wall
+    assert "58.3 kWh" in text and "100%" in text
+    assert "80%" not in text                                   # the usual limit is not mentioned
+    assert "roadtrip" in text.lower() or "trip" in text.lower()

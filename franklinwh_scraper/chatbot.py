@@ -242,6 +242,28 @@ def build_context(stats, history, outlook, cfg, *, rec=None, forecast=None,
     return "\n".join(lines)
 
 
+_EVROOM_RE = re.compile(
+    r"/evroom(?:@\w+)?(?:\s+(\d{1,3}(?:\.\d+)?)\s*%?(?:\s*(?:to|->|→|-)?\s*(\d{1,3}(?:\.\d+)?)\s*%?)?)?\s*$"
+)
+
+
+def _parse_evroom(text: str) -> tuple[float | None, float | None] | None:
+    """Parse '/evroom [car %] [[to] trip target %]' -> (car_soc, target), or
+    None if it isn't a valid /evroom command (bad %, target below the car's
+    current charge). The target is for the rare charge above the usual limit,
+    e.g. '/evroom 30 to 100' before a road trip."""
+    m = _EVROOM_RE.match(text.strip().lower())
+    if not m:
+        return None
+    car = float(m.group(1)) if m.group(1) else None
+    target = float(m.group(2)) if m.group(2) else None
+    if car is not None and not 0 <= car <= 100:
+        return None
+    if target is not None and (not 0 < target <= 100 or (car is not None and target < car)):
+        return None
+    return car, target
+
+
 class TelegramChatBot:
     """Long-poll Telegram bot backed by Claude Haiku for energy Q&A."""
 
@@ -347,7 +369,7 @@ class TelegramChatBot:
                             "/until N  — time to reach N% SoC at current rate\n"
                             "/sundown  — projected SoC when today's solar is done\n"
                             "/sundown H — projected SoC in H hours (1-24)\n"
-                            "/evroom [car %] — battery room for the car without grid import\n"
+                            "/evroom [car %] [to N%] — battery room for the car without grid import\n"
                             "/ebtarget — Emergency Backup charge target for today\n"
                             "/mute     — snooze non-safety alerts (2h or 8h)\n"
                             "/unmute   — cancel an active mute\n"
@@ -466,12 +488,12 @@ class TelegramChatBot:
                             daemon=True,
                         ).start()
                         continue
-                    # /evroom [car %] — battery room for the car without grid import
-                    _ev = re.match(r'/evroom(?:@\w+)?(?:\s+(\d{1,3}(?:\.\d+)?)\s*%?)?\s*$', text.lower())
-                    if _ev:
+                    # /evroom [car %] [[to] target %] — battery room for the car without grid import
+                    _ev = _parse_evroom(text)
+                    if _ev is not None:
                         threading.Thread(
                             target=self._send_evroom,
-                            args=(chat_id, float(_ev.group(1)) if _ev.group(1) else None),
+                            args=(chat_id, _ev[0], _ev[1]),
                             daemon=True,
                         ).start()
                         continue
@@ -1067,7 +1089,8 @@ class TelegramChatBot:
             logger.warning("_send_sundown error: %s", e)
             self._send(chat_id, f"Error: {e}")
 
-    def _send_evroom(self, chat_id: str, car_soc: float | None = None) -> None:
+    def _send_evroom(self, chat_id: str, car_soc: float | None = None,
+                     trip_target: float | None = None) -> None:
         """Respond to /evroom [car %] — how much of the house battery can go
         into the car without importing from the grid, and how that compares
         with what an 80% charge needs. Same live-anchored, bias-corrected
@@ -1113,7 +1136,9 @@ class TelegramChatBot:
 
             pack = getattr(cfg, "ev_pack_kwh", 75.0)
             eff  = getattr(cfg, "ev_charge_efficiency", 0.90)
-            target = getattr(cfg, "ev_target_soc", 80.0)
+            usual   = getattr(cfg, "ev_target_soc", 80.0)
+            target  = trip_target if trip_target is not None else usual
+            tripped = trip_target is not None and trip_target != usual
 
             lines = [
                 "🚗 <b>EV room — no grid import</b>",
@@ -1133,16 +1158,17 @@ class TelegramChatBot:
                 lines.append(f"≈ <b>+{gain:.0f}%</b> on the car ({pack:.0f} kWh pack, {eff * 100:.0f}% efficient)")
                 if car_soc is not None:
                     need = max(0.0, (target - car_soc) / 100.0 * pack / eff)
+                    goal = f"trip target of {target:.0f}%" if tripped else f"{target:.0f}% limit"
                     if need <= 0.1:
-                        lines.append(f"Car at {car_soc:.0f}% is already at your {target:.0f}% limit.")
+                        lines.append(f"Car at {car_soc:.0f}% is already at your {goal}.")
                     else:
                         reach = min(target, car_soc + gain)
                         lines.append(
-                            f"{car_soc:.0f}% → {target:.0f}% needs ~{need:.1f} kWh from the wall; this covers "
+                            f"{'Trip: ' if tripped else ''}{car_soc:.0f}% → {target:.0f}% needs ~{need:.1f} kWh from the wall; this covers "
                             f"~{min(100.0, plan['budget_kwh'] / need * 100):.0f}% of it (car reaches ~{reach:.0f}%)."
                         )
                 else:
-                    lines.append(f"<i>Tell me the car's % (/evroom 45) to compare against your {target:.0f}% limit.</i>")
+                    lines.append(f"<i>Tell me the car's % (/evroom 45) to compare against your {usual:.0f}% limit, or /evroom 30 to 100 for a trip.</i>")
             lines.append(f"<i>{live.confidence.title()} confidence, {live.data_days}d data — charge as sun/surplus allows; "
                          "pulling harder than surplus drains the battery sooner.</i>")
             self._send(chat_id, "\n".join(lines))
