@@ -90,6 +90,12 @@ class Config:
     # home load alone would already drain below it, EV charging isn't the
     # variable, so "with EV" just matches the no-EV baseline.
     ev_charge_floor_soc: float = 10.0
+    # The car itself, for /evroom's home-kWh -> car-% conversion. Defaults fit
+    # a 2023 Tesla Model Y dual motor (~75 kWh usable) charged to 80% -- change
+    # them in ~/.franklinwh.json if the pack or the usual limit differs.
+    ev_pack_kwh: float = 75.0
+    ev_charge_efficiency: float = 0.90   # wall kWh -> pack kWh (charger + thermal losses)
+    ev_target_soc: float = 80.0          # usual daily charge limit (%)
     # "Without EV charging" 7am SoC prediction: flat assumed household draw
     # (kW) from now to the fixed 7am checkpoint, no forecast/solar/percentile
     # model — by request (2026-08-17), replacing the P25-percentile +

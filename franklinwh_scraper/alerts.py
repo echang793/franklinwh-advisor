@@ -1977,12 +1977,15 @@ def _predict_sundown_soc(
     ]
     if not today_sun_hours:
         return None
-    sundown_dt = today_sun_hours[-1].dt
+    # "Solar done" is when the LAST sunny interval ends -- the walk below
+    # takes that whole interval, so naming its start (an hour early) would
+    # also make the accuracy check compare against the battery too soon.
+    sundown_dt = today_sun_hours[-1].dt + one_hour
 
     kwh = soc / 100.0 * bat_cap
     export_kwh = 0.0
     for h in usage_forecast.hours:
-        if h.dt + one_hour <= now or h.dt > sundown_dt:
+        if h.dt + one_hour <= now or h.dt >= sundown_dt:
             continue
         new_kwh = kwh + h.predicted_solar_kw - h.predicted_load_kw
         if new_kwh > bat_cap:
@@ -1990,6 +1993,57 @@ def _predict_sundown_soc(
         kwh = max(0.0, min(bat_cap, new_kwh))
 
     return kwh / bat_cap * 100.0, sundown_dt, export_kwh
+
+
+def _live_anchored_forecast(state: dict, c, outlook, usage_forecast, store):
+    """Re-predict with what is happening right now (live load, current sky and
+    learned corrections) instead of the shared cycle-start forecast; falls back
+    to `usage_forecast` on any failure. Shared by /sundown, /evroom and the
+    low-battery alerts' sundown line so they quote the same number."""
+    if store is None or usage_forecast is None:
+        return usage_forecast
+    try:
+        cloudy = outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD) if outlook else False
+        return predict(
+            store, 24, outlook=outlook,
+            system_peak_kw=_get_system_peak_kw(state),
+            perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
+            hourly_bias=_get_hourly_bias(state),
+            current_load_kw=c.home_load_kw,
+        )
+    except Exception:
+        logger.exception("Live-anchored forecast failed; using the shared forecast")
+        return usage_forecast
+
+
+def _ev_room_plan(
+    soc_at_sundown_pct: float, export_kwh: float, sundown_dt: datetime,
+    sunrise_dt: datetime, cap: float, floor_pct: float, baseline_kw: float,
+) -> dict:
+    """How much energy can go into the car without importing from the grid.
+
+    Two pools: battery energy above what the house needs to reach tomorrow's
+    sunrise (the reserve floor plus baseline_kw until then), and the surplus
+    solar the battery would be too full to take, which is otherwise exported.
+    Charging the car from the second pool is free of both import and export;
+    from the first it just moves energy you were going to hold overnight.
+    """
+    night_kwh = baseline_kw * max(0.0, (sunrise_dt - sundown_dt).total_seconds() / 3600.0)
+    keep_kwh = floor_pct / 100.0 * cap + night_kwh
+    have_kwh = soc_at_sundown_pct / 100.0 * cap
+    spare = have_kwh - keep_kwh
+    budget = max(0.0, spare) + export_kwh
+    return {
+        "night_kwh": night_kwh, "keep_kwh": keep_kwh, "keep_pct": keep_kwh / cap * 100.0,
+        "have_kwh": have_kwh, "spare_battery_kwh": max(0.0, spare),
+        "shortfall_kwh": max(0.0, -spare), "export_kwh": export_kwh,
+        "budget_kwh": budget, "budget_pct": budget / cap * 100.0,
+    }
+
+
+def _ev_car_gain_pct(home_kwh: float, pack_kwh: float, efficiency: float) -> float:
+    """Percentage points added to the car from `home_kwh` taken from the house."""
+    return home_kwh * efficiency / pack_kwh * 100.0
 
 
 def _sundown_window_had_ev_load(store, sundown_pred: dict) -> bool:
@@ -2019,20 +2073,7 @@ def _sundown_projection_line(
     can't collide with (or get double-graded against) one made later the
     same day.
     """
-    live_forecast = usage_forecast
-    if store is not None and usage_forecast is not None:
-        try:
-            cloudy = outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD) if outlook else False
-            live_forecast = predict(
-                store, 24, outlook=outlook,
-                system_peak_kw=_get_system_peak_kw(state),
-                perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
-                hourly_bias=_get_hourly_bias(state),
-                current_load_kw=c.home_load_kw,
-            )
-        except Exception:
-            logger.exception("Sundown projection: live-anchored forecast failed")
-            live_forecast = usage_forecast
+    live_forecast = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
     if live_forecast is None:
         return ""
     projection = _predict_sundown_soc(live_forecast, now, c.battery_soc_pct, cap)

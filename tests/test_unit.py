@@ -1079,7 +1079,7 @@ def test_send_sundown_projects_soc_to_last_solar_hour(tmp_path):
     assert "27%" in sent["text"]
     # 6h of net +2.0 kW (3.0 solar - 1.0 load) = +12 kWh -> capped at 100% of 13.6 kWh cap
     assert "100%" in sent["text"]
-    assert "5:00 PM" in sent["text"]
+    assert "6:00 PM" in sent["text"]  # last sunny hour is 5-6 PM; solar is done when it ends
 
 
 def test_send_sundown_estimates_surplus_solar_export(tmp_path):
@@ -2015,7 +2015,6 @@ def test_send_sundown_live_anchors_current_load_when_store_available(monkeypatch
     import types as _types
 
     from franklinwh_scraper import chatbot as chatbot_mod
-    from franklinwh_scraper import predictor as predictor_mod
     from franklinwh_scraper.predictor import HourPrediction, UsageForecast
 
     now = datetime(2026, 7, 15, 12, 0, 0)
@@ -2034,7 +2033,7 @@ def test_send_sundown_live_anchors_current_load_when_store_available(monkeypatch
         calls.append(kw.get("current_load_kw"))
         return _forecast()
 
-    monkeypatch.setattr(predictor_mod, "predict", _fake_predict)
+    monkeypatch.setattr(alerts, "predict", _fake_predict)  # the shared helper lives in alerts
 
     bot = TelegramChatBot(Config(battery_capacity_kwh=13.6, output_dir=str(tmp_path)), api_key="x")
     bot._stats = _types.SimpleNamespace(current=_types.SimpleNamespace(
@@ -9162,4 +9161,95 @@ def test_predict_sundown_soc_counts_the_entry_covering_now_even_if_forecast_is_s
     pct, sundown, export = alerts._predict_sundown_soc(fc, datetime(2026, 10, 9, 12, 5), 20.0, 10.0)
     # 2.0 kWh start + (3.0-0.5) + (2.0-0.5) = 6.0 kWh of a 10 kWh pack
     assert pct == pytest.approx(60.0)
-    assert sundown == datetime(2026, 10, 9, 13, 0)
+    assert sundown == datetime(2026, 10, 9, 14, 0)  # end of the last sunny hour (13:00-14:00), where the walk stops
+
+
+# ── /evroom: how much battery can go to the car without grid import ──────
+
+def test_ev_room_plan_budget_is_spare_battery_plus_surplus_that_would_export():
+    plan = alerts._ev_room_plan(
+        soc_at_sundown_pct=98.0, export_kwh=2.0,
+        sundown_dt=datetime(2026, 10, 9, 18, 36), sunrise_dt=datetime(2026, 10, 10, 6, 36),
+        cap=13.6, floor_pct=10.0, baseline_kw=0.4)
+    assert plan["night_kwh"] == pytest.approx(4.8)                      # 12 h x 0.4 kW
+    assert plan["keep_kwh"] == pytest.approx(1.36 + 4.8)                # 10% floor + the night
+    assert plan["spare_battery_kwh"] == pytest.approx(0.98 * 13.6 - 6.16)
+    assert plan["budget_kwh"] == pytest.approx(0.98 * 13.6 - 6.16 + 2.0)
+    assert plan["budget_pct"] == pytest.approx(plan["budget_kwh"] / 13.6 * 100)
+    assert plan["shortfall_kwh"] == 0.0
+
+
+def test_ev_room_plan_reports_shortfall_when_battery_cannot_cover_the_night():
+    plan = alerts._ev_room_plan(
+        soc_at_sundown_pct=30.0, export_kwh=0.0,
+        sundown_dt=datetime(2026, 10, 9, 18, 36), sunrise_dt=datetime(2026, 10, 10, 6, 36),
+        cap=13.6, floor_pct=10.0, baseline_kw=0.4)
+    assert plan["spare_battery_kwh"] == 0.0 and plan["budget_kwh"] == 0.0
+    assert plan["shortfall_kwh"] == pytest.approx(6.16 - 0.3 * 13.6)
+
+
+def test_ev_car_gain_pct_converts_home_kwh_to_car_percent_with_charging_losses():
+    assert alerts._ev_car_gain_pct(9.0, pack_kwh=75.0, efficiency=0.9) == pytest.approx(10.8)
+
+
+def _evroom_bot(tmp_path, soc, **cfg_kw):
+    import types
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 15, 12, 0, 0)
+    hours = [HourPrediction(dt=datetime(2026, 7, 15, h), predicted_load_kw=1.0,
+                            predicted_solar_kw=3.0 if 12 <= h < 18 else 0.0,
+                            net_kw=2.0 if 12 <= h < 18 else -1.0, confidence="high") for h in range(12, 24)]
+    forecast = UsageForecast(hours=hours, total_load_kwh=0, total_solar_kwh=0, net_kwh=0,
+                             peak_load_kw=1.0, confidence="high", data_days=30)
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6, **cfg_kw), api_key="x")
+    bot._outdir = tmp_path
+    bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(battery_soc_pct=soc, home_load_kw=1.0))
+    bot._usage_forecast = forecast
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    return bot, now, sent
+
+
+def _run_at(now, fn, *args):
+    from franklinwh_scraper import chatbot as chatbot_mod
+    real = chatbot_mod.datetime
+
+    class _Fake(real):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    chatbot_mod.datetime = _Fake
+    try:
+        fn(*args)
+    finally:
+        chatbot_mod.datetime = real
+
+
+def test_send_evroom_reports_budget_in_home_and_car_percent(tmp_path):
+    bot, now, sent = _evroom_bot(tmp_path, soc=27.0)
+    _run_at(now, bot._send_evroom, "123", None)
+    text = sent["text"]
+    # 27% -> full with 2.07 kWh clipped; solar done at 18:00, keep = 10% + 13 h x 0.4 kW to the 7 AM
+    # fallback sunrise => spare 13.6 - 6.56 = 7.04 + surplus 2.07 = 9.1 kWh = 67% of the house
+    # battery = +11% on a 75 kWh car @ 90%
+    assert "9.1 kWh" in text and "67%" in text and "+11%" in text
+    assert "grid" in text.lower()
+
+
+def test_send_evroom_with_car_soc_compares_budget_to_what_the_80_percent_target_needs(tmp_path):
+    bot, now, sent = _evroom_bot(tmp_path, soc=27.0)
+    _run_at(now, bot._send_evroom, "123", 45.0)
+    text = sent["text"]
+    # 45% -> 80% = 35% of 75 kWh = 26.25 kWh in the pack / 0.9 = 29.2 kWh from the wall
+    assert "29.2 kWh" in text and "80%" in text
+    assert "31%" in text  # 9.1 / 29.2 = 31.2% of the way
+
+
+def test_send_evroom_says_so_when_battery_cannot_even_cover_the_night(tmp_path):
+    bot, now, sent = _evroom_bot(tmp_path, soc=5.0)
+    for h in bot._usage_forecast.hours:
+        h.predicted_solar_kw = 0.2 if h.predicted_solar_kw else 0.0  # still "sunny" but far below the 1 kW load
+    _run_at(now, bot._send_evroom, "123", None)
+    assert "no room" in sent["text"].lower()
+    assert "short of covering tonight" in sent["text"]
