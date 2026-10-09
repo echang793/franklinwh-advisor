@@ -91,8 +91,15 @@ class Config:
     # variable, so "with EV" just matches the no-EV baseline.
     ev_charge_floor_soc: float = 10.0
     # The car itself, for /evroom's home-kWh -> car-% conversion. Defaults fit
-    # a 2023 Tesla Model Y dual motor (~75 kWh usable) charged to 80% -- change
-    # them in ~/.franklinwh.json if the pack or the usual limit differs.
+    # a 2023 Tesla Model Y dual motor charged to 80%:
+    #   ev_pack_kwh 75 -- US Long Range AWD usable capacity (gross ~78-82; Tesla
+    #     publishes neither, so this is the figure the spec databases agree on;
+    #     EPA 330 mi x 28 kWh/100 mi implies ~81 kWh into the pack incl. buffer).
+    #     A degraded pack is smaller: scale by (range shown at 100% / 330 mi).
+    #   ev_charge_efficiency 0.90 -- EPA certification measured 88% wall->pack
+    #     (240 V lab test incl. cooling); a 11 kW home charger measured ~94%, a
+    #     2.3 kW one ~87%. 0.90 sits between them for a ~7.6 kW session.
+    # Change them in ~/.franklinwh.json if your pack or habits differ.
     ev_pack_kwh: float = 75.0
     ev_charge_efficiency: float = 0.90   # wall kWh -> pack kWh (charger + thermal losses)
     ev_target_soc: float = 80.0          # usual daily charge limit (%)
