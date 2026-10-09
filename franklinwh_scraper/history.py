@@ -642,6 +642,40 @@ class HistoryStore:
         ).fetchall()
         return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
 
+    def daily_hourly_load_means(
+        self, start_date: str, end_date: str, min_readings: int = 8,
+    ) -> dict[str, dict[int, float]]:
+        """Mean home load (kW) per clock hour for each calendar day in
+        [start_date, end_date). Hours with fewer than `min_readings` readings
+        are left out, so an outage doesn't masquerade as a quiet hour."""
+        rows = self._conn.execute(
+            "SELECT substr(timestamp, 1, 10), hour_of_day, AVG(home_load_kw), COUNT(*) "
+            "FROM readings WHERE timestamp >= ? AND timestamp < ? "
+            "GROUP BY 1, 2",
+            (start_date, end_date),
+        ).fetchall()
+        out: dict[str, dict[int, float]] = {}
+        for day, hour, mean, n in rows:
+            if n >= min_readings:
+                out.setdefault(day, {})[int(hour)] = float(mean)
+        return out
+
+    def daily_afternoon_readings(
+        self, start_date: str, end_date: str, start_hour: int, end_hour: int,
+    ) -> dict[str, list[tuple[str, float]]]:
+        """(timestamp, home_load_kw) readings from [start_hour, end_hour) for each
+        calendar day in [start_date, end_date), in time order -- the 5-minute
+        shape that hourly means throw away (steady draw vs. cycling)."""
+        rows = self._conn.execute(
+            "SELECT timestamp, home_load_kw FROM readings WHERE timestamp >= ? AND timestamp < ? "
+            "AND hour_of_day >= ? AND hour_of_day < ? ORDER BY timestamp",
+            (start_date, end_date, start_hour, end_hour),
+        ).fetchall()
+        out: dict[str, list[tuple[str, float]]] = {}
+        for ts, kw in rows:
+            out.setdefault(ts[:10], []).append((ts, float(kw)))
+        return out
+
     def recent_load_profile(self, days: int, percentile: float = 0.5) -> LoadProfile:
         """Return home load kW keyed by (day_of_week, hour_of_day) over the
         trailing N days, at the given percentile.

@@ -2016,6 +2016,69 @@ def _live_anchored_forecast(state: dict, c, outlook, usage_forecast, store):
         return usage_forecast
 
 
+def _afternoon_scenarios(
+    live_forecast, now: datetime, soc: float, cap: float, profile, current_load_kw: float | None,
+) -> dict:
+    """Today's sundown walk as two outcomes instead of one blended guess.
+
+    "quiet": the rest of the day at the house's quiet-afternoon load (days
+    without a car session; the entry covering `now` keeps its live-anchored
+    value). "with_car": the same plus a typical session -- the usual extra kW
+    for the usual number of hours -- starting now. Each value is the
+    _predict_sundown_soc tuple (raw_pct, sundown_dt, export_kwh), or None.
+    Without a learned profile this is just the plain forecast. If the car is
+    already charging (load well above quiet), the car case is skipped: the
+    live-anchored entry already carries it.
+    """
+    import dataclasses
+
+    if profile is None or not live_forecast.hours:
+        return {"quiet": _predict_sundown_soc(live_forecast, now, soc, cap),
+                "with_car": None, "car_now": False}
+    one_hour = timedelta(hours=1)
+    today_idx = [i for i, h in enumerate(live_forecast.hours)
+                 if h.dt.date() == now.date() and h.dt + one_hour > now]
+    hours = list(live_forecast.hours)
+    for i in today_idx[1:]:                                   # [0] covers now: keep it live-anchored
+        h = hours[i]
+        quiet = profile.quiet_by_hour.get(h.dt.hour)
+        if quiet is not None:
+            hours[i] = dataclasses.replace(h, predicted_load_kw=quiet)
+    quiet_fc = dataclasses.replace(live_forecast, hours=hours)
+    out = {"quiet": _predict_sundown_soc(quiet_fc, now, soc, cap), "with_car": None, "car_now": False}
+    if out["quiet"] is None or profile.session_hours <= 0:
+        return out
+    quiet_now = profile.quiet_by_hour.get(now.hour, 0.4)
+    if current_load_kw is not None and current_load_kw >= quiet_now + 1.0:
+        out["car_now"] = True
+        return out
+    sundown_dt = out["quiet"][1]
+    car_hours = list(hours)
+    left = profile.session_hours                 # may be fractional: the last hour is partial
+    for i in [j for j in today_idx if hours[j].dt < sundown_dt]:
+        if left <= 0:
+            break
+        h = car_hours[i]
+        car_hours[i] = dataclasses.replace(
+            h, predicted_load_kw=h.predicted_load_kw + profile.session_kw * min(1.0, left))
+        left -= 1.0
+    out["with_car"] = _predict_sundown_soc(dataclasses.replace(live_forecast, hours=car_hours), now, soc, cap)
+    return out
+
+
+def _afternoon_profile(store, today):
+    """The learned car-session pattern, or None (no store, too little history,
+    or any error: this only ever adds detail to a forecast, never blocks it)."""
+    if store is None:
+        return None
+    try:
+        from .evpattern import build_profile
+        return build_profile(store, today)
+    except Exception:
+        logger.debug("afternoon car-session profile unavailable", exc_info=True)
+        return None
+
+
 def _ev_room_plan(
     soc_at_sundown_pct: float, export_kwh: float, sundown_dt: datetime,
     sunrise_dt: datetime, cap: float, floor_pct: float, baseline_kw: float,

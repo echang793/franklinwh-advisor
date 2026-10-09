@@ -9287,3 +9287,217 @@ def test_send_evroom_roadtrip_target_overrides_the_usual_limit(tmp_path):
     assert "58.3 kWh" in text and "100%" in text
     assert "80%" not in text                                   # the usual limit is not mentioned
     assert "roadtrip" in text.lower() or "trip" in text.lower()
+
+
+# ── Afternoon car-charging pattern: quiet day vs car day, per weekday ─────
+#
+# A median load forecast blurs a habit that happens on some days and not
+# others (a ~3 kW solar-following charge for a few afternoon hours): the
+# median says "a little more than quiet" every day, which is never true.
+# evpattern learns the quiet baseline and the session separately, plus how
+# often each weekday has one, so /sundown can show both outcomes.
+
+def _seed_loads(db, day, hourly):
+    """Insert 12 five-minute readings per listed hour: hourly = {hour: kW}."""
+    for hour, kw in hourly.items():
+        for i in range(12):
+            ts = datetime(day.year, day.month, day.day, hour, i * 5).isoformat()
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,solar_kw,"
+                "battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (ts, day.weekday(), hour, kw, 0.0, 50.0, 0.0, "normal", 0.0, 0.0))
+    db._conn.commit()
+
+
+def _quiet_day(hours=range(6, 24), kw=0.4):
+    return {h: kw for h in hours}
+
+
+def _car_day(start, length=3, car_kw=3.2, kw=0.4):
+    d = _quiet_day(kw=kw)
+    for h in range(start, start + length):
+        d[h] = car_kw
+    return d
+
+
+def _series(hourly, day=None):
+    """12 five-minute readings per listed hour, as the (iso timestamp, kW) list
+    find_afternoon_session takes."""
+    day = day or datetime(2026, 10, 1)
+    return [(datetime(day.year, day.month, day.day, h, i * 5).isoformat(), kw)
+            for h, kw in sorted(hourly.items()) for i in range(12)]
+
+
+def _at(h, m, kw, day=None):
+    day = day or datetime(2026, 10, 1)
+    return (datetime(day.year, day.month, day.day, h, m).isoformat(), kw)
+
+
+def _block(h, m, minutes, kw, day=None):
+    """Five-minute readings holding `kw` for `minutes` starting at h:m."""
+    start = datetime(2026, 10, 1, h, m)
+    return [((start + timedelta(minutes=5 * i)).isoformat(), kw) for i in range(minutes // 5)]
+
+
+def test_find_afternoon_session_needs_steady_blocks_inside_the_afternoon():
+    from franklinwh_scraper.evpattern import find_afternoon_session
+
+    assert find_afternoon_session(_series(_quiet_day())) is None
+    assert find_afternoon_session(_series(_car_day(8))) is None            # morning: outside 11:00-17:00
+    assert find_afternoon_session(_block(13, 0, 40, 3.2)) is None          # 40 min total: a kettle/oven, not a charge
+    s = find_afternoon_session(_series(_car_day(13)))
+    assert s["start_hour"] == 13 and s["minutes"] == 180 and s["blocks"] == 1
+    assert s["avg_kw"] == pytest.approx(3.2)
+
+
+def test_ac_cycling_is_not_mistaken_for_a_car_session():
+    """AC comes in short spurts (compressor on 5-10 min, off 5-10 min); a car holds
+    one steady draw for the better part of an hour or more. Same afternoon
+    average, very different shape."""
+    from franklinwh_scraper.evpattern import find_afternoon_session
+
+    ac = []
+    for h in range(11, 17):
+        for i in range(12):
+            ac.append((datetime(2026, 10, 1, h, i * 5).isoformat(), 4.3 if (i // 2) % 2 == 0 else 0.6))
+    assert find_afternoon_session(ac) is None
+
+
+def test_find_afternoon_session_adds_up_a_charge_that_stops_and_restarts():
+    """2026-09-20: two steady ~6 kW blocks (50 and 60 min) with a pause between."""
+    from franklinwh_scraper.evpattern import find_afternoon_session
+
+    r = _block(11, 0, 60, 0.5) + _block(13, 0, 50, 6.0) + _block(13, 50, 60, 0.7) + _block(14, 50, 60, 5.8)
+    s = find_afternoon_session(r)
+    assert s["minutes"] == 110 and s["blocks"] == 2
+    assert s["avg_kw"] == pytest.approx((6.0 * 50 + 5.8 * 60) / 110, rel=0.02)
+
+
+def test_find_afternoon_session_measures_a_session_that_starts_mid_hour():
+    from franklinwh_scraper.evpattern import find_afternoon_session
+
+    r = _block(12, 0, 20, 0.4) + _block(12, 20, 150, 3.0)
+    s = find_afternoon_session(r)
+    assert s["minutes"] == 150 and s["start_hour"] == 12
+
+
+def test_build_profile_learns_quiet_baseline_session_and_weekday_odds(tmp_path):
+    from franklinwh_scraper.evpattern import build_profile
+
+    db = HistoryStore(tmp_path / "h.db")
+    today = datetime(2026, 10, 9).date()                      # a Friday
+    # 6 Fridays back, alternating car/quiet, plus quiet Mon-Thu so the baseline is well supported
+    fridays = [today - timedelta(days=7 * i) for i in range(1, 7)]
+    for i, d in enumerate(fridays):
+        _seed_loads(db, d, _car_day(12 + i % 3) if i % 2 == 0 else _quiet_day())
+    for d in (today - timedelta(days=k) for k in (1, 2, 3, 4, 8, 9, 10, 11, 15, 16)):
+        _seed_loads(db, d, _quiet_day())
+    prof = build_profile(db, today)
+    assert prof is not None
+    assert prof.quiet_by_hour[14] == pytest.approx(0.4)       # car days excluded from the baseline
+    assert prof.session_hours == pytest.approx(3.0)
+    assert prof.session_kw == pytest.approx(2.8)              # 3.2 kW minus the 0.4 kW baseline
+    assert prof.session_kwh == pytest.approx(8.4)
+    assert (prof.k_weekday, prof.n_weekday) == (3, 6)         # 3 of 6 Fridays
+    assert prof.weekday_name == "Friday"
+    # shrunk toward the overall rate (3 of 16 days) -> between it and 3/6
+    assert 3 / 16 < prof.p_today < 0.5
+
+
+def test_build_profile_returns_none_without_enough_history(tmp_path):
+    from franklinwh_scraper.evpattern import build_profile
+
+    db = HistoryStore(tmp_path / "h.db")
+    today = datetime(2026, 10, 9).date()
+    for k in range(1, 6):
+        _seed_loads(db, today - timedelta(days=k), _quiet_day())
+    assert build_profile(db, today) is None                   # 5 days is not a pattern
+
+
+def _scenario_forecast(now, load=1.4, solar=1.5):
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    hours = [HourPrediction(dt=datetime(now.year, now.month, now.day, h), predicted_load_kw=load,
+                            predicted_solar_kw=solar if h < 18 else 0.0, net_kw=0.0, confidence="high")
+             for h in range(now.hour, 24)]
+    return UsageForecast(hours=hours, total_load_kwh=0, total_solar_kwh=0, net_kwh=0,
+                         peak_load_kw=load, confidence="high", data_days=30)
+
+
+def _profile(**kw):
+    from franklinwh_scraper.evpattern import AfternoonEvProfile
+
+    base = dict(quiet_by_hour={h: 0.4 for h in range(24)}, session_kw=2.0, session_hours=3,
+                session_kwh=6.0, p_today=0.5, k_weekday=3, n_weekday=6, weekday_name="Friday",
+                n_days=40, n_sessions=14)
+    base.update(kw)
+    return AfternoonEvProfile(**base)
+
+
+def test_afternoon_scenarios_split_quiet_day_from_car_day():
+    now = datetime(2026, 10, 9, 12, 0, 0)
+    fc = _scenario_forecast(now)
+    out = alerts._afternoon_scenarios(fc, now, soc=40.0, cap=10.0, profile=_profile(), current_load_kw=0.5)
+    quiet_pct, sundown, _ = out["quiet"]
+    # quiet: 12:00 entry keeps the live-anchored 1.4 kW (net +0.1), then 0.4 kW (net +1.1) x5 -> 4.0 + 0.1 + 5.5
+    assert quiet_pct == pytest.approx(96.0)
+    car_pct, _, _ = out["with_car"]
+    assert quiet_pct - car_pct == pytest.approx(60.0)       # 3 h x 2.0 kW = 6 kWh of a 10 kWh pack
+    assert out["car_now"] is False
+
+
+def test_afternoon_scenarios_without_a_profile_is_the_plain_forecast():
+    now = datetime(2026, 10, 9, 12, 0, 0)
+    fc = _scenario_forecast(now)
+    out = alerts._afternoon_scenarios(fc, now, soc=10.0, cap=10.0, profile=None, current_load_kw=0.5)
+    assert out["with_car"] is None
+    assert out["quiet"] == alerts._predict_sundown_soc(fc, now, 10.0, 10.0)
+
+
+def test_afternoon_scenarios_skip_the_car_case_when_it_is_already_charging():
+    now = datetime(2026, 10, 9, 12, 0, 0)
+    fc = _scenario_forecast(now)
+    out = alerts._afternoon_scenarios(fc, now, soc=10.0, cap=10.0, profile=_profile(), current_load_kw=3.4)
+    assert out["car_now"] is True and out["with_car"] is None
+
+
+def _sundown_bot_with_pattern(tmp_path, monkeypatch, now):
+    import types
+
+    db = HistoryStore(tmp_path / "h.db")
+    for i in range(1, 21):                                  # 20 prior days, every third has a car session
+        d = (now - timedelta(days=i)).date()
+        _seed_loads(db, d, _car_day(12) if i % 3 == 0 else _quiet_day())
+    fc = _scenario_forecast(now, load=0.4, solar=1.5)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **k: fc)
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._outdir = tmp_path
+    bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(battery_soc_pct=20.0, home_load_kw=0.4))
+    bot._usage_forecast = fc
+    bot._hist_store = db
+    bot._outlook = None
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    return bot, sent
+
+
+def test_send_sundown_shows_quiet_and_car_scenarios_with_weekday_odds(tmp_path, monkeypatch):
+    now = datetime(2026, 7, 15, 12, 0, 0)                   # a Wednesday
+    bot, sent = _sundown_bot_with_pattern(tmp_path, monkeypatch, now)
+    _run_at(now, bot._send_sundown, "123")
+    import re
+    text = sent["text"]
+    assert "quiet" in text.lower()
+    assert "🚗" in text and "Wednesdays" in text
+    assert "h ≈" in text and not re.search(r"\d\.\d{4,}", text)    # no raw float noise in the message
+    import re
+    pcts = [float(x) for x in re.findall(r"~(?:<b>)?(\d+)%", text)]
+    assert len(pcts) >= 2 and pcts[-1] < pcts[0]            # the car case ends lower than the quiet case
+
+
+def test_send_evroom_budget_uses_the_quiet_afternoon_not_a_blended_one(tmp_path, monkeypatch):
+    now = datetime(2026, 7, 15, 12, 0, 0)
+    bot, sent = _sundown_bot_with_pattern(tmp_path, monkeypatch, now)
+    _run_at(now, bot._send_evroom, "123", None)
+    assert "quiet" in sent["text"].lower()
