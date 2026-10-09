@@ -78,6 +78,19 @@ class HourlyForecast:
         wind_factor = max(0.2, 1.0 - 0.04 * panel_wind)
         return self.temp_c + noct_rise * wind_factor
 
+    @property
+    def efficiency(self) -> float:
+        """Panel efficiency vs. 25C STC from the cell temperature (hot panels
+        make less). Floored so an extreme reading can't zero the hour."""
+        return max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (self.panel_temp_c - 25.0))
+
+    @property
+    def effective_ghi_wm2(self) -> float:
+        """GHI after temperature derating: what the panels can actually use.
+        Modelled kW = effective_ghi/1000 x system peak kW — the single
+        definition shared by calibration, nowcast and prediction."""
+        return self.ghi_wm2 * self.efficiency
+
 
 @dataclass
 class SolarOutlook:
@@ -155,7 +168,7 @@ class SolarOutlook:
         today_hours = [h for h in self.hours if h.time.date() == now.date()]
         total_kwh = 0.0
         for h in today_hours:
-            eff = max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (h.panel_temp_c - 25.0))
+            eff = h.efficiency
             if hourly_bias:
                 eff *= hourly_bias.get(h.time.hour, 1.0)
             total_kwh += h.ghi_wm2 / 1000.0 * system_peak_kw * eff
@@ -173,7 +186,7 @@ class SolarOutlook:
         remaining = [h for h in self.hours if h.time.date() == now.date() and h.time > now]
         total_kwh = 0.0
         for h in remaining:
-            eff = max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (h.panel_temp_c - 25.0))
+            eff = h.efficiency
             if hourly_bias:
                 eff *= hourly_bias.get(h.time.hour, 1.0)
             total_kwh += h.ghi_wm2 / 1000.0 * system_peak_kw * eff
@@ -238,12 +251,34 @@ class SolarOutlook:
         missed. Converting via "how far ahead is dt" rather than an absolute
         wall-clock comparison keeps it correct without changing the caller.
         """
-        local_dt = self._local_now() + (dt - datetime.now())
+        return self._ghi_for_local(self._local_now() + (dt - datetime.now()))
+
+    def effective_ghi_at(self, dt: datetime) -> float:
+        """ghi_at after temperature derating — see HourlyForecast.effective_ghi_wm2."""
+        h = self._hour_for_local(self._local_now() + (dt - datetime.now()))
+        return h.effective_ghi_wm2 if h else 0.0
+
+    def current_ghi(self) -> float:
+        """GHI (W/m²) for the hour we are in right now — the figure to pair
+        with a live production reading when calibrating. (avg_ghi(1) is the
+        window AHEAD of now, i.e. the next hour, which is not what a reading
+        taken at 12:20 was produced under.)"""
+        return self._ghi_for_local(self._local_now())
+
+    def current_effective_ghi(self) -> float:
+        h = self._hour_for_local(self._local_now())
+        return h.effective_ghi_wm2 if h else 0.0
+
+    def _hour_for_local(self, local_dt: datetime) -> "HourlyForecast | None":
         for h in self.hours:
             if (h.time.year == local_dt.year and h.time.month == local_dt.month
                     and h.time.day == local_dt.day and h.time.hour == local_dt.hour):
-                return h.ghi_wm2
-        return 0.0
+                return h
+        return None
+
+    def _ghi_for_local(self, local_dt: datetime) -> float:
+        h = self._hour_for_local(local_dt)
+        return h.ghi_wm2 if h else 0.0
 
     def avg_temp_c(self, next_hours: int) -> float:
         """Average forecast air temperature (°C) over the next N hours."""
@@ -272,7 +307,7 @@ class SolarOutlook:
         for h in self.hours:
             if h.time.date() != tomorrow:
                 continue
-            eff = max(_MIN_EFFICIENCY, 1.0 + _TEMP_COEFF * (h.panel_temp_c - 25.0))
+            eff = h.efficiency
             if hourly_bias:
                 eff *= hourly_bias.get(h.time.hour, 1.0)
             total_kwh += h.ghi_wm2 / 1000.0 * system_peak_kw * eff
@@ -338,12 +373,21 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
     temps   = hourly.get("temperature_2m", [])
     winds   = hourly.get("wind_speed_10m", [])
     hours: list[HourlyForecast] = []
+    direct  = hourly["direct_radiation"]
+    diffuse = hourly["diffuse_radiation"]
     for i, t in enumerate(hourly["time"]):
         dt = datetime.fromisoformat(t)
+        # Open-Meteo radiation is the average of the PRECEDING hour, labelled
+        # with the hour's END (the 07:00 value covers 06:00-07:00). Each entry
+        # here stands for the hour that STARTS at its time, so it takes the
+        # next label's value; the final entry has no following label and
+        # reads 0 rather than a guess. Temperature, wind and cloud cover are
+        # instantaneous and stay on their own labels.
+        nxt = i + 1
         hours.append(HourlyForecast(
             time=dt,
-            direct_radiation_wm2=hourly["direct_radiation"][i] or 0.0,
-            diffuse_radiation_wm2=hourly["diffuse_radiation"][i] or 0.0,
+            direct_radiation_wm2=(direct[nxt] if nxt < len(direct) else 0.0) or 0.0,
+            diffuse_radiation_wm2=(diffuse[nxt] if nxt < len(diffuse) else 0.0) or 0.0,
             cloud_cover_pct=hourly["cloud_cover"][i] or 0.0,
             temp_c=temps[i] if i < len(temps) and temps[i] is not None else 0.0,
             wind_speed_ms=winds[i] if i < len(winds) and winds[i] is not None else 0.0,

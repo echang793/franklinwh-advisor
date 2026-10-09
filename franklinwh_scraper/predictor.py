@@ -89,7 +89,7 @@ def solar_nowcast_factor(
         n = 0
         for ts, _grid_kw, _home_kw, solar_kw in rows:
             dt = datetime.fromisoformat(ts)
-            expected = max(0.0, outlook.ghi_at(dt)) / 1000.0 * system_peak_kw * perf_ratio
+            expected = max(0.0, outlook.effective_ghi_at(dt)) / 1000.0 * system_peak_kw * perf_ratio
             if hourly_bias and dt.hour in hourly_bias:
                 expected *= hourly_bias[dt.hour]
             if expected < _NOWCAST_MODEL_MIN_KW:
@@ -105,6 +105,30 @@ def solar_nowcast_factor(
     ratio = min(max(actual / model, _NOWCAST_CLAMP[0]), _NOWCAST_CLAMP[1])
     weight = min(1.0, n / _NOWCAST_FULL_WEIGHT_READINGS)
     return 1.0 + weight * (ratio - 1.0)
+
+
+def _hour_bin_kw(outlook, at: datetime, system_peak_kw: float, perf_ratio: float,
+                 hourly_bias: dict[int, float] | None) -> float:
+    """Modelled kW for the clock hour containing `at` (hour bins are the
+    forecast's and the learned bias's native resolution)."""
+    kw = max(0.0, outlook.effective_ghi_at(at)) / 1000.0 * system_peak_kw * perf_ratio
+    if hourly_bias:
+        kw *= hourly_bias.get(at.hour, 1.0)
+    return kw
+
+
+def _mean_solar_kw(outlook, start: datetime, system_peak_kw: float, perf_ratio: float,
+                   hourly_bias: dict[int, float] | None) -> float:
+    """Mean modelled kW over the hour STARTING at `start`. An entry at 15:30
+    covers 15:30-16:30, i.e. half of the 15:00 bin and half of the 16:00 bin;
+    reading the whole 15:00 bin counted the half hour already gone again (and,
+    with the sun falling, ran ~1.3 kWh/afternoon high). On the hour this is
+    exactly that hour's bin."""
+    frac = (start.minute * 60 + start.second) / 3600.0
+    kw = (1.0 - frac) * _hour_bin_kw(outlook, start, system_peak_kw, perf_ratio, hourly_bias)
+    if frac > 0.0:
+        kw += frac * _hour_bin_kw(outlook, start + timedelta(hours=1), system_peak_kw, perf_ratio, hourly_bias)
+    return kw
 
 
 def predict(
@@ -221,9 +245,7 @@ def predict(
         # for systematic GHI model bias learned from actual vs. predicted history.
         # hourly_bias applies per-hour learned correction on top of perf_ratio.
         if outlook is not None and system_peak_kw is not None:
-            solar_kw = max(0.0, outlook.ghi_at(future) / 1000.0 * system_peak_kw * perf_ratio)
-            if hourly_bias and future.hour in hourly_bias:
-                solar_kw *= hourly_bias[future.hour]
+            solar_kw = _mean_solar_kw(outlook, future, system_peak_kw, perf_ratio, hourly_bias)
             if future.date() == now.date():
                 solar_kw *= solar_nowcast
         else:

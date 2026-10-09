@@ -12,7 +12,7 @@ import logging
 import statistics
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from .advisor import _EB_CHARGE_KW
@@ -937,10 +937,12 @@ def _calibrate_solar(state: dict, solar_kw: float, outlook, now: datetime | None
     # drag the peak-kW estimate below true midday capability.
     if not (10 <= (now or datetime.now()).hour < 14):
         return
-    current_ghi = outlook.avg_ghi(1)
-    if current_ghi < 600:  # raised from 400 — only calibrate during clearly sunny conditions
+    if outlook.current_ghi() < 600:  # raised from 400 — only calibrate during clearly sunny conditions
         return
-    sample = round(solar_kw / (current_ghi / 1000.0), 2)
+    # Divide by the temperature-derated irradiance — the same modelled figure
+    # predict()/today_generation_kwh() multiply the result by — so the peak is
+    # kW per unit of usable sun instead of quietly absorbing panel heat.
+    sample = round(solar_kw / (outlook.current_effective_ghi() / 1000.0), 2)
     if not (0.5 <= sample <= 25.0):
         return
 
@@ -983,51 +985,72 @@ def _calibrate_solar(state: dict, solar_kw: float, outlook, now: datetime | None
     state["solar_peak_today_samples"].append(sample)
 
 
-def _calibrate_solar_hourly(state: dict, solar_kw: float, outlook, now: datetime) -> None:
-    """Track per-hour (actual / GHI-predicted) ratio for adaptive bias correction.
+# Per-hour solar correction ("hourly bias"): how a clock hour's real output
+# compares with the shared model (derated GHI x system peak), learned from
+# per-(hour, day) sums and combined as a recency-weighted ratio of sums.
+_BIAS_MIN_GHI        = 20.0   # W/m2 usable irradiance; below this it is night
+_BIAS_MIN_DAY_MODEL  = 0.15   # a day-hour needs this much modelled mass to vote
+_BIAS_MIN_DAYS       = 3      # valid days before the new estimator takes over
+_BIAS_KEEP_DAYS      = 45     # per-hour history kept in state
+_BIAS_HALF_LIFE_DAYS = 8.0    # weight halves every 8 days
 
-    Accumulates rolling 30-sample median per clock-hour so the predictor learns
-    systematic patterns — morning shade, afternoon heat, inverter clipping — and
-    corrects for them automatically over time.
+
+def _calibrate_solar_hourly(state: dict, solar_kw: float, outlook, now: datetime) -> None:
+    """Accumulate this poll's (actual kW, modelled kW) into today's bucket for
+    the current clock hour (state["solar_bias_acc"][hour][date]).
+
+    Every daylight poll counts, zero readings included: a shaded late-afternoon
+    hour producing nothing is the signal, not noise. (The earlier per-poll ratio
+    list dropped polls under 0.2 kW and ratios under 0.3, so those hours
+    only ever recorded their best moments and the correction read ~3x too high.)
     """
-    if not (outlook and solar_kw >= 0.2):
+    if not outlook:
         return
     system_peak = _get_system_peak_kw(state)
     if system_peak is None:
         return
-    current_ghi = outlook.avg_ghi(1)
-    if current_ghi < 100:
+    ghi = outlook.current_effective_ghi()
+    if ghi < _BIAS_MIN_GHI:
         return
-    predicted_kw = (current_ghi / 1000.0) * system_peak
-    if predicted_kw < 0.1:
-        return
-    ratio = round(solar_kw / predicted_kw, 3)
-    if 0.3 <= ratio <= 2.0:
-        key = f"solar_bias_h{now.hour}"
-        samples = state.get(key, [])
-        samples.append(ratio)
-        # 12 samples/hour/day at 5-min polls — 360 spans ~30 days so the median
-        # reflects a month of weather, not the last 2-3 days.
-        state[key] = samples[-360:]
+    slot = state.setdefault("solar_bias_acc", {}).setdefault(str(now.hour), {})
+    cell = slot.setdefault(now.strftime("%Y-%m-%d"), [0.0, 0.0])
+    cell[0] += max(0.0, solar_kw)
+    cell[1] += ghi / 1000.0 * system_peak
+    for stale in sorted(slot)[:-_BIAS_KEEP_DAYS]:
+        del slot[stale]
+    # Once the new estimator owns this hour the legacy per-poll list is dead weight.
+    if len(_valid_bias_days(slot)) >= _BIAS_MIN_DAYS:
+        state.pop(f"solar_bias_h{now.hour}", None)
+
+
+def _valid_bias_days(slot: dict) -> list[str]:
+    return sorted(d for d, (_actual, model) in slot.items() if model >= _BIAS_MIN_DAY_MODEL)
 
 
 def _get_hourly_bias(state: dict) -> dict[int, float]:
-    """Return per-hour learned solar correction factors (EWMA of samples, min 5).
+    """Per-clock-hour learned solar correction (actual / modelled).
 
-    Was a flat 30-day median. The array's per-hour shading profile keeps
-    shifting as day length changes through the seasons — e.g. the 2026-08
-    investigation into a month of ~4-6% low-biased predictions found hour 7
-    trending 0.97->1.75 and hour 17 trending 0.60->0.38 within the same
-    window, a real physical drift a flat median of the whole month can't
-    track. `perf_ratio` already uses this same EWMA for exactly that
-    reason (see _ewma) — using the same weighting here means both
-    correction layers chase a moving target at the same speed instead of
-    the daily one converging while this one lags weeks behind it. No
-    extra clamping needed: EWMA is a convex combination, so it can't leave
-    the [0.3, 2.0] range samples are already restricted to on append.
+    sum(w * actual) / sum(w * model) over the hour's recent days, w halving
+    every _BIAS_HALF_LIFE_DAYS. Energy-weighted, so a day with a sliver of
+    modelled sun can't swing it, and recency-weighted, so it follows the
+    seasonal drift in the array's shading profile (a flat window cannot:
+    2026-08 saw hour 7 go 0.97->1.75 and hour 17 go 0.60->0.38 within a
+    month). Hours with fewer than _BIAS_MIN_DAYS usable days fall back to the
+    legacy per-poll samples (EWMA, min 5) while the new estimator warms up.
     """
     bias: dict[int, float] = {}
     for h in range(24):
+        slot = state.get("solar_bias_acc", {}).get(str(h), {})
+        days = _valid_bias_days(slot)
+        if len(days) >= _BIAS_MIN_DAYS:
+            latest = date.fromisoformat(days[-1])
+            num = den = 0.0
+            for d in days:
+                w = 0.5 ** ((latest - date.fromisoformat(d)).days / _BIAS_HALF_LIFE_DAYS)
+                num += w * slot[d][0]
+                den += w * slot[d][1]
+            bias[h] = num / den
+            continue
         samples = state.get(f"solar_bias_h{h}", [])
         if len(samples) >= 5:
             bias[h] = _ewma(samples)
@@ -1944,9 +1967,13 @@ def _predict_sundown_soc(
     """
     if not (usage_forecast and usage_forecast.hours):
         return None
+    # An entry covers the hour STARTING at its dt, so one that began a few
+    # minutes before `now` still describes the hour we are in (entry 0 of a
+    # cached forecast, or of a live one whose predict() ran a moment before).
+    one_hour = timedelta(hours=1)
     today_sun_hours = [
         h for h in usage_forecast.hours
-        if h.dt > now and h.dt.date() == now.date() and h.predicted_solar_kw > 0.1
+        if h.dt + one_hour > now and h.dt.date() == now.date() and h.predicted_solar_kw > 0.1
     ]
     if not today_sun_hours:
         return None
@@ -1955,7 +1982,7 @@ def _predict_sundown_soc(
     kwh = soc / 100.0 * bat_cap
     export_kwh = 0.0
     for h in usage_forecast.hours:
-        if h.dt <= now or h.dt > sundown_dt:
+        if h.dt + one_hour <= now or h.dt > sundown_dt:
             continue
         new_kwh = kwh + h.predicted_solar_kw - h.predicted_load_kw
         if new_kwh > bat_cap:

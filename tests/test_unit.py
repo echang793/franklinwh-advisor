@@ -491,7 +491,7 @@ def test_performance_ratio_falls_back_below_3_samples():
 
 def test_calibrate_solar_rejects_single_outlier():
     import types
-    outlook = types.SimpleNamespace(avg_ghi=lambda h: 700.0)
+    outlook = types.SimpleNamespace(current_ghi=lambda: 700.0, current_effective_ghi=lambda: 700.0)
     state = {"solar_cal_samples": [3.8] * 10}
     # A single wildly different reading (sensor glitch) must not swing the pool.
     alerts._calibrate_solar(state, solar_kw=8.0, outlook=outlook,
@@ -502,7 +502,7 @@ def test_calibrate_solar_rejects_single_outlier():
 
 def test_calibrate_solar_accepts_consistent_step_change():
     import types
-    outlook = types.SimpleNamespace(avg_ghi=lambda h: 700.0)
+    outlook = types.SimpleNamespace(current_ghi=lambda: 700.0, current_effective_ghi=lambda: 700.0)
     state = {"solar_cal_samples": [2.5] * 10}
     # Three consecutive, mutually-consistent readings well above the old
     # baseline (panels cleaned, shading removed) should be accepted as real.
@@ -1114,10 +1114,10 @@ def test_send_sundown_estimates_surplus_solar_export(tmp_path):
 
     bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
     bot._outdir = tmp_path
-    # soc=80% -> 10.88 kWh; net +4 kW/hr (5.0 solar - 1.0 load) for hours
-    # 9,10,11 (dt<=now and dt>sundown_dt=11:00 are skipped by the walk) ->
-    # hour9: 10.88+4=14.88 clips 1.28 over cap; hour10/11: full +4 each
-    # clipped -> total export = 1.28+4+4 = 9.28 kWh.
+    # soc=80% -> 10.88 kWh; net +4 kW/hr (5.0 solar - 1.0 load) for the hours
+    # starting 8,9,10,11 (the 8:00 entry covers the hour we are in; entries
+    # past sundown_dt=11:00 are skipped) -> hour8: 10.88+4=14.88 clips 1.28
+    # over cap; hours 9/10/11: full +4 each clipped -> export = 1.28+12 = 13.28 kWh.
     bot._stats = types.SimpleNamespace(
         current=types.SimpleNamespace(battery_soc_pct=80.0),
     )
@@ -1140,10 +1140,10 @@ def test_send_sundown_estimates_surplus_solar_export(tmp_path):
     assert "text" in sent
     text = sent["text"]
     assert "Surplus solar to export" in text
-    assert "9.3 kWh" in text  # 9.28 rounds to 9.3
-    assert "68% of battery capacity" in text  # 9.28 / 13.6 * 100 = 68.2%
+    assert "13.3 kWh" in text  # 13.28 rounds to 13.3
+    assert "98% of battery capacity" in text  # 13.28 / 13.6 * 100 = 97.6%
     rate = tou._NEM3_DEFAULT_EXPORT_RATE
-    assert f"${9.28 * rate:.2f}" in text
+    assert f"${13.28 * rate:.2f}" in text
     assert f"${rate:.3f}/kWh" in text
 
 
@@ -4700,7 +4700,7 @@ def test_calibrate_solar_finalizes_prior_day_into_daily_bucket():
     _get_system_peak_kw's EWMA."""
     import types
 
-    outlook = types.SimpleNamespace(avg_ghi=lambda h: 700.0)
+    outlook = types.SimpleNamespace(current_ghi=lambda: 700.0, current_effective_ghi=lambda: 700.0)
     state = {}
     for _ in range(6):  # day 1 — >=5 samples so it's a "meaningful day"
         alerts._calibrate_solar(state, solar_kw=2.5, outlook=outlook,
@@ -4719,7 +4719,7 @@ def test_calibrate_solar_skips_thin_day_from_daily_bucket():
     day) shouldn't pollute the daily-peak EWMA with a noisy partial read."""
     import types
 
-    outlook = types.SimpleNamespace(avg_ghi=lambda h: 700.0)
+    outlook = types.SimpleNamespace(current_ghi=lambda: 700.0, current_effective_ghi=lambda: 700.0)
     state = {}
     for _ in range(2):  # only 2 samples on day 1 — below the 5-sample floor
         alerts._calibrate_solar(state, solar_kw=2.5, outlook=outlook,
@@ -7358,7 +7358,7 @@ class _NowcastOutlook:
     def __init__(self, ghi=800.0):
         self._ghi = ghi
 
-    def ghi_at(self, dt):
+    def effective_ghi_at(self, dt):
         return self._ghi
 
 
@@ -8923,3 +8923,243 @@ def test_ev_tou_5_periods_match_sdge_official_table_in_every_season():
         want = expect(weekday)
         for h in range(24):
             assert tou.period_at(day.replace(hour=h)) == want[h], (day.date(), h)
+
+
+# ── Open-Meteo radiation is a PRECEDING-hour average (2026-10-09) ─────────
+#
+# Open-Meteo labels each hourly radiation value with the END of the hour it
+# averages (the 07:00 value is the mean of 06:00-07:00). Treating that label
+# as the hour that starts there shifted the whole sun curve one hour late:
+# mornings under-forecast, afternoons over-forecast (1.4x at 4 PM, 6x at
+# 5 PM). _calibrate_solar_hourly happened to read the right entry (it
+# averaged the window AHEAD of now) while predict() read the wrong one, so
+# the learned per-hour bias absorbed the error in the wrong direction.
+
+def test_fetch_solar_outlook_radiation_describes_hour_starting_at_label(monkeypatch):
+    from franklinwh_scraper import weather
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self):
+            return {
+                "hourly": {
+                    "time": ["2026-10-09T05:00", "2026-10-09T06:00", "2026-10-09T07:00", "2026-10-09T08:00"],
+                    "direct_radiation": [0, 10, 200, 300],
+                    "diffuse_radiation": [0, 0, 20, 30],
+                    "cloud_cover": [11, 22, 33, 44],
+                    "temperature_2m": [15.0, 16.0, 17.0, 18.0],
+                },
+                "daily": {"sunrise": []},
+            }
+
+    monkeypatch.setattr(weather.requests, "get", lambda *a, **k: _Resp())
+    out = weather.fetch_solar_outlook(32.9, -117.1)
+    by_hour = {h.time.hour: h for h in out.hours}
+    # The 07:00 label is the 06:00-07:00 average, so it belongs to the 06:00 entry.
+    assert by_hour[6].ghi_wm2 == 220.0
+    assert by_hour[7].ghi_wm2 == 330.0
+    # No following label exists for the last entry: no data, not a guess.
+    assert by_hour[8].ghi_wm2 == 0.0
+    # Instantaneous fields are NOT shifted.
+    assert by_hour[6].cloud_cover_pct == 22
+    assert by_hour[6].temp_c == 16.0
+
+
+def test_outlook_current_ghi_is_the_hour_containing_now(monkeypatch):
+    from franklinwh_scraper.weather import HourlyForecast, SolarOutlook
+
+    hours = [HourlyForecast(time=datetime(2026, 10, 9, h), direct_radiation_wm2=h * 10.0,
+                            diffuse_radiation_wm2=1.0, cloud_cover_pct=0.0) for h in range(24)]
+    outlook = SolarOutlook(hours=hours, utc_offset_seconds=0)
+    monkeypatch.setattr(SolarOutlook, "_local_now", lambda self: datetime(2026, 10, 9, 12, 20))
+    assert outlook.current_ghi() == 121.0  # the 12:00 entry, not 13:00
+    monkeypatch.setattr(SolarOutlook, "_local_now", lambda self: datetime(2026, 10, 9, 12, 0))
+    assert outlook.current_ghi() == 121.0  # top of the hour is still that hour
+
+
+# ── One solar model for calibration, nowcast and prediction (2026-10-09) ──
+#
+# today_generation_kwh() derated for panel temperature but predict() did not,
+# while perf_ratio had been calibrated against the derated figure: predict()
+# ran ~8% hot every day (+1.7 kWh/day in a 167-day replay). Every consumer now
+# shares one definition of "modelled kW": GHI x efficiency(panel temp) x peak.
+
+def test_hourly_forecast_efficiency_derates_hot_panels():
+    from franklinwh_scraper.weather import HourlyForecast
+
+    hot = HourlyForecast(time=datetime(2026, 7, 1, 13), direct_radiation_wm2=800.0,
+                         diffuse_radiation_wm2=0.0, cloud_cover_pct=0.0, temp_c=30.0)
+    # NOCT model: 30C ambient + 25*800/800 = 55C cell -> 1 - 0.0035*30
+    assert hot.efficiency == pytest.approx(1.0 - 0.0035 * 30.0)
+    assert hot.effective_ghi_wm2 == pytest.approx(800.0 * (1.0 - 0.0035 * 30.0))
+    absurd = HourlyForecast(time=datetime(2026, 7, 1, 13), direct_radiation_wm2=800.0,
+                            diffuse_radiation_wm2=0.0, cloud_cover_pct=0.0, temp_c=200.0)
+    assert absurd.efficiency == 0.70  # floored, never unphysical
+
+
+def test_outlook_effective_ghi_accessors_apply_the_same_derating(monkeypatch):
+    from franklinwh_scraper.weather import HourlyForecast, SolarOutlook
+
+    hours = [HourlyForecast(time=datetime(2026, 7, 1, h), direct_radiation_wm2=800.0,
+                            diffuse_radiation_wm2=0.0, cloud_cover_pct=0.0, temp_c=30.0)
+             for h in range(24)]
+    outlook = SolarOutlook(hours=hours, utc_offset_seconds=0)
+    monkeypatch.setattr(SolarOutlook, "_local_now", lambda self: datetime(2026, 7, 1, 13, 20))
+    want = 800.0 * (1.0 - 0.0035 * 30.0)
+    assert outlook.current_effective_ghi() == pytest.approx(want)
+    assert outlook.current_ghi() == 800.0  # raw stays raw
+    local_now = datetime(2026, 7, 1, 13, 20)
+    assert outlook.effective_ghi_at(datetime.now() + (datetime(2026, 7, 1, 15, 20) - local_now)) == pytest.approx(want)
+
+
+class _HourlyOutlook:
+    """Effective GHI by clock hour, like SolarOutlook.effective_ghi_at."""
+    def __init__(self, by_hour):
+        self._by_hour = by_hour
+
+    def effective_ghi_at(self, dt):
+        return self._by_hour.get(dt.hour, 0.0)
+
+
+def _predict_solar(tmp_path, monkeypatch, now, by_hour, hours=3, **kw):
+    class _FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(predictor, "datetime", _FakeDatetime)
+    store = HistoryStore(tmp_path / "h.db")
+    out = predict(store, horizon_hours=hours, outlook=_HourlyOutlook(by_hour),
+                  system_peak_kw=5.0, nowcast=False, **kw)
+    return [h.predicted_solar_kw for h in out.hours]
+
+
+def test_predict_solar_is_the_mean_over_the_hour_starting_at_each_entry(tmp_path, monkeypatch):
+    """An entry at 15:30 stands for 15:30-16:30: half of the 15:00 bin and half
+    of the 16:00 bin. Using the whole 15:00 bin counted the already-elapsed half
+    hour again and, with the sun falling, ran ~1.3 kWh/afternoon high."""
+    by_hour = {15: 1000.0, 16: 500.0, 17: 0.0}  # x5 kW peak/1000 -> 5.0, 2.5, 0.0 kW
+    mid = _predict_solar(tmp_path, monkeypatch, datetime(2026, 10, 9, 15, 30), by_hour)
+    assert mid == [pytest.approx(3.75), pytest.approx(1.25), pytest.approx(0.0)]
+    top = _predict_solar(tmp_path, monkeypatch, datetime(2026, 10, 9, 15, 0), by_hour)
+    assert top == [pytest.approx(5.0), pytest.approx(2.5), pytest.approx(0.0)]  # aligned: unchanged
+
+
+def test_predict_applies_hourly_bias_per_bin_before_interpolating(tmp_path, monkeypatch):
+    by_hour = {15: 1000.0, 16: 1000.0}
+    got = _predict_solar(tmp_path, monkeypatch, datetime(2026, 10, 9, 15, 30), by_hour,
+                         hours=1, hourly_bias={15: 1.0, 16: 0.2})
+    assert got == [pytest.approx(0.5 * 5.0 * 1.0 + 0.5 * 5.0 * 0.2)]
+
+
+def test_calibrate_solar_peak_uses_derated_irradiance_but_raw_threshold():
+    """System peak is kW per unit of *usable* irradiance (so it is STC-like and
+    pairs with the same derated figure at prediction time); the 'clearly sunny'
+    gate still looks at raw irradiance."""
+    import types
+
+    outlook = types.SimpleNamespace(current_ghi=lambda: 700.0, current_effective_ghi=lambda: 630.0)
+    state = {}
+    alerts._calibrate_solar(state, solar_kw=3.15, outlook=outlook, now=datetime(2026, 7, 15, 12))
+    assert state["solar_cal_samples"] == [pytest.approx(5.0)]  # 3.15 / 0.630, not 3.15 / 0.700
+
+    dim = types.SimpleNamespace(current_ghi=lambda: 500.0, current_effective_ghi=lambda: 900.0)
+    state2 = {}
+    alerts._calibrate_solar(state2, solar_kw=3.0, outlook=dim, now=datetime(2026, 7, 15, 12))
+    assert "solar_cal_samples" not in state2  # gated on raw 500 < 600
+
+
+# ── Per-hour solar correction: ratio of daily sums, recency-weighted ─────
+#
+# Was an EWMA (alpha 0.35) over per-POLL ratios, so each hour's correction was
+# effectively the last ~25 minutes of whichever day came last, and polls under
+# 0.2 kW or ratios under 0.3 were thrown away -- which is exactly what shaded
+# late-afternoon hours produce, so 5-6 PM corrections read 0.5 instead of 0.15.
+# Now: per (hour, day) sums of actual and modelled kW, combined across days as
+# sum(w*actual)/sum(w*model) with a 8-day half-life. Replay over 167 days: hourly
+# MAE 0.586 -> 0.21 kW together with the shared-model fixes above.
+
+def _acc_outlook(effective_ghi):
+    import types
+    return types.SimpleNamespace(current_effective_ghi=lambda: effective_ghi)
+
+
+def test_hourly_calibration_accumulates_daily_sums_and_keeps_zero_readings():
+    state = {"solar_cal_samples": [4.0] * 5}  # peak 4.0 kW per 1000 W/m2
+    when = datetime(2026, 10, 9, 16, 20)
+    alerts._calibrate_solar_hourly(state, 1.0, _acc_outlook(500.0), when)
+    alerts._calibrate_solar_hourly(state, 0.0, _acc_outlook(500.0), when + timedelta(minutes=5))
+    # model = 0.5 * 4.0 = 2.0 kW per poll; the 0.0 kW poll still counts
+    assert state["solar_bias_acc"]["16"]["2026-10-09"] == [pytest.approx(1.0), pytest.approx(4.0)]
+
+
+def test_hourly_calibration_skips_night_and_unknown_peak():
+    when = datetime(2026, 10, 9, 19, 5)
+    state = {"solar_cal_samples": [4.0] * 5}
+    alerts._calibrate_solar_hourly(state, 0.0, _acc_outlook(10.0), when)       # < 20 W/m2: night
+    assert "solar_bias_acc" not in state
+    alerts._calibrate_solar_hourly({}, 1.0, _acc_outlook(500.0), when)          # no peak yet: no model
+    alerts._calibrate_solar_hourly(state, 0.05, _acc_outlook(25.0), when)       # dusk still counts
+    assert state["solar_bias_acc"]["19"]["2026-10-09"][1] == pytest.approx(0.025 * 4.0)
+
+
+def test_hourly_calibration_keeps_45_days_per_hour():
+    state = {"solar_cal_samples": [4.0] * 5}
+    for i in range(50):
+        alerts._calibrate_solar_hourly(state, 1.0, _acc_outlook(500.0),
+                                       datetime(2026, 8, 1, 12, 0) + timedelta(days=i))
+    days = sorted(state["solar_bias_acc"]["12"])
+    assert len(days) == 45 and days[-1] == "2026-09-19"
+
+
+def test_hourly_bias_is_energy_weighted_ratio_of_recency_weighted_sums():
+    # (day, [actual_sum, model_sum]); latest day = 2026-10-09
+    acc = {"16": {"2026-10-07": [10.0, 20.0],   # age 2
+                  "2026-10-08": [0.0, 0.5],     # age 1: tiny model mass, must not dominate
+                  "2026-10-09": [5.0, 10.0]}}   # age 0
+    w = {d: 0.5 ** (age / 8.0) for d, age in (("2026-10-07", 2), ("2026-10-08", 1), ("2026-10-09", 0))}
+    want = (w["2026-10-07"] * 10.0 + w["2026-10-09"] * 5.0) / (
+        w["2026-10-07"] * 20.0 + w["2026-10-08"] * 0.5 + w["2026-10-09"] * 10.0)
+    assert alerts._get_hourly_bias({"solar_bias_acc": acc})[16] == pytest.approx(want)
+
+
+def test_hourly_bias_ignores_day_hours_with_negligible_model_mass_and_needs_three_days():
+    acc = {"16": {"2026-10-08": [0.0, 0.1], "2026-10-09": [0.0, 0.1]},        # too thin to count
+           "17": {"2026-10-07": [1.0, 2.0], "2026-10-08": [1.0, 2.0]}}        # only 2 days
+    assert alerts._get_hourly_bias({"solar_bias_acc": acc}) == {}
+
+
+def test_hourly_bias_falls_back_to_legacy_samples_until_three_days_accumulate():
+    legacy = [0.9, 0.8, 0.7, 0.6, 0.5]
+    thin = {"solar_bias_h16": legacy,
+            "solar_bias_acc": {"16": {"2026-10-08": [1.0, 2.0], "2026-10-09": [1.0, 2.0]}}}
+    assert alerts._get_hourly_bias(thin)[16] == pytest.approx(alerts._ewma(legacy))
+    full = dict(thin)
+    full["solar_bias_acc"] = {"16": {"2026-10-07": [1.0, 4.0], "2026-10-08": [1.0, 4.0],
+                                     "2026-10-09": [1.0, 4.0]}}
+    assert alerts._get_hourly_bias(full)[16] == pytest.approx(0.25)  # new estimator wins
+
+
+def test_hourly_calibration_retires_legacy_samples_once_new_estimator_has_the_hour():
+    state = {"solar_cal_samples": [4.0] * 5, "solar_bias_h16": [0.9] * 6,
+             "solar_bias_acc": {"16": {"2026-10-07": [1.0, 4.0], "2026-10-08": [1.0, 4.0]}}}
+    alerts._calibrate_solar_hourly(state, 1.0, _acc_outlook(500.0), datetime(2026, 10, 9, 16, 20))
+    assert "solar_bias_h16" not in state  # today's poll is the third valid day
+
+
+def test_predict_sundown_soc_counts_the_entry_covering_now_even_if_forecast_is_slightly_old():
+    """Entry 0 of a forecast covers the hour starting at predict() time. If the
+    caller's `now` is a few minutes later (cached/shared forecast), that entry
+    still describes the hour we are in and must be walked, not dropped."""
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    def hp(h, solar):
+        return HourPrediction(dt=datetime(2026, 10, 9, h, 0), predicted_load_kw=0.5,
+                              predicted_solar_kw=solar, net_kw=solar - 0.5, confidence="high")
+
+    fc = UsageForecast(hours=[hp(12, 3.0), hp(13, 2.0), hp(14, 0.0)], total_load_kwh=0, total_solar_kwh=0,
+                       net_kwh=0, peak_load_kw=0.5, confidence="high", data_days=30)
+    pct, sundown, export = alerts._predict_sundown_soc(fc, datetime(2026, 10, 9, 12, 5), 20.0, 10.0)
+    # 2.0 kWh start + (3.0-0.5) + (2.0-0.5) = 6.0 kWh of a 10 kWh pack
+    assert pct == pytest.approx(60.0)
+    assert sundown == datetime(2026, 10, 9, 13, 0)
