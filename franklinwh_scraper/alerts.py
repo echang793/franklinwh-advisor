@@ -2019,54 +2019,113 @@ def _live_anchored_forecast(state: dict, c, outlook, usage_forecast, store):
         return usage_forecast
 
 
+def _add_session_load(hours: list, idx: list[int], sundown_dt: datetime, kw: float, duration_h: float) -> list:
+    """Copy of the forecast hours with `kw` of extra load laid over `duration_h`
+    hours, starting at the first of `idx` (entries up to sundown). The last hour
+    may be partial."""
+    import dataclasses
+
+    out = list(hours)
+    left = duration_h
+    for i in [j for j in idx if hours[j].dt < sundown_dt]:
+        if left <= 0:
+            break
+        out[i] = dataclasses.replace(out[i], predicted_load_kw=out[i].predicted_load_kw + kw * min(1.0, left))
+        left -= 1.0
+    return out
+
+
 def _afternoon_scenarios(
     live_forecast, now: datetime, soc: float, cap: float, profile, current_load_kw: float | None,
+    morning=None, morning_done: bool = False,
 ) -> dict:
-    """Today's sundown walk as two outcomes instead of one blended guess.
+    """Today's sundown walk as outcomes instead of one blended guess.
 
-    "quiet": the rest of the day at the house's quiet-afternoon load (days
-    without a car session; the entry covering `now` keeps its live-anchored
-    value). "with_car": the same plus a typical session -- the usual extra kW
-    for the usual number of hours -- starting now. Each value is the
-    _predict_sundown_soc tuple (raw_pct, sundown_dt, export_kwh), or None.
-    Without a learned profile this is just the plain forecast. If the car is
-    already charging (load well above quiet), the car case is skipped: the
-    live-anchored entry already carries it.
+    "quiet": the rest of the day at the house's quiet load (days without a car
+    session; the entry covering `now` keeps its live-anchored value).
+    "with_car": quiet plus a typical afternoon session starting now, and
+    "with_car_range" the battery % after a small and after a big one (the 25th and
+    75th percentile session -- the charging rate varies a lot).
+    "with_morning"/"with_morning_range": the same for a morning top-off when it is
+    still ahead of us (before 11 AM, none yet today).
+    Each value is the _predict_sundown_soc tuple (raw_pct, sundown_dt, export_kwh)
+    -- the ranges are plain raw percents -- or None. Without a learned profile the
+    quiet case is just the plain forecast. If a big draw is already running the car
+    cases are skipped: the live-anchored entry already carries it.
     """
     import dataclasses
 
-    if profile is None or not live_forecast.hours:
-        return {"quiet": _predict_sundown_soc(live_forecast, now, soc, cap),
-                "with_car": None, "car_now": False}
+    empty = {"quiet": None, "with_car": None, "with_car_range": None,
+             "with_morning": None, "with_morning_range": None, "car_now": False}
+    if not live_forecast.hours:
+        return empty
     one_hour = timedelta(hours=1)
     today_idx = [i for i, h in enumerate(live_forecast.hours)
                  if h.dt.date() == now.date() and h.dt + one_hour > now]
     hours = list(live_forecast.hours)
-    for i in today_idx[1:]:                                   # [0] covers now: keep it live-anchored
-        h = hours[i]
-        quiet = profile.quiet_by_hour.get(h.dt.hour)
-        if quiet is not None:
-            hours[i] = dataclasses.replace(h, predicted_load_kw=quiet)
+    if profile is not None:
+        for i in today_idx[1:]:                               # [0] covers now: keep it live-anchored
+            quiet = profile.quiet_by_hour.get(hours[i].dt.hour)
+            if quiet is not None:
+                hours[i] = dataclasses.replace(hours[i], predicted_load_kw=quiet)
     quiet_fc = dataclasses.replace(live_forecast, hours=hours)
-    out = {"quiet": _predict_sundown_soc(quiet_fc, now, soc, cap), "with_car": None, "car_now": False}
-    if out["quiet"] is None or profile.session_hours <= 0:
+    out = dict(empty, quiet=_predict_sundown_soc(quiet_fc, now, soc, cap))
+    if out["quiet"] is None:
         return out
-    quiet_now = profile.quiet_by_hour.get(now.hour, 0.4)
+    sundown_dt = out["quiet"][1]
+
+    def walk(kw: float, duration_h: float):
+        fc = dataclasses.replace(live_forecast, hours=_add_session_load(hours, today_idx, sundown_dt, kw, duration_h))
+        return _predict_sundown_soc(fc, now, soc, cap)
+
+    def case(kw: float, duration_h: float, kwh: float, lo: float | None, hi: float | None):
+        typical = walk(kw, duration_h)
+        spread = None
+        if typical and lo is not None and hi is not None and kwh > 0:
+            small, big = walk(kw * lo / kwh, duration_h), walk(kw * hi / kwh, duration_h)
+            if small and big:
+                spread = (small[0], big[0])
+        return typical, spread
+
+    quiet_now = profile.quiet_by_hour.get(now.hour, 0.4) if profile is not None else 0.4
     if current_load_kw is not None and current_load_kw >= quiet_now + 1.0:
         out["car_now"] = True
         return out
-    sundown_dt = out["quiet"][1]
-    car_hours = list(hours)
-    left = profile.session_hours                 # may be fractional: the last hour is partial
-    for i in [j for j in today_idx if hours[j].dt < sundown_dt]:
-        if left <= 0:
-            break
-        h = car_hours[i]
-        car_hours[i] = dataclasses.replace(
-            h, predicted_load_kw=h.predicted_load_kw + profile.session_kw * min(1.0, left))
-        left -= 1.0
-    out["with_car"] = _predict_sundown_soc(dataclasses.replace(live_forecast, hours=car_hours), now, soc, cap)
+    if profile is not None and profile.session_hours > 0:
+        out["with_car"], out["with_car_range"] = case(
+            profile.session_kw, profile.session_hours, profile.session_kwh,
+            profile.session_kwh_lo, profile.session_kwh_hi)
+    if morning is not None and not morning_done and now.hour < 11 and morning.kw > 0:
+        out["with_morning"], out["with_morning_range"] = case(
+            morning.kw, morning.kwh / morning.kw, morning.kwh, morning.kwh_lo, morning.kwh_hi)
     return out
+
+
+def _zone_stats(store, today, zone, load_labels=None):
+    """evpattern.zone_stats, fail-open: None when there is no store, too little
+    history, or any error."""
+    if store is None:
+        return None
+    try:
+        from .evpattern import zone_stats
+        return zone_stats(store, today, zone, load_labels=load_labels)
+    except Exception:
+        logger.debug("spike zone stats unavailable", exc_info=True)
+        return None
+
+
+def _spike_started_today(store, now: datetime, zone: tuple[int, int]) -> bool:
+    """True if a steady big draw has already started today within clock hours
+    [zone[0], zone[1]) (i.e. this morning's top-off already happened)."""
+    if store is None:
+        return False
+    try:
+        from .evpattern import find_load_spikes
+        nxt = (now.date() + timedelta(days=1)).isoformat()
+        readings = [(ts, home) for ts, _g, home, _s in store.readings_between(now.date().isoformat(), nxt)]
+        return any(zone[0] <= sp["start"].hour < zone[1] for sp in find_load_spikes(readings, min_minutes=10))
+    except Exception:
+        return False
 
 
 def _afternoon_profile(store, today, labels=None):

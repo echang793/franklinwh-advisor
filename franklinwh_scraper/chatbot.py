@@ -1015,7 +1015,8 @@ class TelegramChatBot:
 
             from .alerts import (_afternoon_profile, _afternoon_scenarios, _get_sundown_bias,
                                  _live_anchored_forecast, _load_peak_state,
-                                 _save_peak_state, _state_lock)
+                                 _save_peak_state, _spike_started_today, _state_lock,
+                                 _zone_stats)
             from .tou import peak_export_hour
 
             out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
@@ -1036,7 +1037,10 @@ class TelegramChatBot:
             # plain forecast. The headline and the graded prediction are the
             # quiet case -- the one the EV-filtered bias learning measures.
             profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
-            sc = _afternoon_scenarios(live_forecast, now, soc, cap, profile, getattr(c, "home_load_kw", None))
+            morning = _zone_stats(store, now.date(), (5, 11), state.get("load_labels"))
+            morning_done = _spike_started_today(store, now, (5, 11))
+            sc = _afternoon_scenarios(live_forecast, now, soc, cap, profile, getattr(c, "home_load_kw", None),
+                                      morning=morning, morning_done=morning_done)
             projection = sc["quiet"]
             if projection is None:
                 self._send(chat_id, "☀️ Looks like solar generation for today is already done (or not enough forecast data left today).")
@@ -1088,16 +1092,29 @@ class TelegramChatBot:
                     f"(~{export_pct:.0f}% of battery capacity) "
                     f"(~${export_kwh * peak_rate:.2f} at today's best export rate, ${peak_rate:.3f}/kWh)"
                 )
+            def _pct(raw: float) -> float:
+                return max(0.0, min(100.0, raw + bias))
+
+            def _spread(rng) -> str:
+                return f" ({_pct(rng[1]):.0f}–{_pct(rng[0]):.0f}%)" if rng else ""
+
             car_str = ""
             if profile is not None and sc["with_car"] is not None:
-                car_pct = max(0.0, min(100.0, sc["with_car"][0] + bias))
                 odds = (f"{profile.weekday_name}s you've charged {profile.k_weekday} of {profile.n_weekday}"
                         if profile.n_weekday else "Overall you charge on ~"
                         f"{profile.n_sessions / max(1, profile.n_days):.0%} of days")
-                car_str = (f"\n🚗 If you charge the car ({odds}; ~{profile.session_kw:.1f} kW × "
-                           f"{profile.session_hours:.1f} h ≈ {profile.session_kwh:.1f} kWh): ~<b>{car_pct:.0f}%</b>")
+                size = f"typical {profile.session_kwh:.1f} kWh"
+                if profile.session_kwh_lo is not None:
+                    size += f", usually {profile.session_kwh_lo:.1f}–{profile.session_kwh_hi:.1f}"
+                car_str += (f"\n🚗 If you charge the car this afternoon ({odds}; {size}): "
+                            f"~<b>{_pct(sc['with_car'][0]):.0f}%</b>{_spread(sc['with_car_range'])}")
             elif profile is not None and sc["car_now"]:
-                car_str = "\n🚗 The car looks like it's charging now; this assumes it stops within the hour."
+                car_str += "\n🚗 The car looks like it's charging now; this assumes it stops within the hour."
+            if sc["with_morning"] is not None and morning is not None:
+                msize = f"typical {morning.kwh:.1f} kWh, usually {morning.kwh_lo:.1f}–{morning.kwh_hi:.1f}"
+                car_str += (f"\n🌅 If you top off this morning ({morning.weekday_name}s {morning.k_weekday} of "
+                            f"{morning.n_weekday}; {msize}): ~<b>{_pct(sc['with_morning'][0]):.0f}%</b>"
+                            f"{_spread(sc['with_morning_range'])}")
             label = " (quiet afternoon)" if profile is not None else ""
             self._send(chat_id,
                 f"🌇 Projected SoC at sundown (~{sundown_dt.strftime('%-I:%M %p')}, using solar+load forecast)\n"
@@ -1134,7 +1151,7 @@ class TelegramChatBot:
 
             from .alerts import (_afternoon_profile, _afternoon_scenarios, _ev_car_gain_pct,
                                  _ev_room_plan, _get_sundown_bias, _live_anchored_forecast,
-                                 _load_peak_state, _next_sunrise_after)
+                                 _load_peak_state, _next_sunrise_after, _zone_stats)
 
             cfg = self._cfg
             cap = getattr(cfg, "battery_capacity_kwh", 13.6)
@@ -1194,6 +1211,16 @@ class TelegramChatBot:
                         )
                 else:
                     lines.append(f"<i>Tell me the car's % (/evroom 45) to compare against your {usual:.0f}% limit, or /evroom 30 to 100 for a trip.</i>")
+            labels = state.get("load_labels")
+            morning = _zone_stats(store, now.date(), (5, 11), labels)
+            overnight = _zone_stats(store, now.date(), (0, 5), labels)
+            if morning is not None:
+                lines.append(f"🌅 Usual morning top-off: ~{morning.kwh:.1f} kWh (usually "
+                             f"{morning.kwh_lo:.1f}–{morning.kwh_hi:.1f}); {morning.weekday_name}s {morning.k_weekday} "
+                             f"of {morning.n_weekday}.")
+            if overnight is not None:
+                lines.append(f"🌙 Big overnight charges on {overnight.n_days_with} of the last {overnight.n_days} "
+                             f"nights (typical ~{overnight.kwh:.0f} kWh): those run the battery to your floor, then use the grid.")
             if profile is not None and profile.session_kwh > 0.1 and plan["budget_kwh"] >= 0.1:
                 fits = plan["budget_kwh"] >= profile.session_kwh
                 lines.append(f"Your usual afternoon charge (~{profile.session_kwh:.1f} kWh) "

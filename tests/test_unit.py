@@ -9490,7 +9490,7 @@ def test_send_sundown_shows_quiet_and_car_scenarios_with_weekday_odds(tmp_path, 
     text = sent["text"]
     assert "quiet" in text.lower()
     assert "🚗" in text and "Wednesdays" in text
-    assert "h ≈" in text and not re.search(r"\d\.\d{4,}", text)    # no raw float noise in the message
+    assert "typical" in text and not re.search(r"\d\.\d{4,}", text)  # kWh sizes shown, no raw float noise
     import re
     pcts = [float(x) for x in re.findall(r"~(?:<b>)?(\d+)%", text)]
     assert len(pcts) >= 2 and pcts[-1] < pcts[0]            # the car case ends lower than the quiet case
@@ -9755,3 +9755,132 @@ def test_car_charge_started_says_there_is_no_room_when_already_at_the_floor(tmp_
     msg = alerts._alert_car_charge_started({}, "2026-10-10", datetime(2026, 10, 10, 8, 2),
                                            _soc_state(soc=9.0), Config(battery_capacity_kwh=13.6, ev_charge_floor_soc=10.0), db)
     assert msg and "no room" in msg.lower()
+
+
+# ── Morning / overnight spike stats and ranges ────────────────────────────
+
+def _seed_full_day(db, day, spikes=None, base=0.4):
+    """A whole day of 5-minute readings at `base` kW with spikes {hour: kW} (all 12 readings/hour)."""
+    _seed_loads(db, day, {h: (spikes or {}).get(h, base) for h in range(24)})
+
+
+def test_zone_stats_learn_morning_frequency_size_and_range(tmp_path):
+    from franklinwh_scraper.evpattern import zone_stats
+
+    db = HistoryStore(tmp_path / "h.db")
+    today = datetime(2026, 10, 9).date()                           # Friday
+    # 20 prior days; every 3rd has a morning top-off of growing size (1 h at 3.2 kW + more hours)
+    for k in range(1, 21):
+        d = today - timedelta(days=k)
+        spikes = {7: 3.2} if k % 3 == 0 else None
+        if k % 6 == 0:
+            spikes = {7: 3.2, 8: 3.2, 9: 3.2}
+        _seed_full_day(db, d, spikes)
+    z = zone_stats(db, today, (5, 11))
+    assert z.n_days == 20 and z.n_days_with == 6
+    assert z.kwh == pytest.approx(6.4)                             # days of 3.2, 3.2, 3.2, 9.6, 9.6, 9.6 kWh
+    assert z.kwh_lo <= z.kwh <= z.kwh_hi
+    assert 0.0 < z.p_today < 1.0 and z.weekday_name == "Friday"
+
+
+def test_zone_stats_honour_non_car_labels_and_need_enough_days(tmp_path):
+    from franklinwh_scraper.evpattern import zone_stats
+
+    db = HistoryStore(tmp_path / "h.db")
+    today = datetime(2026, 10, 9).date()
+    for k in range(1, 21):
+        _seed_full_day(db, today - timedelta(days=k), {7: 3.2, 8: 3.2} if k % 2 == 0 else None)
+    assert zone_stats(db, today, (5, 11)).n_days_with == 10
+    day = (today - timedelta(days=2)).isoformat()
+    labels = {f"{day}T07:00": "appliance"}                           # that morning was NOT the car
+    assert zone_stats(db, today, (5, 11), load_labels=labels).n_days_with == 9
+    thin = HistoryStore(tmp_path / "thin.db")
+    for k in range(1, 6):
+        _seed_full_day(thin, today - timedelta(days=k), {7: 3.2, 8: 3.2})
+    assert zone_stats(thin, today, (5, 11)) is None                # 5 days is not a pattern
+
+
+def test_afternoon_profile_reports_a_session_size_range():
+    prof = _profile(session_kwh=6.0, session_kwh_lo=3.0, session_kwh_hi=9.0)
+    now = datetime(2026, 10, 9, 12, 0, 0)
+    fc = _scenario_forecast(now)
+    out = alerts._afternoon_scenarios(fc, now, soc=40.0, cap=20.0, profile=prof, current_load_kw=0.5)
+    typical = out["with_car"][0]
+    small, big = out["with_car_range"]                  # battery % after the small / the big session
+    assert big < typical < small
+    assert small - big == pytest.approx(30.0)           # 9 kWh vs 3 kWh of a 20 kWh pack
+
+
+def test_morning_topoff_scenario_applies_only_before_late_morning():
+    from franklinwh_scraper.evpattern import SpikeZoneStats
+
+    z = SpikeZoneStats(zone="morning", n_days=30, n_days_with=10, k_weekday=2, n_weekday=5, weekday_name="Friday",
+                       p_today=0.35, kwh=3.0, kwh_lo=1.5, kwh_hi=6.0, minutes=60.0, kw=3.0)
+    early = datetime(2026, 10, 9, 6, 0, 0)
+    fc = _scenario_forecast(early)
+    out = alerts._afternoon_scenarios(fc, early, soc=10.0, cap=40.0, profile=_profile(), current_load_kw=0.5,
+                                      morning=z, morning_done=False)
+    assert out["with_morning"] is not None and out["with_morning"][0] < out["quiet"][0]
+    assert out["with_morning_range"][1] < out["with_morning"][0] < out["with_morning_range"][0]
+    done = alerts._afternoon_scenarios(fc, early, soc=10.0, cap=40.0, profile=_profile(), current_load_kw=0.5,
+                                       morning=z, morning_done=True)
+    assert done["with_morning"] is None
+    late = datetime(2026, 10, 9, 12, 0, 0)
+    assert alerts._afternoon_scenarios(_scenario_forecast(late), late, soc=10.0, cap=40.0, profile=_profile(),
+                                       current_load_kw=0.5, morning=z, morning_done=False)["with_morning"] is None
+
+
+def test_send_sundown_offers_the_morning_top_off_case_with_a_range_before_late_morning(tmp_path, monkeypatch):
+    import re
+    import types
+
+    now = datetime(2026, 7, 15, 6, 30, 0)                      # a Wednesday morning, top-off not yet today
+    db = HistoryStore(tmp_path / "h.db")
+    for i in range(1, 21):
+        d = (now - timedelta(days=i)).date()
+        spikes = {7: 3.2, 8: 3.2} if i % 4 == 0 else ({7: 3.2} if i % 2 == 0 else None)
+        _seed_full_day(db, d, spikes)
+    fc = _scenario_forecast(now, load=0.4, solar=1.5)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **k: fc)
+    bot = TelegramChatBot(Config(battery_capacity_kwh=40.0), api_key="x")
+    bot._outdir = tmp_path
+    bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(battery_soc_pct=10.0, home_load_kw=0.4))
+    bot._usage_forecast = fc
+    bot._hist_store = db
+    bot._outlook = None
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    _run_at(now, bot._send_sundown, "123")
+    text = sent["text"]
+    assert "🌅" in text and "top off this morning" in text
+    m = re.search(r"🌅.*?~<b>(\d+)%</b> \((\d+)–(\d+)%\)", text)
+    assert m and int(m.group(2)) <= int(m.group(1)) <= int(m.group(3))     # typical sits inside its range
+
+
+def test_send_evroom_mentions_the_usual_morning_and_overnight_charges(tmp_path, monkeypatch):
+    import types
+
+    now = datetime(2026, 7, 15, 12, 0, 0)
+    db = HistoryStore(tmp_path / "h.db")
+    for i in range(1, 21):
+        d = (now - timedelta(days=i)).date()
+        spikes = {}
+        if i % 2 == 0:
+            spikes[7] = 3.2                                    # morning top-off
+        if i % 5 == 0:
+            spikes.update({1: 5.0, 2: 5.0, 3: 5.0})            # overnight charge
+        _seed_full_day(db, d, spikes or None)
+    fc = _scenario_forecast(now, load=0.4, solar=1.5)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **k: fc)
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._outdir = tmp_path
+    bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(battery_soc_pct=40.0, home_load_kw=0.4))
+    bot._usage_forecast = fc
+    bot._hist_store = db
+    bot._outlook = None
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    _run_at(now, bot._send_evroom, "123", None)
+    text = sent["text"]
+    assert "🌅 Usual morning top-off" in text and "3.2 kWh" in text
+    assert "🌙 Big overnight charges on 4 of the last 20 nights" in text and "15 kWh" in text

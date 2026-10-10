@@ -54,6 +54,8 @@ class AfternoonEvProfile:
     weekday_name: str
     n_days: int
     n_sessions: int
+    session_kwh_lo: float | None = None   # 25th / 75th percentile of a car day's kWh (the rate varies a lot)
+    session_kwh_hi: float | None = None
 
 
 def before_arrival(start: datetime) -> bool:
@@ -170,8 +172,10 @@ def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS,
                    for t, kw in sessions[d]["readings"]) for d in measured]
         session_hours = statistics.median(sessions[d]["minutes"] for d in measured) / 60.0
         session_kwh = statistics.median(kwh)
+        kwh_lo, kwh_hi = _quartiles(kwh)
     else:
         session_hours, session_kwh = 0.0, 0.0
+        kwh_lo = kwh_hi = None
 
     wd = today.weekday()
     same = [d for d in usable if date.fromisoformat(d).weekday() == wd]
@@ -184,4 +188,76 @@ def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS,
         session_hours=session_hours, session_kwh=session_kwh,
         p_today=p_today, k_weekday=k, n_weekday=len(same), weekday_name=_WEEKDAYS[wd],
         n_days=len(usable), n_sessions=len(car_days),
+        session_kwh_lo=kwh_lo, session_kwh_hi=kwh_hi,
+    )
+
+
+def _quartiles(values: list[float]) -> tuple[float | None, float | None]:
+    """25th and 75th percentile, or (None, None) with fewer than 5 values (too few
+    to call a spread)."""
+    if len(values) < 5:
+        return None, None
+    q = statistics.quantiles(values, n=4)
+    return q[0], q[2]
+
+
+@dataclass
+class SpikeZoneStats:
+    """How often, and how big, steady >= 3 kW draws are in one part of the day."""
+    zone: str
+    n_days: int
+    n_days_with: int
+    k_weekday: int
+    n_weekday: int
+    weekday_name: str
+    p_today: float
+    kwh: float          # median kWh on a day that has one
+    kwh_lo: float
+    kwh_hi: float
+    minutes: float      # median total minutes on such a day
+    kw: float           # typical kW while it runs
+
+
+def zone_stats(store, today: date, zone: tuple[int, int], load_labels: dict | None = None,
+               lookback_days: int = _LOOKBACK_DAYS) -> SpikeZoneStats | None:
+    """Stats for steady big draws whose START falls in clock hours [zone[0], zone[1])
+    over the trailing `lookback_days`. A spike the user labelled as something other
+    than "car" is dropped; unlabeled ones count (morning draws are the car top-off by
+    the user's own account). None without enough days or enough occurrences."""
+    labels = load_labels or {}
+    start, end = (today - timedelta(days=lookback_days)), today
+    by_day: dict[str, list[tuple[str, float]]] = {}
+    for ts, _grid, home, _solar in store.readings_between(start.isoformat(), end.isoformat()):
+        by_day.setdefault(ts[:10], []).append((ts, home))
+    days = {d: r for d, r in by_day.items() if len(r) >= 150}      # ~12+ h of 5-minute readings
+    if len(days) < _MIN_DAYS:
+        return None
+    per_day: dict[str, tuple[float, float]] = {}                   # day -> (kWh, minutes)
+    for d, r in days.items():
+        kwh = minutes = 0.0
+        for sp in find_load_spikes(r):
+            if not zone[0] <= sp["start"].hour < zone[1]:
+                continue
+            if labels.get(sp["start"].strftime("%Y-%m-%dT%H:%M"), "car") != "car":
+                continue
+            kwh += sp["avg_kw"] * sp["minutes"] / 60.0
+            minutes += sp["minutes"]
+        if kwh > 0:
+            per_day[d] = (kwh, minutes)
+    if len(per_day) < 3:
+        return None
+    kwhs = [v[0] for v in per_day.values()]
+    kwh = statistics.median(kwhs)
+    lo, hi = _quartiles(kwhs)
+    wd = today.weekday()
+    same = [d for d in days if date.fromisoformat(d).weekday() == wd]
+    k = sum(d in per_day for d in same)
+    p_all = len(per_day) / len(days)
+    mins = statistics.median(v[1] for v in per_day.values())
+    return SpikeZoneStats(
+        zone=f"{zone[0]:02d}-{zone[1]:02d}", n_days=len(days), n_days_with=len(per_day),
+        k_weekday=k, n_weekday=len(same), weekday_name=_WEEKDAYS[wd],
+        p_today=(k + _SHRINK_WEIGHT * p_all) / (len(same) + _SHRINK_WEIGHT),
+        kwh=kwh, kwh_lo=lo if lo is not None else kwh, kwh_hi=hi if hi is not None else kwh,
+        minutes=mins, kw=kwh * 60.0 / mins if mins else 0.0,
     )
