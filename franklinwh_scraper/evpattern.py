@@ -83,9 +83,15 @@ def find_afternoon_session(readings: list[tuple[str, float]]) -> dict | None:
             "avg_kw": statistics.mean(kw for _t, kw in flat), "readings": flat}
 
 
-def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS) -> AfternoonEvProfile | None:
+def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS,
+                  labels: dict[str, bool] | None = None) -> AfternoonEvProfile | None:
     """Profile from the trailing `lookback_days` (not including `today`), or None
-    when there is too little clean history to call it a pattern."""
+    when there is too little clean history to call it a pattern.
+
+    `labels` ({"YYYY-MM-DD": was_the_car}) are the user's own answers and win
+    over detection: a steady block can be a dryer or a long heat-pump run, and
+    a quiet-looking day can still have been the car. Session size/length come
+    only from days where a block was actually detected."""
     start, end = (today - timedelta(days=lookback_days)).isoformat(), today.isoformat()
     hour_means = store.daily_hourly_load_means(start, end)
     usable = {d: hm for d, hm in hour_means.items() if sum(h in hm for h in AFTERNOON_HOURS) >= 5}
@@ -93,8 +99,10 @@ def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS) -> Af
         return None
     readings = store.daily_afternoon_readings(start, end, AFTERNOON_START_HOUR, AFTERNOON_END_HOUR)
     sessions = {d: find_afternoon_session(readings.get(d, [])) for d in usable}
+    labels = labels or {}
+    is_car = {d: labels.get(d, sessions[d] is not None) for d in usable}
 
-    quiet_days = [hm for d, hm in usable.items() if sessions[d] is None]
+    quiet_days = [hm for d, hm in usable.items() if not is_car[d]]
     if len(quiet_days) < _MIN_QUIET_DAYS:
         return None
     quiet_by_hour = {
@@ -102,18 +110,19 @@ def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS) -> Af
         for h in range(24) if any(h in hm for hm in quiet_days)
     }
 
-    car_days = [d for d, s in sessions.items() if s is not None]
-    if car_days:
+    car_days = [d for d in usable if is_car[d]]
+    measured = [d for d in car_days if sessions[d] is not None]
+    if measured:
         kwh = [sum(max(0.0, kw - quiet_by_hour.get(t.hour, 0.4)) * _READING_HOURS
-                   for t, kw in sessions[d]["readings"]) for d in car_days]
-        session_hours = statistics.median(sessions[d]["minutes"] for d in car_days) / 60.0
+                   for t, kw in sessions[d]["readings"]) for d in measured]
+        session_hours = statistics.median(sessions[d]["minutes"] for d in measured) / 60.0
         session_kwh = statistics.median(kwh)
     else:
         session_hours, session_kwh = 0.0, 0.0
 
     wd = today.weekday()
     same = [d for d in usable if date.fromisoformat(d).weekday() == wd]
-    k = sum(sessions[d] is not None for d in same)
+    k = sum(is_car[d] for d in same)
     p_all = len(car_days) / len(usable)
     p_today = (k + _SHRINK_WEIGHT * p_all) / (len(same) + _SHRINK_WEIGHT)
     return AfternoonEvProfile(

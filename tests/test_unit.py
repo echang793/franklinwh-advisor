@@ -9501,3 +9501,106 @@ def test_send_evroom_budget_uses_the_quiet_afternoon_not_a_blended_one(tmp_path,
     bot, sent = _sundown_bot_with_pattern(tmp_path, monkeypatch, now)
     _run_at(now, bot._send_evroom, "123", None)
     assert "quiet" in sent["text"].lower()
+
+
+# ── Asking which afternoons were the car (labels override detection) ──────
+#
+# Steady blocks also come from dryers, dishwashers and long heat-pump runs, so
+# detection alone overcounts car days. The bot asks (one tap) after an
+# afternoon with a steady block; the answer is stored per day and wins over
+# detection when the pattern is learned.
+
+def _labeled_profile_setup(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    today = datetime(2026, 10, 9).date()
+    days = [today - timedelta(days=k) for k in range(1, 21)]
+    detected = set(days[:8])                               # 8 days have a steady 3 h block
+    for d in days:
+        _seed_loads(db, d, _car_day(12) if d in detected else _quiet_day())
+    return db, today, days, detected
+
+
+def test_labels_override_detection_when_learning_the_pattern(tmp_path):
+    from franklinwh_scraper.evpattern import build_profile
+
+    db, today, days, detected = _labeled_profile_setup(tmp_path)
+    base = build_profile(db, today)
+    assert base.n_sessions == 8
+    # Tell it half of the detected days were a dryer, and that one quiet-looking day was the car.
+    no = {d.isoformat(): False for d in sorted(detected)[:4]}
+    yes = {sorted(set(days) - detected)[0].isoformat(): True}
+    prof = build_profile(db, today, labels={**no, **yes})
+    assert prof.n_sessions == 8 - 4 + 1
+    assert prof.session_kwh == pytest.approx(base.session_kwh)   # stats still come from detected blocks only
+
+
+def test_alert_car_question_asks_once_after_the_afternoon_when_there_was_a_block(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    today = datetime(2026, 10, 9)
+    _seed_loads(db, today.date(), _car_day(13))
+    state: dict = {}
+    early = alerts._alert_car_question(state, "2026-10-09", datetime(2026, 10, 9, 15, 0), db)
+    assert early is None                                     # the afternoon isn't over
+    msg = alerts._alert_car_question(state, "2026-10-09", datetime(2026, 10, 9, 17, 15), db)
+    assert msg and "car" in msg.lower() and "1:00 PM" in msg and "180 min" in msg
+    assert alerts._alert_car_question(state, "2026-10-09", datetime(2026, 10, 9, 18, 0), db) is None  # once per day
+
+
+def test_alert_car_question_stays_quiet_when_nothing_steady_or_already_labeled(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    quiet = datetime(2026, 10, 9)
+    _seed_loads(db, quiet.date(), _quiet_day())
+    late = datetime(2026, 10, 9, 17, 30)
+    assert alerts._alert_car_question({}, "2026-10-09", late, db) is None
+    _seed_loads(db, (quiet - timedelta(days=1)).date(), _car_day(13))
+    labeled = {"car_day_labels": {"2026-10-08": True}}
+    assert alerts._alert_car_question(labeled, "2026-10-08", datetime(2026, 10, 8, 17, 30), db) is None
+    assert alerts._alert_car_question({}, "2026-10-09", late, None) is None
+
+
+def test_send_alert_puts_the_extra_buttons_first(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(alerts, "notify_telegram",
+                        lambda body, tok, chat, reply_markup=None: sent.update(markup=reply_markup))
+    monkeypatch.setattr(alerts, "_log_alert", lambda *a, **k: None)
+    cfg = Config(telegram_bot_token="t", telegram_chat_id="1")
+    extra = [{"text": "🚗 Car", "callback_data": "car:2026-10-09:1"},
+             {"text": "🔌 Not the car", "callback_data": "car:2026-10-09:0"}]
+    alerts._send_alert("q", cfg, alert_name="car_question", extra_buttons=extra)
+    assert sent["markup"]["inline_keyboard"][0] == extra
+    assert len(sent["markup"]["inline_keyboard"]) >= 2        # mute/snooze rows still follow
+
+
+def test_car_label_tap_stores_the_answer_for_that_day(tmp_path):
+    bot = TelegramChatBot(Config(), api_key="x")
+    bot._outdir = tmp_path
+    bot._is_authorized = lambda chat_id: True
+    sent = []
+    bot._send = lambda chat_id, text, reply_markup=None: sent.append(text)
+    bot._answer_callback_query = lambda *a, **k: None
+    def tap(data):
+        bot._handle_callback_query({"id": "1", "data": data, "message": {"chat": {"id": 5}}})
+    tap("car:2026-10-08:1")
+    tap("car:2026-10-07:0")
+    tap("car:not-a-date:1")                                    # junk is ignored
+    labels = alerts._load_peak_state(tmp_path)["car_day_labels"]
+    assert labels == {"2026-10-08": True, "2026-10-07": False}
+    tap("car:2026-10-08:0")                                    # changing your mind overrides
+    assert alerts._load_peak_state(tmp_path)["car_day_labels"]["2026-10-08"] is False
+
+
+def test_send_cardays_asks_only_about_unlabeled_days_with_a_block(tmp_path):
+    now = datetime(2026, 10, 9, 18, 0)
+    db = HistoryStore(tmp_path / "h.db")
+    for k, car in ((1, True), (2, False), (3, True), (4, True)):
+        _seed_loads(db, (now - timedelta(days=k)).date(), _car_day(13) if car else _quiet_day())
+    bot = TelegramChatBot(Config(), api_key="x")
+    bot._outdir = tmp_path
+    bot._hist_store = db
+    alerts._save_peak_state(tmp_path, {"car_day_labels": {"2026-10-06": False}})   # k=3 already answered
+    sent = []
+    bot._send = lambda chat_id, text, reply_markup=None: sent.append((text, reply_markup))
+    _run_at(now, bot._send_cardays, "123")
+    assert len(sent) == 2                                              # k=1 and k=4; k=2 had no block, k=3 is labeled
+    assert all(m["inline_keyboard"][0][0]["callback_data"].startswith("car:2026-10-") for _t, m in sent)
+    assert {m["inline_keyboard"][0][0]["callback_data"] for _t, m in sent} == {"car:2026-10-08:1", "car:2026-10-05:1"}

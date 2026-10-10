@@ -566,7 +566,8 @@ def _alert_keyboard(alert_name: str) -> dict:
     ]]}
 
 
-def _send_alert(body: str, cfg: Config, urgent: bool = False, alert_name: str | None = None) -> None:
+def _send_alert(body: str, cfg: Config, urgent: bool = False, alert_name: str | None = None,
+                extra_buttons: list[dict] | None = None) -> None:
     """Send to all configured channels.
 
     `alert_name` — when given and not one of `_ALWAYS_ON_ALERTS`, the
@@ -583,6 +584,8 @@ def _send_alert(body: str, cfg: Config, urgent: bool = False, alert_name: str | 
         notify_imessage_text(body, cfg.imessage_phone)
     if cfg.telegram_bot_token and cfg.telegram_chat_id:
         kb = _alert_keyboard(alert_name) if (alert_name and alert_name not in _ALWAYS_ON_ALERTS) else None
+        if extra_buttons:  # alert-specific answer buttons go first, above mute/snooze
+            kb = {"inline_keyboard": [extra_buttons] + (kb["inline_keyboard"] if kb else [])}
         notify_telegram(body, cfg.telegram_bot_token, cfg.telegram_chat_id, reply_markup=kb)
     if cfg.smtp_host and cfg.email_to:
         notify_email(body, cfg)
@@ -2066,17 +2069,56 @@ def _afternoon_scenarios(
     return out
 
 
-def _afternoon_profile(store, today):
+def _afternoon_profile(store, today, labels=None):
     """The learned car-session pattern, or None (no store, too little history,
-    or any error: this only ever adds detail to a forecast, never blocks it)."""
+    or any error: this only ever adds detail to a forecast, never blocks it).
+    `labels` are the user's "was that the car?" answers (state["car_day_labels"])."""
     if store is None:
         return None
     try:
         from .evpattern import build_profile
-        return build_profile(store, today)
+        return build_profile(store, today, labels=labels)
     except Exception:
         logger.debug("afternoon car-session profile unavailable", exc_info=True)
         return None
+
+
+def _car_question_buttons(day: str) -> list[dict]:
+    """One-tap answers to "was that the car?" for `day` (callback car:<day>:1|0)."""
+    return [{"text": "🚗 Yes, the car", "callback_data": f"car:{day}:1"},
+            {"text": "🔌 No, something else", "callback_data": f"car:{day}:0"}]
+
+
+def _alert_car_question(state: dict, today: str, now: datetime, store) -> str | None:
+    """After the solar afternoon (5:10 PM), if today had a steady block that
+    could be the car, ask once. The answer (state["car_day_labels"]) overrides
+    detection when the pattern is learned: dryers, dishwashers and long heat-pump
+    runs look like a car to a load-shape detector."""
+    if store is None or now.hour * 60 + now.minute < 17 * 60 + 10:
+        return None
+    if state.get("car_question_date") == today or today in state.get("car_day_labels", {}):
+        return None
+    try:
+        from .evpattern import (AFTERNOON_END_HOUR, AFTERNOON_START_HOUR,
+                                find_afternoon_session)
+        nxt = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
+        readings = store.daily_afternoon_readings(today, nxt, AFTERNOON_START_HOUR, AFTERNOON_END_HOUR).get(today, [])
+        sess = find_afternoon_session(readings)
+    except Exception:
+        logger.debug("car question unavailable", exc_info=True)
+        return None
+    if sess is None:
+        return None
+    state["car_question_date"] = today
+    start = sess["readings"][0][0]
+    kwh = sess["avg_kw"] * sess["minutes"] / 60.0
+    return (
+        "🚗 <b>Was that the car?</b>\n"
+        f"A steady ~{sess['avg_kw']:.1f} kW draw ran for {sess['minutes']} min starting "
+        f"{start.strftime('%-I:%M %p')} (≈ {kwh:.1f} kWh).\n"
+        "Tap an answer — it teaches /sundown and /evroom which afternoons are car days "
+        "(dryer, dishwasher and AC runs can look the same)."
+    )
 
 
 def _ev_room_plan(
@@ -4142,6 +4184,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("storm_prep",           lambda: _alert_storm_prep(state, today, now, c, cfg)),
             ("ev_charge_window",     lambda: _alert_ev_charge_window(state, today, now, c, cfg, outlook)),
             ("ev_still_charging",    lambda: _alert_ev_still_charging(state, today, now, c, cfg, store)),
+            ("car_question",         lambda: _alert_car_question(state, today, now, store)),
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),
@@ -4172,5 +4215,6 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
         _save_peak_state(out, state)
 
     for body, urgent, name in to_send:
-        _send_alert(body, cfg, urgent=urgent, alert_name=name)
+        extra = {"extra_buttons": _car_question_buttons(today)} if name == "car_question" else {}
+        _send_alert(body, cfg, urgent=urgent, alert_name=name, **extra)
 

@@ -370,6 +370,7 @@ class TelegramChatBot:
                             "/sundown  — projected SoC when today's solar is done\n"
                             "/sundown H — projected SoC in H hours (1-24)\n"
                             "/evroom [car %] [to N%] — battery room for the car without grid import\n"
+                            "/cardays  — label which recent afternoons were the car\n"
                             "/ebtarget — Emergency Backup charge target for today\n"
                             "/mute     — snooze non-safety alerts (2h or 8h)\n"
                             "/unmute   — cancel an active mute\n"
@@ -487,6 +488,9 @@ class TelegramChatBot:
                             args=(chat_id, _tgt),
                             daemon=True,
                         ).start()
+                        continue
+                    if text.lower().strip().split("@")[0] == "/cardays":
+                        threading.Thread(target=self._send_cardays, args=(chat_id,), daemon=True).start()
                         continue
                     # /evroom [car %] [[to] target %] — battery room for the car without grid import
                     _ev = _parse_evroom(text)
@@ -1031,7 +1035,7 @@ class TelegramChatBot:
             # learned pattern (evpattern); without enough history this is the
             # plain forecast. The headline and the graded prediction are the
             # quiet case -- the one the EV-filtered bias learning measures.
-            profile = _afternoon_profile(store, now.date())
+            profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
             sc = _afternoon_scenarios(live_forecast, now, soc, cap, profile, getattr(c, "home_load_kw", None))
             projection = sc["quiet"]
             if projection is None:
@@ -1140,7 +1144,7 @@ class TelegramChatBot:
             state = _load_peak_state(out)
 
             live = _live_anchored_forecast(state, c, outlook, forecast, store)
-            profile = _afternoon_profile(store, now.date())
+            profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
             projection = _afternoon_scenarios(live, now, c.battery_soc_pct, cap, profile,
                                               getattr(c, "home_load_kw", None))["quiet"]
             if projection is None:
@@ -1304,7 +1308,80 @@ class TelegramChatBot:
             self._answer_callback_query(cq_id, "Snoozed" if ok and hours > 0 else "Done" if ok else "Can't snooze")
             self._send(chat_id, reply)
             return
+        if data.startswith("car:"):
+            parts = data.split(":")
+            if len(parts) == 3 and parts[2] in ("0", "1"):
+                ok, reply = self._set_car_label(parts[1], parts[2] == "1")
+                self._answer_callback_query(cq_id, "Got it" if ok else "Can't read that")
+                if ok:
+                    self._send(chat_id, reply)
+                return
         self._answer_callback_query(cq_id)
+
+    def _set_car_label(self, day: str, was_car: bool) -> tuple[bool, str]:
+        """Record the answer to "was that the car?" for `day` (YYYY-MM-DD).
+        Same state file and lock as /mute; keeps the newest 180 days."""
+        from datetime import date as _date
+        from pathlib import Path
+
+        from .alerts import _save_peak_state, _state_lock
+        try:
+            _date.fromisoformat(day)
+        except ValueError:
+            return False, ""
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        with _state_lock(out):
+            state = _load_peak_state(out)
+            labels = state.get("car_day_labels", {})
+            labels[day] = was_car
+            state["car_day_labels"] = {d: labels[d] for d in sorted(labels)[-180:]}
+            _save_peak_state(out, state)
+        return True, (f"🚗 Counted {day} as a car day." if was_car
+                      else f"🔌 Noted — {day} was not the car.")
+
+    def _send_cardays(self, chat_id: str, limit: int = 6) -> None:
+        """Respond to /cardays — one tap-to-answer message for each recent day
+        with a steady afternoon block that you haven't labelled yet."""
+        try:
+            from datetime import date as _date
+            from pathlib import Path
+
+            from .alerts import _car_question_buttons, _load_peak_state
+            from .evpattern import AFTERNOON_END_HOUR, AFTERNOON_START_HOUR, find_afternoon_session
+            with self._lock:
+                store = self._hist_store
+            if store is None:
+                self._send(chat_id, "No history yet.")
+                return
+            out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+            labels = _load_peak_state(out).get("car_day_labels", {})
+            today = datetime.now().date()
+            days = store.daily_afternoon_readings(
+                (today - timedelta(days=30)).isoformat(), today.isoformat(),
+                AFTERNOON_START_HOUR, AFTERNOON_END_HOUR)
+            todo = []
+            for d in sorted(days, reverse=True):
+                if d in labels:
+                    continue
+                sess = find_afternoon_session(days[d])
+                if sess:
+                    todo.append((d, sess))
+            if not todo:
+                self._send(chat_id, "🚗 Nothing to label — every recent afternoon with a steady block is answered.")
+                return
+            for d, sess in todo[:limit]:
+                day = _date.fromisoformat(d)
+                self._send(
+                    chat_id,
+                    f"🚗 <b>{day.strftime('%a %b %-d')}</b>: steady ~{sess['avg_kw']:.1f} kW for "
+                    f"{sess['minutes']} min from {sess['readings'][0][0].strftime('%-I:%M %p')}. Was that the car?",
+                    reply_markup={"inline_keyboard": [_car_question_buttons(d)]},
+                )
+            if len(todo) > limit:
+                self._send(chat_id, f"{len(todo) - limit} more unlabeled — send /cardays again after these.")
+        except Exception as e:
+            logger.warning("_send_cardays error: %s", e)
+            self._send(chat_id, f"Error: {e}")
 
     def _set_mute(self, hours: float) -> str:
         """Mute (hours > 0) or clear (hours <= 0) the alert snooze.
