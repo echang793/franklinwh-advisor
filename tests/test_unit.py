@@ -9940,3 +9940,43 @@ def test_evroom_no_longer_describes_overnight_charges_as_draining_the_battery(tm
     bot._send = lambda chat_id, text: sent.__setitem__("text", text)
     _run_at(now, bot._send_evroom, "123", None)
     assert "overnight" not in sent["text"].lower()
+
+
+# ── Long-pulse AC (25-40 min on, 15-20 min off) is not the car ────────────
+
+def _ac_pulses(day, first_hour, starts_min, on_min=35, kw=3.1):
+    """Repeated blocks of on_min at kw (start offsets in minutes from first_hour:00)."""
+    out = []
+    base = datetime(day.year, day.month, day.day, first_hour)
+    for off in starts_min:
+        for i in range(on_min // 5):
+            out.append(((base + timedelta(minutes=off + 5 * i)).isoformat(), kw))
+    return out
+
+
+def test_ac_pulses_of_half_an_hour_are_not_a_car_session():
+    from franklinwh_scraper.evpattern import find_afternoon_session, find_load_spikes
+
+    day = datetime(2026, 9, 28)
+    pulses = _ac_pulses(day, 13, [0, 55, 110, 165])        # four 35-min blocks, 20-min gaps (the 9/28 night shape)
+    assert find_afternoon_session(pulses) is None
+    assert find_load_spikes(pulses) == []                   # nor a spike worth a "what was that?"
+
+
+def test_a_car_that_pauses_once_is_still_a_car_and_so_is_one_long_block():
+    from franklinwh_scraper.evpattern import find_afternoon_session, find_load_spikes
+
+    day = datetime(2026, 9, 20)
+    paused = _ac_pulses(day, 13, [0, 70], on_min=50, kw=6.0)        # 2 blocks, 20 min gap: not a cluster of 3
+    assert find_afternoon_session(paused)["blocks"] == 2
+    assert len(find_load_spikes(paused)) == 2
+    long = _ac_pulses(day, 13, [0], on_min=150, kw=3.0)
+    assert find_afternoon_session(long)["minutes"] == 150
+
+
+def test_a_labeled_yes_does_not_get_overridden_by_the_ac_filter_in_the_profile(tmp_path):
+    from franklinwh_scraper.evpattern import find_afternoon_session
+
+    pulses = _ac_pulses(datetime(2026, 10, 3), 15, [0, 55, 110])    # a Saturday: three 35-min blocks
+    assert find_afternoon_session(pulses) is None
+    assert find_afternoon_session(pulses, ac_filter=False)["blocks"] == 3     # the "yes, that was the car" path

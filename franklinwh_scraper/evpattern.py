@@ -102,8 +102,37 @@ def _block_minutes(block: list[tuple[datetime, float]]) -> int:
     return round((block[-1][0] - block[0][0]).total_seconds() / 60.0 + _READING_HOURS * 60)
 
 
+# AC compressors run in pulses of 25-40 minutes with 15-20 minute gaps (seen on
+# 2026-09-28 overnight, gaps of 5-60 min): too long to be "short spurts", but a run of three or
+# more such pulses close together is not a car, which holds one steady draw or
+# pauses once or twice.
+AC_CLUSTER_MIN_BLOCKS = 3
+AC_MAX_BLOCK_MINUTES = 50
+AC_MAX_GAP_MINUTES = 65
+
+
+def _drop_ac_clusters(blocks: list[list[tuple[datetime, float]]]) -> list[list[tuple[datetime, float]]]:
+    """Remove runs of >= AC_CLUSTER_MIN_BLOCKS short blocks separated by short gaps."""
+    if len(blocks) < AC_CLUSTER_MIN_BLOCKS:
+        return blocks
+    groups: list[list[list[tuple[datetime, float]]]] = [[blocks[0]]]
+    for prev, cur in zip(blocks, blocks[1:]):
+        gap = (cur[0][0] - prev[-1][0]).total_seconds() / 60.0 - _READING_HOURS * 60
+        if gap <= AC_MAX_GAP_MINUTES:
+            groups[-1].append(cur)
+        else:
+            groups.append([cur])
+    keep: list[list[tuple[datetime, float]]] = []
+    for g in groups:
+        if len(g) >= AC_CLUSTER_MIN_BLOCKS and all(_block_minutes(b) < AC_MAX_BLOCK_MINUTES for b in g):
+            continue
+        keep.extend(g)
+    return keep
+
+
 def find_afternoon_session(readings: list[tuple[str, float]], weekday: bool = False,
-                           arrival_minute: int | None = WEEKDAY_ARRIVAL_MINUTE) -> dict | None:
+                           arrival_minute: int | None = WEEKDAY_ARRIVAL_MINUTE,
+                           ac_filter: bool = True) -> dict | None:
     """Steady car-charge blocks in a day's (iso timestamp, kW) readings, or None.
     A block must start between 11:00 and 17:00 (and, with weekday=True and an
     `arrival_minute` set, not before the usual arrival home); it is measured to its end. Returns
@@ -114,8 +143,8 @@ def find_afternoon_session(readings: list[tuple[str, float]], weekday: bool = Fa
                 and not (weekday and arrival_minute is not None
                          and start.hour * 60 + start.minute < arrival_minute))
 
-    blocks = [b for b in _steady_blocks(readings, SESSION_MIN_KW, BLOCK_MIN_MINUTES,
-                                        (AFTERNOON_START_HOUR, AFTERNOON_END_HOUR)) if starts_ok(b)]
+    found = _steady_blocks(readings, SESSION_MIN_KW, BLOCK_MIN_MINUTES, (AFTERNOON_START_HOUR, AFTERNOON_END_HOUR))
+    blocks = [b for b in (_drop_ac_clusters(found) if ac_filter else found) if starts_ok(b)]
     minutes = sum(_block_minutes(b) for b in blocks)
     if minutes < SESSION_MIN_MINUTES:
         return None
@@ -133,7 +162,7 @@ def find_load_spikes(readings: list[tuple[str, float]], min_minutes: float = SPI
     water heater): >= SPIKE_MIN_KW for >= min_minutes, unbroken and flat.
     Each is {"start", "end", "minutes", "avg_kw"}, in time order."""
     out = []
-    for b in _steady_blocks(readings, SPIKE_MIN_KW, min_minutes):
+    for b in _drop_ac_clusters(_steady_blocks(readings, SPIKE_MIN_KW, min_minutes)):
         out.append({"start": b[0][0], "end": b[-1][0] + timedelta(minutes=_READING_HOURS * 60),
                     "minutes": _block_minutes(b), "avg_kw": statistics.mean(kw for _t, kw in b)})
     return out
@@ -164,7 +193,7 @@ def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS,
         wk = date.fromisoformat(d).weekday() < 5
         sessions[d] = find_afternoon_session(readings.get(d, []), weekday=wk, arrival_minute=arrival_minute)
         if sessions[d] is None and labels.get(d):
-            sessions[d] = find_afternoon_session(readings.get(d, []), weekday=False)
+            sessions[d] = find_afternoon_session(readings.get(d, []), weekday=False, ac_filter=False)
     is_car = {d: labels.get(d, sessions[d] is not None) for d in usable}
 
     quiet_days = [hm for d, hm in usable.items() if not is_car[d]]
