@@ -24,8 +24,15 @@ SESSION_MIN_KW = 1.2
 BLOCK_MIN_MINUTES = 30
 SESSION_MIN_MINUTES = 45
 BLOCK_MAX_CV = 0.35                      # std/mean inside a block
-AFTERNOON_START_HOUR, AFTERNOON_END_HOUR = 11, 17     # solar-hours charging, not dinner
-AFTERNOON_HOURS = range(AFTERNOON_START_HOUR, AFTERNOON_END_HOUR)
+# A session must START in 11:00-17:00 (solar-hours charging, not dinner) but is
+# measured to its end, so readings are read to 19:00.
+AFTERNOON_START_HOUR, AFTERNOON_END_HOUR = 11, 19    # window of readings to load
+SESSION_START_BEFORE_HOUR = 17
+AFTERNOON_HOURS = range(AFTERNOON_START_HOUR, SESSION_START_BEFORE_HOUR)   # day-coverage check
+# Home from work: on weekdays the car is away until about 3 PM (the user's
+# routine: weekday blocks start 3:00-3:17 PM), so a weekday block that starts
+# earlier is more likely a dryer, AC or a work-from-home day. Weekends are open.
+WEEKDAY_ARRIVAL_MINUTE = 14 * 60 + 45
 _MAX_GAP = timedelta(minutes=10)         # a longer hole in the readings ends a run
 _READING_HOURS = 5 / 60.0                # nominal reading spacing for energy sums
 _MIN_DAYS = 10                           # usable days before we claim a pattern
@@ -49,10 +56,16 @@ class AfternoonEvProfile:
     n_sessions: int
 
 
-def find_afternoon_session(readings: list[tuple[str, float]]) -> dict | None:
-    """Steady car-charge blocks in a day's (iso timestamp, kW) readings between
-    11:00 and 17:00, or None. Returns {"start_hour", "minutes" (all blocks),
-    "blocks", "avg_kw", "readings" (those in blocks)}."""
+def before_arrival(start: datetime) -> bool:
+    """True for a weekday time before the usual ~3 PM arrival home."""
+    return start.weekday() < 5 and start.hour * 60 + start.minute < WEEKDAY_ARRIVAL_MINUTE
+
+
+def _steady_blocks(readings: list[tuple[str, float]], min_kw: float, min_minutes: float,
+                   window: tuple[int, int] | None = None) -> list[list[tuple[datetime, float]]]:
+    """Runs of consecutive readings at or above `min_kw` (no gap over 10 minutes,
+    optionally only inside the [start, end) clock-hour `window`) that last at
+    least `min_minutes` and stay within BLOCK_MAX_CV of flat."""
     blocks: list[list[tuple[datetime, float]]] = []
     run: list[tuple[datetime, float]] = []
 
@@ -60,27 +73,59 @@ def find_afternoon_session(readings: list[tuple[str, float]]) -> dict | None:
         if len(run) >= 2:
             minutes = (run[-1][0] - run[0][0]).total_seconds() / 60.0 + _READING_HOURS * 60
             kws = [kw for _t, kw in run]
-            mean = statistics.mean(kws)
-            if minutes >= BLOCK_MIN_MINUTES and statistics.pstdev(kws) / mean <= BLOCK_MAX_CV:
+            if minutes >= min_minutes and statistics.pstdev(kws) / statistics.mean(kws) <= BLOCK_MAX_CV:
                 blocks.append(list(run))
         run.clear()
 
     for ts, kw in readings:
         t = datetime.fromisoformat(ts)
-        if not AFTERNOON_START_HOUR <= t.hour < AFTERNOON_END_HOUR or kw < SESSION_MIN_KW:
+        if (window and not window[0] <= t.hour < window[1]) or kw < min_kw:
             flush()
             continue
         if run and t - run[-1][0] > _MAX_GAP:
             flush()
         run.append((t, kw))
     flush()
+    return blocks
 
-    minutes = sum(round((b[-1][0] - b[0][0]).total_seconds() / 60.0 + _READING_HOURS * 60) for b in blocks)
+
+def _block_minutes(block: list[tuple[datetime, float]]) -> int:
+    return round((block[-1][0] - block[0][0]).total_seconds() / 60.0 + _READING_HOURS * 60)
+
+
+def find_afternoon_session(readings: list[tuple[str, float]], weekday: bool = False) -> dict | None:
+    """Steady car-charge blocks in a day's (iso timestamp, kW) readings, or None.
+    A block must start between 11:00 and 17:00 (and, with weekday=True, not before
+    the usual ~3 PM arrival home); it is measured to its end. Returns
+    {"start_hour", "minutes" (all blocks), "blocks", "avg_kw", "readings"}."""
+    def starts_ok(block) -> bool:
+        start = block[0][0]
+        return (AFTERNOON_START_HOUR <= start.hour < SESSION_START_BEFORE_HOUR
+                and not (weekday and start.hour * 60 + start.minute < WEEKDAY_ARRIVAL_MINUTE))
+
+    blocks = [b for b in _steady_blocks(readings, SESSION_MIN_KW, BLOCK_MIN_MINUTES,
+                                        (AFTERNOON_START_HOUR, AFTERNOON_END_HOUR)) if starts_ok(b)]
+    minutes = sum(_block_minutes(b) for b in blocks)
     if minutes < SESSION_MIN_MINUTES:
         return None
     flat = [r for b in blocks for r in b]
     return {"start_hour": blocks[0][0][0].hour, "minutes": minutes, "blocks": len(blocks),
             "avg_kw": statistics.mean(kw for _t, kw in flat), "readings": flat}
+
+
+SPIKE_MIN_KW = 3.0
+SPIKE_MIN_MINUTES = 25
+
+
+def find_load_spikes(readings: list[tuple[str, float]]) -> list[dict]:
+    """Big steady draws anywhere in a day's readings (a car top-off, an oven, a
+    water heater): >= SPIKE_MIN_KW for >= SPIKE_MIN_MINUTES, unbroken and flat.
+    Each is {"start", "end", "minutes", "avg_kw"}, in time order."""
+    out = []
+    for b in _steady_blocks(readings, SPIKE_MIN_KW, SPIKE_MIN_MINUTES):
+        out.append({"start": b[0][0], "end": b[-1][0] + timedelta(minutes=_READING_HOURS * 60),
+                    "minutes": _block_minutes(b), "avg_kw": statistics.mean(kw for _t, kw in b)})
+    return out
 
 
 def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS,
@@ -98,8 +143,16 @@ def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS,
     if len(usable) < _MIN_DAYS:
         return None
     readings = store.daily_afternoon_readings(start, end, AFTERNOON_START_HOUR, AFTERNOON_END_HOUR)
-    sessions = {d: find_afternoon_session(readings.get(d, [])) for d in usable}
     labels = labels or {}
+    # Unlabeled days count only blocks that fit the routine (weekdays: from ~3 PM).
+    # A "yes" label on a day outside the routine (work from home) still counts, and
+    # then its size/length come from whatever block is there.
+    sessions = {}
+    for d in usable:
+        wk = date.fromisoformat(d).weekday() < 5
+        sessions[d] = find_afternoon_session(readings.get(d, []), weekday=wk)
+        if sessions[d] is None and labels.get(d):
+            sessions[d] = find_afternoon_session(readings.get(d, []), weekday=False)
     is_car = {d: labels.get(d, sessions[d] is not None) for d in usable}
 
     quiet_days = [hm for d, hm in usable.items() if not is_car[d]]

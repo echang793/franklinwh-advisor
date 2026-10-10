@@ -1316,7 +1316,36 @@ class TelegramChatBot:
                 if ok:
                     self._send(chat_id, reply)
                 return
+        if data.startswith("spk:"):
+            key, _, code = data[4:].rpartition(":")
+            ok, reply = self._set_spike_label(key, code)
+            self._answer_callback_query(cq_id, "Got it" if ok else "Can't read that")
+            if ok:
+                self._send(chat_id, reply)
+            return
         self._answer_callback_query(cq_id)
+
+    def _set_spike_label(self, key: str, code: str) -> tuple[bool, str]:
+        """Record what a big spike (identified by its start, YYYY-MM-DDTHH:MM) was."""
+        from datetime import datetime as _dt
+        from pathlib import Path
+
+        from .alerts import _SPIKE_CATEGORIES, _save_peak_state, _state_lock
+        category = _SPIKE_CATEGORIES.get(code)
+        try:
+            _dt.fromisoformat(key)
+        except ValueError:
+            return False, ""
+        if category is None:
+            return False, ""
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        with _state_lock(out):
+            state = _load_peak_state(out)
+            labels = state.get("load_labels", {})
+            labels[key] = category
+            state["load_labels"] = {k: labels[k] for k in sorted(labels)[-200:]}
+            _save_peak_state(out, state)
+        return True, f"Noted: {key.replace('T', ' ')} was {category}."
 
     def _set_car_label(self, day: str, was_car: bool) -> tuple[bool, str]:
         """Record the answer to "was that the car?" for `day` (YYYY-MM-DD).

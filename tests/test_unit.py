@@ -9390,7 +9390,7 @@ def test_build_profile_learns_quiet_baseline_session_and_weekday_odds(tmp_path):
     # 6 Fridays back, alternating car/quiet, plus quiet Mon-Thu so the baseline is well supported
     fridays = [today - timedelta(days=7 * i) for i in range(1, 7)]
     for i, d in enumerate(fridays):
-        _seed_loads(db, d, _car_day(12 + i % 3) if i % 2 == 0 else _quiet_day())
+        _seed_loads(db, d, _car_day(15) if i % 2 == 0 else _quiet_day())
     for d in (today - timedelta(days=k) for k in (1, 2, 3, 4, 8, 9, 10, 11, 15, 16)):
         _seed_loads(db, d, _quiet_day())
     prof = build_profile(db, today)
@@ -9468,7 +9468,7 @@ def _sundown_bot_with_pattern(tmp_path, monkeypatch, now):
     db = HistoryStore(tmp_path / "h.db")
     for i in range(1, 21):                                  # 20 prior days, every third has a car session
         d = (now - timedelta(days=i)).date()
-        _seed_loads(db, d, _car_day(12) if i % 3 == 0 else _quiet_day())
+        _seed_loads(db, d, _car_day(15) if i % 3 == 0 else _quiet_day())
     fc = _scenario_forecast(now, load=0.4, solar=1.5)
     monkeypatch.setattr(alerts, "predict", lambda *a, **k: fc)
     bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
@@ -9516,7 +9516,7 @@ def _labeled_profile_setup(tmp_path):
     days = [today - timedelta(days=k) for k in range(1, 21)]
     detected = set(days[:8])                               # 8 days have a steady 3 h block
     for d in days:
-        _seed_loads(db, d, _car_day(12) if d in detected else _quiet_day())
+        _seed_loads(db, d, _car_day(15) if d in detected else _quiet_day())
     return db, today, days, detected
 
 
@@ -9604,3 +9604,103 @@ def test_send_cardays_asks_only_about_unlabeled_days_with_a_block(tmp_path):
     assert len(sent) == 2                                              # k=1 and k=4; k=2 had no block, k=3 is labeled
     assert all(m["inline_keyboard"][0][0]["callback_data"].startswith("car:2026-10-") for _t, m in sent)
     assert {m["inline_keyboard"][0][0]["callback_data"] for _t, m in sent} == {"car:2026-10-08:1", "car:2026-10-05:1"}
+
+
+# ── Home-from-work rule: weekday car blocks start about 3 PM ──────────────
+
+def test_weekday_block_before_arrival_is_not_counted_as_the_car_but_weekends_are_open():
+    from franklinwh_scraper.evpattern import find_afternoon_session
+
+    morning_block = _block(12, 0, 120, 3.0)
+    assert find_afternoon_session(morning_block, weekday=True) is None        # you're at work; not the car
+    assert find_afternoon_session(morning_block, weekday=False)["minutes"] == 120
+    arrival = _block(15, 5, 90, 2.5)
+    assert find_afternoon_session(arrival, weekday=True)["start_hour"] == 15
+
+
+def test_a_session_that_starts_before_5pm_is_measured_to_its_end():
+    from franklinwh_scraper.evpattern import find_afternoon_session
+
+    s = find_afternoon_session(_block(16, 30, 120, 3.0), weekday=False)       # runs to 18:30
+    assert s["minutes"] == 120
+    assert find_afternoon_session(_block(17, 10, 90, 3.0), weekday=False) is None   # starts after the car window
+
+
+def test_profile_ignores_early_weekday_blocks_unless_you_say_they_were_the_car(tmp_path):
+    from franklinwh_scraper.evpattern import build_profile
+
+    db = HistoryStore(tmp_path / "h.db")
+    today = datetime(2026, 10, 9).date()                                       # Friday
+    days = [today - timedelta(days=k) for k in range(1, 21)]
+    weekdays = [d for d in days if d.weekday() < 5]
+    early = set(weekdays[:5])                                                  # 12:00-15:00 block on 5 weekdays
+    for d in days:
+        _seed_loads(db, d, _car_day(12) if d in early else _quiet_day())
+    prof = build_profile(db, today)
+    assert prof.n_sessions == 0                                                # work hours: none of them count
+    wfh = {sorted(early)[0].isoformat(): True}
+    assert build_profile(db, today, labels=wfh).n_sessions == 1                # but a "yes" does
+
+
+# ── Asking about big spikes outside the afternoon window ──────────────────
+
+def test_find_load_spikes_returns_long_steady_blocks_only():
+    from franklinwh_scraper.evpattern import find_load_spikes
+
+    day = _block(7, 40, 120, 4.1) + _block(9, 40, 10, 0.5) + _block(10, 30, 15, 5.0)   # 15 min: too short
+    cycling = [(datetime(2026, 10, 1, 20, m).isoformat(), 4.3 if (m // 10) % 2 == 0 else 0.5) for m in range(0, 60, 5)]
+    spikes = find_load_spikes(day + cycling)
+    assert len(spikes) == 1
+    assert spikes[0]["start"] == datetime(2026, 10, 1, 7, 40)
+    assert spikes[0]["minutes"] == 120 and spikes[0]["avg_kw"] == pytest.approx(4.1)
+
+
+def _spike_store(tmp_path, day, spikes):
+    """spikes: {hour: kW} on top of a 0.4 kW baseline."""
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_loads(db, day, {h: spikes.get(h, 0.4) for h in range(0, 24)})
+    return db
+
+
+def test_load_question_asks_after_a_morning_spike_ends_not_while_it_runs(tmp_path):
+    day = datetime(2026, 10, 9).date()
+    db = _spike_store(tmp_path, day, {7: 4.1, 8: 4.1})
+    state: dict = {}
+    during = alerts._alert_load_question(state, "2026-10-09", datetime(2026, 10, 9, 8, 30), db)
+    assert during is None                                        # still running (readings end 08:55)
+    msg = alerts._alert_load_question(state, "2026-10-09", datetime(2026, 10, 9, 9, 20), db)
+    assert msg and "120 min" in msg and "7:00 AM" in msg
+    assert state["load_question_key"] == "2026-10-09T07:00"
+    assert alerts._alert_load_question(state, "2026-10-09", datetime(2026, 10, 9, 9, 40), db) is None   # once
+
+
+def test_load_question_leaves_afternoon_blocks_to_the_car_question(tmp_path):
+    day = datetime(2026, 10, 9).date()
+    db = _spike_store(tmp_path, day, {13: 4.0, 14: 4.0})
+    assert alerts._alert_load_question({}, "2026-10-09", datetime(2026, 10, 9, 15, 30), db) is None
+
+
+def test_load_question_asks_at_most_three_times_a_day(tmp_path):
+    day = datetime(2026, 10, 9).date()
+    db = _spike_store(tmp_path, day, {1: 4.0, 2: 4.0, 4: 4.0, 5: 4.0, 7: 4.0, 8: 4.0, 20: 4.0, 21: 4.0})
+    state: dict = {}
+    asked = 0
+    for minute in range(0, 24 * 60, 30):
+        now = datetime(2026, 10, 9, minute // 60, minute % 60)
+        if alerts._alert_load_question(state, "2026-10-09", now, db):
+            asked += 1
+    assert asked == 3                                            # four spikes, three questions
+
+
+def test_spike_buttons_fit_telegram_limit_and_tap_stores_the_category(tmp_path):
+    buttons = alerts._spike_question_buttons("2026-10-09T07:43")
+    assert all(len(b["callback_data"]) <= 64 for b in buttons)
+    bot = TelegramChatBot(Config(), api_key="x")
+    bot._outdir = tmp_path
+    bot._is_authorized = lambda chat_id: True
+    bot._send = lambda chat_id, text, reply_markup=None: None
+    bot._answer_callback_query = lambda *a, **k: None
+    car = next(b for b in buttons if b["text"].startswith("🚗"))
+    bot._handle_callback_query({"id": "1", "data": car["callback_data"], "message": {"chat": {"id": 5}}})
+    bot._handle_callback_query({"id": "2", "data": "spk:garbage", "message": {"chat": {"id": 5}}})
+    assert alerts._load_peak_state(tmp_path)["load_labels"] == {"2026-10-09T07:43": "car"}

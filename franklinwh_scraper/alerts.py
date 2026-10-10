@@ -2100,7 +2100,7 @@ def _alert_car_question(state: dict, today: str, now: datetime, store) -> str | 
         return None
     try:
         from .evpattern import (AFTERNOON_END_HOUR, AFTERNOON_START_HOUR,
-                                find_afternoon_session)
+                                before_arrival, find_afternoon_session)
         nxt = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
         readings = store.daily_afternoon_readings(today, nxt, AFTERNOON_START_HOUR, AFTERNOON_END_HOUR).get(today, [])
         sess = find_afternoon_session(readings)
@@ -2112,13 +2112,68 @@ def _alert_car_question(state: dict, today: str, now: datetime, store) -> str | 
     state["car_question_date"] = today
     start = sess["readings"][0][0]
     kwh = sess["avg_kw"] * sess["minutes"] / 60.0
+    wfh = (" You're usually back around 3 PM, so was this a work-from-home day?"
+           if before_arrival(start) else "")
     return (
         "🚗 <b>Was that the car?</b>\n"
         f"A steady ~{sess['avg_kw']:.1f} kW draw ran for {sess['minutes']} min starting "
-        f"{start.strftime('%-I:%M %p')} (≈ {kwh:.1f} kWh).\n"
+        f"{start.strftime('%-I:%M %p')} (≈ {kwh:.1f} kWh).{wfh}\n"
         "Tap an answer — it teaches /sundown and /evroom which afternoons are car days "
         "(dryer, dishwasher and AC runs can look the same)."
     )
+
+
+_SPIKE_CATEGORIES = {"c": "car", "a": "appliance", "h": "heating", "o": "other"}
+_LOAD_QUESTIONS_PER_DAY = 3
+
+
+def _spike_question_buttons(key: str) -> list[dict]:
+    """Answers to "what was that?" for the spike starting at `key` (callback spk:<key>:<code>)."""
+    labels = {"c": "🚗 Car", "a": "🍳 Appliance", "h": "♨️ Heat/AC", "o": "❔ Other"}
+    return [{"text": text, "callback_data": f"spk:{key}:{code}"} for code, text in labels.items()]
+
+
+def _alert_load_question(state: dict, today: str, now: datetime, store) -> str | None:
+    """Ask what a big steady draw outside the afternoon car window was (a morning
+    car top-off, overnight charging, an oven...), once it has ended. The answer
+    lands in state["load_labels"]. At most _LOAD_QUESTIONS_PER_DAY a day, and only
+    for spikes that ended within the last 3 hours."""
+    if store is None:
+        return None
+    counted = state.get("load_question_count", {})
+    n_today = counted.get("n", 0) if counted.get("date") == today else 0
+    if n_today >= _LOAD_QUESTIONS_PER_DAY:
+        return None
+    try:
+        from .evpattern import (AFTERNOON_START_HOUR, SESSION_START_BEFORE_HOUR,
+                                find_load_spikes)
+        nxt = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
+        readings = [(ts, home) for ts, _grid, home, _solar in store.readings_between(today, nxt)]
+        spikes = find_load_spikes(readings)
+    except Exception:
+        logger.debug("load question unavailable", exc_info=True)
+        return None
+    asked = state.get("load_asked", [])
+    for sp in spikes:
+        if AFTERNOON_START_HOUR <= sp["start"].hour < SESSION_START_BEFORE_HOUR:
+            continue                                   # afternoon blocks belong to the car question
+        if sp["end"] + timedelta(minutes=10) > now or now - sp["end"] > timedelta(hours=3):
+            continue
+        key = sp["start"].strftime("%Y-%m-%dT%H:%M")
+        if key in asked or key in state.get("load_labels", {}):
+            continue
+        state["load_asked"] = (asked + [key])[-60:]
+        state["load_question_count"] = {"date": today, "n": n_today + 1}
+        state["load_question_key"] = key
+        kwh = sp["avg_kw"] * sp["minutes"] / 60.0
+        return (
+            "❓ <b>What was that?</b>\n"
+            f"A steady ~{sp['avg_kw']:.1f} kW draw ran for {sp['minutes']} min from "
+            f"{sp['start'].strftime('%-I:%M %p')} (≈ {kwh:.1f} kWh).\n"
+            "Tap what it was — I use your answers to learn which loads are the car, "
+            "appliances or heating."
+        )
+    return None
 
 
 def _ev_room_plan(
@@ -4185,6 +4240,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("ev_charge_window",     lambda: _alert_ev_charge_window(state, today, now, c, cfg, outlook)),
             ("ev_still_charging",    lambda: _alert_ev_still_charging(state, today, now, c, cfg, store)),
             ("car_question",         lambda: _alert_car_question(state, today, now, store)),
+            ("load_question",        lambda: _alert_load_question(state, today, now, store)),
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),
@@ -4215,6 +4271,10 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
         _save_peak_state(out, state)
 
     for body, urgent, name in to_send:
-        extra = {"extra_buttons": _car_question_buttons(today)} if name == "car_question" else {}
+        extra = {}
+        if name == "car_question":
+            extra = {"extra_buttons": _car_question_buttons(today)}
+        elif name == "load_question" and state.get("load_question_key"):
+            extra = {"extra_buttons": _spike_question_buttons(state["load_question_key"])}
         _send_alert(body, cfg, urgent=urgent, alert_name=name, **extra)
 
