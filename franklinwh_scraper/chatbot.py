@@ -1213,14 +1213,10 @@ class TelegramChatBot:
                     lines.append(f"<i>Tell me the car's % (/evroom 45) to compare against your {usual:.0f}% limit, or /evroom 30 to 100 for a trip.</i>")
             labels = state.get("load_labels")
             morning = _zone_stats(store, now.date(), (5, 11), labels)
-            overnight = _zone_stats(store, now.date(), (0, 5), labels)
             if morning is not None:
                 lines.append(f"🌅 Usual morning top-off: ~{morning.kwh:.1f} kWh (usually "
                              f"{morning.kwh_lo:.1f}–{morning.kwh_hi:.1f}); {morning.weekday_name}s {morning.k_weekday} "
                              f"of {morning.n_weekday}.")
-            if overnight is not None:
-                lines.append(f"🌙 Big overnight charges on {overnight.n_days_with} of the last {overnight.n_days} "
-                             f"nights (typical ~{overnight.kwh:.0f} kWh): those run the battery to your floor, then use the grid.")
             if profile is not None and profile.session_kwh > 0.1 and plan["budget_kwh"] >= 0.1:
                 fits = plan["budget_kwh"] >= profile.session_kwh
                 lines.append(f"Your usual afternoon charge (~{profile.session_kwh:.1f} kWh) "

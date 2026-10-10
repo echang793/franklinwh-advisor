@@ -58,6 +58,12 @@ class AfternoonEvProfile:
     session_kwh_hi: float | None = None
 
 
+def is_night(t: datetime) -> bool:
+    """9 PM to 5 AM. Overnight charging is planned (the owner sets the battery
+    reserve first), so nothing here should warn or quiz about it."""
+    return t.hour >= 21 or t.hour < 5
+
+
 def before_arrival(start: datetime, arrival_minute: int | None = WEEKDAY_ARRIVAL_MINUTE) -> bool:
     """True for a weekday time before the usual arrival home (None = no routine set)."""
     return (arrival_minute is not None and start.weekday() < 5

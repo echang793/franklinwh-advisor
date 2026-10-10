@@ -9682,7 +9682,7 @@ def test_load_question_leaves_afternoon_blocks_to_the_car_question(tmp_path):
 
 def test_load_question_asks_at_most_three_times_a_day(tmp_path):
     day = datetime(2026, 10, 9).date()
-    db = _spike_store(tmp_path, day, {1: 4.0, 2: 4.0, 4: 4.0, 5: 4.0, 7: 4.0, 8: 4.0, 20: 4.0, 21: 4.0})
+    db = _spike_store(tmp_path, day, {5: 4.0, 6: 4.0, 8: 4.0, 9: 4.0, 17: 4.0, 18: 4.0, 20: 4.0})   # four daytime/evening spikes
     state: dict = {}
     asked = 0
     for minute in range(0, 24 * 60, 30):
@@ -9857,7 +9857,7 @@ def test_send_sundown_offers_the_morning_top_off_case_with_a_range_before_late_m
     assert m and int(m.group(2)) <= int(m.group(1)) <= int(m.group(3))     # typical sits inside its range
 
 
-def test_send_evroom_mentions_the_usual_morning_and_overnight_charges(tmp_path, monkeypatch):
+def test_send_evroom_mentions_the_usual_morning_top_off(tmp_path, monkeypatch):
     import types
 
     now = datetime(2026, 7, 15, 12, 0, 0)
@@ -9883,7 +9883,7 @@ def test_send_evroom_mentions_the_usual_morning_and_overnight_charges(tmp_path, 
     _run_at(now, bot._send_evroom, "123", None)
     text = sent["text"]
     assert "🌅 Usual morning top-off" in text and "3.2 kWh" in text
-    assert "🌙 Big overnight charges on 4 of the last 20 nights" in text and "15 kWh" in text
+    assert "🌙" not in text                                  # overnight charging is planned; not reported
 
 
 def test_weekday_arrival_rule_is_a_parameter_and_can_be_switched_off():
@@ -9894,3 +9894,49 @@ def test_weekday_arrival_rule_is_a_parameter_and_can_be_switched_off():
     assert find_afternoon_session(early, weekday=True, arrival_minute=None)["minutes"] == 120   # no routine set
     assert find_afternoon_session(early, weekday=True, arrival_minute=11 * 60 + 30)["minutes"] == 120
     assert find_afternoon_session(_block(13, 0, 90, 3.0), weekday=True, arrival_minute=14 * 60) is None
+
+
+# ── Overnight charging is planned (the user sets the reserve first) ───────
+
+def test_car_charge_warning_is_silent_at_night(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_range(db, datetime(2026, 10, 10, 1, 0), 20, 0.4)
+    _seed_range(db, datetime(2026, 10, 10, 1, 20), 20, 4.1)                  # draw starts 01:20
+    night = alerts._alert_car_charge_started({}, "2026-10-10", datetime(2026, 10, 10, 1, 42), _soc_state(),
+                                             Config(battery_capacity_kwh=13.6), db)
+    assert night is None
+    db2 = HistoryStore(tmp_path / "h2.db")
+    _seed_range(db2, datetime(2026, 10, 10, 21, 30), 20, 4.1)                # 21:30 is night too
+    assert alerts._alert_car_charge_started({}, "2026-10-10", datetime(2026, 10, 10, 21, 52), _soc_state(),
+                                            Config(battery_capacity_kwh=13.6), db2) is None
+
+
+def test_spike_question_skips_overnight_blocks(tmp_path):
+    day = datetime(2026, 10, 9).date()
+    db = _spike_store(tmp_path, day, {1: 4.0, 2: 4.0, 7: 4.0, 8: 4.0})
+    state: dict = {}
+    msg = alerts._alert_load_question(state, "2026-10-09", datetime(2026, 10, 9, 9, 20), db)
+    assert msg and "7:00 AM" in msg                                          # the morning one is asked about
+    assert state["load_asked"] == ["2026-10-09T07:00"]                       # the 1-3 AM charge never was
+    assert alerts._alert_load_question({}, "2026-10-09", datetime(2026, 10, 9, 3, 30), db) is None
+
+
+def test_evroom_no_longer_describes_overnight_charges_as_draining_the_battery(tmp_path, monkeypatch):
+    import types
+
+    now = datetime(2026, 7, 15, 12, 0, 0)
+    db = HistoryStore(tmp_path / "h.db")
+    for i in range(1, 21):
+        _seed_full_day(db, (now - timedelta(days=i)).date(), {1: 5.0, 2: 5.0, 3: 5.0} if i % 5 == 0 else None)
+    fc = _scenario_forecast(now, load=0.4, solar=1.5)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **k: fc)
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._outdir = tmp_path
+    bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(battery_soc_pct=40.0, home_load_kw=0.4))
+    bot._usage_forecast = fc
+    bot._hist_store = db
+    bot._outlook = None
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    _run_at(now, bot._send_evroom, "123", None)
+    assert "overnight" not in sent["text"].lower()

@@ -2205,10 +2205,10 @@ def _alert_load_question(state: dict, today: str, now: datetime, store) -> str |
         return None
     try:
         from .evpattern import (AFTERNOON_START_HOUR, SESSION_START_BEFORE_HOUR,
-                                find_load_spikes)
+                                find_load_spikes, is_night)
         nxt = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
         readings = [(ts, home) for ts, _grid, home, _solar in store.readings_between(today, nxt)]
-        spikes = find_load_spikes(readings)
+        spikes = [sp for sp in find_load_spikes(readings) if not is_night(sp["start"])]
     except Exception:
         logger.debug("load question unavailable", exc_info=True)
         return None
@@ -2242,9 +2242,9 @@ def _alert_car_charge_started(state: dict, today: str, now: datetime, c, cfg: Co
     if store is None:
         return None
     try:
-        from .evpattern import find_load_spikes
+        from .evpattern import find_load_spikes, is_night
         readings = [(ts, home) for ts, _g, home, _s in store.readings_between(today, now.isoformat())]
-        spikes = find_load_spikes(readings, min_minutes=10)
+        spikes = [sp for sp in find_load_spikes(readings, min_minutes=10) if not is_night(sp["start"])]
     except Exception:
         logger.debug("car charge warning unavailable", exc_info=True)
         return None
