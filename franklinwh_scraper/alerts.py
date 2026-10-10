@@ -2176,6 +2176,41 @@ def _alert_load_question(state: dict, today: str, now: datetime, store) -> str |
     return None
 
 
+def _alert_car_charge_started(state: dict, today: str, now: datetime, c, cfg: Config, store) -> str | None:
+    """"Warn me before I top off": when a big steady draw (>= 3 kW) has just begun
+    (10-40 minutes ago) and is still running, say how much battery there is
+    before it would start importing from the grid. Once per start."""
+    if store is None:
+        return None
+    try:
+        from .evpattern import find_load_spikes
+        readings = [(ts, home) for ts, _g, home, _s in store.readings_between(today, now.isoformat())]
+        spikes = find_load_spikes(readings, min_minutes=10)
+    except Exception:
+        logger.debug("car charge warning unavailable", exc_info=True)
+        return None
+    for sp in reversed(spikes):
+        if now - sp["end"] > timedelta(minutes=10) or not timedelta(minutes=10) <= now - sp["start"] <= timedelta(minutes=40):
+            continue
+        key = sp["start"].strftime("%Y-%m-%dT%H:%M")
+        if state.get("car_warn_key") == key:
+            return None
+        state["car_warn_key"] = key
+        floor = getattr(cfg, "ev_charge_floor_soc", 10.0)
+        cap = getattr(cfg, "battery_capacity_kwh", _BATTERY_CAPACITY_KWH)
+        head = (f"🚗 <b>Big draw started</b> — ~{sp['avg_kw']:.1f} kW since "
+                f"{sp['start'].strftime('%-I:%M %p')} (the car?).\n")
+        room = max(0.0, c.battery_soc_pct - floor) / 100.0 * cap
+        if room < 0.1:
+            return (head + f"🔋 Battery {c.battery_soc_pct:.0f}%: <b>no room</b> above your {floor:.0f}% floor — "
+                    "this is pulling from the grid.")
+        net = max(0.1, c.home_load_kw - c.solar_production_kw)
+        return (head + f"🔋 Battery {c.battery_soc_pct:.0f}%: ~<b>{room:.1f} kWh</b> above your {floor:.0f}% floor "
+                f"≈ <b>{room / net:.1f} h</b> at the current net draw ({net:.1f} kW after solar) before grid import.\n"
+                "/evroom shows the whole day's budget.")
+    return None
+
+
 def _ev_room_plan(
     soc_at_sundown_pct: float, export_kwh: float, sundown_dt: datetime,
     sunrise_dt: datetime, cap: float, floor_pct: float, baseline_kw: float,
@@ -4241,6 +4276,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("ev_still_charging",    lambda: _alert_ev_still_charging(state, today, now, c, cfg, store)),
             ("car_question",         lambda: _alert_car_question(state, today, now, store)),
             ("load_question",        lambda: _alert_load_question(state, today, now, store)),
+            ("car_charge_started",   lambda: _alert_car_charge_started(state, today, now, c, cfg, store)),
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),

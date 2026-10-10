@@ -117,12 +117,12 @@ SPIKE_MIN_KW = 3.0
 SPIKE_MIN_MINUTES = 25
 
 
-def find_load_spikes(readings: list[tuple[str, float]]) -> list[dict]:
+def find_load_spikes(readings: list[tuple[str, float]], min_minutes: float = SPIKE_MIN_MINUTES) -> list[dict]:
     """Big steady draws anywhere in a day's readings (a car top-off, an oven, a
-    water heater): >= SPIKE_MIN_KW for >= SPIKE_MIN_MINUTES, unbroken and flat.
+    water heater): >= SPIKE_MIN_KW for >= min_minutes, unbroken and flat.
     Each is {"start", "end", "minutes", "avg_kw"}, in time order."""
     out = []
-    for b in _steady_blocks(readings, SPIKE_MIN_KW, SPIKE_MIN_MINUTES):
+    for b in _steady_blocks(readings, SPIKE_MIN_KW, min_minutes):
         out.append({"start": b[0][0], "end": b[-1][0] + timedelta(minutes=_READING_HOURS * 60),
                     "minutes": _block_minutes(b), "avg_kw": statistics.mean(kw for _t, kw in b)})
     return out

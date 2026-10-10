@@ -9704,3 +9704,54 @@ def test_spike_buttons_fit_telegram_limit_and_tap_stores_the_category(tmp_path):
     bot._handle_callback_query({"id": "1", "data": car["callback_data"], "message": {"chat": {"id": 5}}})
     bot._handle_callback_query({"id": "2", "data": "spk:garbage", "message": {"chat": {"id": 5}}})
     assert alerts._load_peak_state(tmp_path)["load_labels"] == {"2026-10-09T07:43": "car"}
+
+
+# ── "Warn me before I top off": a car charge starting ─────────────────────
+
+def _seed_range(db, start, minutes, kw):
+    for i in range(minutes // 5):
+        t = start + timedelta(minutes=5 * i)
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,solar_kw,"
+            "battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (t.isoformat(), t.weekday(), t.hour, kw, 0.5, 50.0, 0.0, "normal", 0.0, 0.0))
+    db._conn.commit()
+
+
+def _soc_state(soc=47.0, load=4.1, solar=0.8):
+    import types
+    return types.SimpleNamespace(battery_soc_pct=soc, home_load_kw=load, solar_production_kw=solar)
+
+
+def test_car_charge_started_warns_with_room_before_grid_import(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_range(db, datetime(2026, 10, 10, 7, 0), 40, 0.4)                 # quiet to 07:35
+    _seed_range(db, datetime(2026, 10, 10, 7, 40), 20, 4.1)                # draw starts 07:40, 20 min in
+    now = datetime(2026, 10, 10, 8, 2)
+    cfg = Config(battery_capacity_kwh=13.6, ev_charge_floor_soc=10.0)
+    state: dict = {}
+    msg = alerts._alert_car_charge_started(state, "2026-10-10", now, _soc_state(), cfg, db)
+    assert msg and "4.1 kW" in msg and "7:40 AM" in msg
+    # (47% - 10%) of 13.6 kWh = 5.03 kWh at a net draw of 4.1 - 0.8 = 3.3 kW = ~1.5 h
+    assert "5.0 kWh" in msg and "1.5 h" in msg
+    assert alerts._alert_car_charge_started(state, "2026-10-10", now, _soc_state(), cfg, db) is None   # once per start
+
+
+def test_car_charge_started_stays_quiet_unless_a_draw_just_began_and_is_still_on(tmp_path):
+    cfg = Config(battery_capacity_kwh=13.6)
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_range(db, datetime(2026, 10, 10, 7, 40), 20, 4.1)
+    assert alerts._alert_car_charge_started({}, "2026-10-10", datetime(2026, 10, 10, 7, 46), _soc_state(), cfg, db) is None  # < 10 min in
+    assert alerts._alert_car_charge_started({}, "2026-10-10", datetime(2026, 10, 10, 8, 40), _soc_state(), cfg, db) is None  # ended long ago
+    db2 = HistoryStore(tmp_path / "h2.db")
+    _seed_range(db2, datetime(2026, 10, 10, 6, 0), 120, 4.1)                                                             # running since 06:00
+    assert alerts._alert_car_charge_started({}, "2026-10-10", datetime(2026, 10, 10, 8, 2), _soc_state(), cfg, db2) is None  # started > 40 min ago
+    assert alerts._alert_car_charge_started({}, "2026-10-10", datetime(2026, 10, 10, 8, 2), _soc_state(), cfg, None) is None
+
+
+def test_car_charge_started_says_there_is_no_room_when_already_at_the_floor(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_range(db, datetime(2026, 10, 10, 7, 40), 20, 4.1)
+    msg = alerts._alert_car_charge_started({}, "2026-10-10", datetime(2026, 10, 10, 8, 2),
+                                           _soc_state(soc=9.0), Config(battery_capacity_kwh=13.6, ev_charge_floor_soc=10.0), db)
+    assert msg and "no room" in msg.lower()
