@@ -9884,3 +9884,13 @@ def test_send_evroom_mentions_the_usual_morning_and_overnight_charges(tmp_path, 
     text = sent["text"]
     assert "🌅 Usual morning top-off" in text and "3.2 kWh" in text
     assert "🌙 Big overnight charges on 4 of the last 20 nights" in text and "15 kWh" in text
+
+
+def test_weekday_arrival_rule_is_a_parameter_and_can_be_switched_off():
+    from franklinwh_scraper.evpattern import find_afternoon_session
+
+    early = _block(12, 0, 120, 3.0)
+    assert find_afternoon_session(early, weekday=True) is None                         # default: home ~3 PM
+    assert find_afternoon_session(early, weekday=True, arrival_minute=None)["minutes"] == 120   # no routine set
+    assert find_afternoon_session(early, weekday=True, arrival_minute=11 * 60 + 30)["minutes"] == 120
+    assert find_afternoon_session(_block(13, 0, 90, 3.0), weekday=True, arrival_minute=14 * 60) is None

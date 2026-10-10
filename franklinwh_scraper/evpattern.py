@@ -58,9 +58,10 @@ class AfternoonEvProfile:
     session_kwh_hi: float | None = None
 
 
-def before_arrival(start: datetime) -> bool:
-    """True for a weekday time before the usual ~3 PM arrival home."""
-    return start.weekday() < 5 and start.hour * 60 + start.minute < WEEKDAY_ARRIVAL_MINUTE
+def before_arrival(start: datetime, arrival_minute: int | None = WEEKDAY_ARRIVAL_MINUTE) -> bool:
+    """True for a weekday time before the usual arrival home (None = no routine set)."""
+    return (arrival_minute is not None and start.weekday() < 5
+            and start.hour * 60 + start.minute < arrival_minute)
 
 
 def _steady_blocks(readings: list[tuple[str, float]], min_kw: float, min_minutes: float,
@@ -95,15 +96,17 @@ def _block_minutes(block: list[tuple[datetime, float]]) -> int:
     return round((block[-1][0] - block[0][0]).total_seconds() / 60.0 + _READING_HOURS * 60)
 
 
-def find_afternoon_session(readings: list[tuple[str, float]], weekday: bool = False) -> dict | None:
+def find_afternoon_session(readings: list[tuple[str, float]], weekday: bool = False,
+                           arrival_minute: int | None = WEEKDAY_ARRIVAL_MINUTE) -> dict | None:
     """Steady car-charge blocks in a day's (iso timestamp, kW) readings, or None.
-    A block must start between 11:00 and 17:00 (and, with weekday=True, not before
-    the usual ~3 PM arrival home); it is measured to its end. Returns
+    A block must start between 11:00 and 17:00 (and, with weekday=True and an
+    `arrival_minute` set, not before the usual arrival home); it is measured to its end. Returns
     {"start_hour", "minutes" (all blocks), "blocks", "avg_kw", "readings"}."""
     def starts_ok(block) -> bool:
         start = block[0][0]
         return (AFTERNOON_START_HOUR <= start.hour < SESSION_START_BEFORE_HOUR
-                and not (weekday and start.hour * 60 + start.minute < WEEKDAY_ARRIVAL_MINUTE))
+                and not (weekday and arrival_minute is not None
+                         and start.hour * 60 + start.minute < arrival_minute))
 
     blocks = [b for b in _steady_blocks(readings, SESSION_MIN_KW, BLOCK_MIN_MINUTES,
                                         (AFTERNOON_START_HOUR, AFTERNOON_END_HOUR)) if starts_ok(b)]
@@ -131,7 +134,8 @@ def find_load_spikes(readings: list[tuple[str, float]], min_minutes: float = SPI
 
 
 def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS,
-                  labels: dict[str, bool] | None = None) -> AfternoonEvProfile | None:
+                  labels: dict[str, bool] | None = None,
+                  arrival_minute: int | None = WEEKDAY_ARRIVAL_MINUTE) -> AfternoonEvProfile | None:
     """Profile from the trailing `lookback_days` (not including `today`), or None
     when there is too little clean history to call it a pattern.
 
@@ -152,7 +156,7 @@ def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS,
     sessions = {}
     for d in usable:
         wk = date.fromisoformat(d).weekday() < 5
-        sessions[d] = find_afternoon_session(readings.get(d, []), weekday=wk)
+        sessions[d] = find_afternoon_session(readings.get(d, []), weekday=wk, arrival_minute=arrival_minute)
         if sessions[d] is None and labels.get(d):
             sessions[d] = find_afternoon_session(readings.get(d, []), weekday=False)
     is_car = {d: labels.get(d, sessions[d] is not None) for d in usable}
