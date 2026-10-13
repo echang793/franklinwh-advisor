@@ -2296,6 +2296,68 @@ def _alert_car_charge_started(state: dict, today: str, now: datetime, c, cfg: Co
     return None
 
 
+def _eb_plan(now: datetime, soc: float, cap: float, floor: float, margin: float,
+             solar_kw, load_kw, car_kwh: float, car_start_hour: int, car_hours: int,
+             window: tuple[int, int], eb_kw: float) -> dict:
+    """What Emergency Backup charge keeps the battery off the grid for a window.
+
+    Walks the battery hour by hour from `now` to the window start (solar_kw(h) and
+    load_kw(h) give the kW for clock hour h), then finds the smallest battery % at the
+    window start whose lowest point inside the window stays at or above floor+margin,
+    with `car_kwh` spread over `car_hours` hours from `car_start_hour`. The EB charge is
+    the gap between that and where the battery would be anyway, sized at `eb_kw`.
+    Returns soc_at_start, need_at_start, eb_kwh, eb_minutes, start_by (clock hour as a
+    decimal), feasible (a full pack is enough) and grid_import_kwh if it is not.
+    """
+    start_h, end_h = window
+    in_window = now.hour >= start_h
+    kwh = soc / 100.0 * cap
+    if not in_window:
+        for h in range(now.hour, start_h):
+            frac = (60 - now.minute) / 60.0 if h == now.hour else 1.0
+            kwh = max(0.0, min(cap, kwh + (solar_kw(h) - load_kw(h)) * frac))
+    soc_at_start = kwh / cap * 100.0
+
+    def extra(h: int) -> float:
+        return car_kwh / car_hours if car_kwh and car_start_hour <= h < car_start_hour + car_hours else 0.0
+
+    def hours():
+        """(hour, fraction still to come) for the part of the window that is left."""
+        if in_window:
+            return [(h, (60 - now.minute) / 60.0 if h == now.hour else 1.0) for h in range(now.hour, end_h)]
+        return [(h, 1.0) for h in range(start_h, end_h)]
+
+    def lowest(start_pct: float) -> float:
+        k = start_pct / 100.0 * cap
+        low = 100.0
+        for h, frac in hours():
+            k = min(cap, k + (solar_kw(h) - load_kw(h) - extra(h)) * frac)
+            low = min(low, k / cap * 100.0)           # may go negative: that is the shortfall
+        return low
+
+    need = next((x / 2.0 for x in range(0, 201) if lowest(x / 2.0) >= floor + margin), None)
+    feasible = need is not None
+    need = 100.0 if need is None else need
+
+    imported = 0.0
+    if not feasible:                                   # full pack, count what dips under the floor
+        k, floor_kwh = cap, floor / 100.0 * cap
+        for h, frac in hours():
+            k = k + (solar_kw(h) - load_kw(h) - extra(h)) * frac
+            if k < floor_kwh:
+                imported += floor_kwh - k
+                k = floor_kwh
+            k = min(cap, k)
+    eb_kwh = max(0.0, need - soc_at_start) / 100.0 * cap
+    eb_minutes = eb_kwh / eb_kw * 60.0 if eb_kw > 0 else 0.0
+    return {
+        "soc_at_start": soc_at_start, "need_at_start": need, "eb_kwh": eb_kwh,
+        "eb_minutes": eb_minutes,
+        "start_by": now.hour + now.minute / 60.0 if in_window else start_h - eb_minutes / 60.0,
+        "feasible": feasible, "grid_import_kwh": imported, "in_window": in_window,
+    }
+
+
 def _ev_room_plan(
     soc_at_sundown_pct: float, export_kwh: float, sundown_dt: datetime,
     sunrise_dt: datetime, cap: float, floor_pct: float, baseline_kw: float,

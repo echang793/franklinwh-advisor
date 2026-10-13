@@ -242,6 +242,56 @@ def build_context(stats, history, outlook, cfg, *, rec=None, forecast=None,
     return "\n".join(lines)
 
 
+_EBPLAN_RE = re.compile(r"/ebplan(?:@\w+)?(?:\s+(.*))?$", re.I)
+_HOUR = r"(\d{1,2})\s*(am|pm)?"
+
+
+def _hour24(num: str, ampm: str | None) -> int | None:
+    h = int(num)
+    if ampm:
+        ampm = ampm.lower()
+        if not 1 <= h <= 12:
+            return None
+        h = (h % 12) + (12 if ampm == "pm" else 0)
+    return h if 0 <= h <= 23 else None
+
+
+def _parse_ebplan(text: str) -> dict | None:
+    """Parse '/ebplan [car kWh] [load kW] [from H] [to H]' (H like 14, 2pm).
+    Returns {car_kwh, load_kw, start, end} (None = use the default) or None if it
+    is not a valid /ebplan command."""
+    m = _EBPLAN_RE.match(text.strip())
+    if not m:
+        return None
+    rest = (m.group(1) or "").lower()
+    out: dict = {"car_kwh": None, "load_kw": None, "start": None, "end": None}
+    for key, pat in (("load_kw", r"\bload\s+(\d+(?:\.\d+)?)\s*(?:kw)?\b"),):
+        mm = re.search(pat, rest)
+        if mm:
+            out[key] = float(mm.group(1))
+            rest = rest[:mm.start()] + " " + rest[mm.end():]
+    for key, pat in (("start", r"\b(?:from|after)\s+" + _HOUR), ("end", r"\b(?:to|until|by)\s+" + _HOUR)):
+        mm = re.search(pat, rest)
+        if mm:
+            out[key] = _hour24(mm.group(1), mm.group(2))
+            if out[key] is None:
+                return None
+            rest = rest[:mm.start()] + " " + rest[mm.end():]
+    tokens = [t for t in rest.split() if t not in ("kwh", "kw")]
+    if len(tokens) > 1:
+        return None
+    if tokens:
+        try:
+            out["car_kwh"] = float(tokens[0].rstrip("kwh"))
+        except ValueError:
+            return None
+        if out["car_kwh"] < 0:
+            return None
+    if out["start"] is not None and out["end"] is not None and out["end"] <= out["start"]:
+        return None
+    return out
+
+
 _EVROOM_RE = re.compile(
     r"/evroom(?:@\w+)?(?:\s+(\d{1,3}(?:\.\d+)?)\s*%?(?:\s*(?:to|->|→|-)?\s*(\d{1,3}(?:\.\d+)?)\s*%?)?)?\s*$"
 )
@@ -371,6 +421,7 @@ class TelegramChatBot:
                             "/sundown H — projected SoC in H hours (1-24)\n"
                             "/evroom [car %] [to N%] — battery room for the car without grid import\n"
                             "/cardays  — label which recent afternoons were the car\n"
+                            "/ebplan [kWh] [load kW] [from H] [to H] — EB charge needed for a grid-free window\n"
                             "/ebtarget — Emergency Backup charge target for today\n"
                             "/mute     — snooze non-safety alerts (2h or 8h)\n"
                             "/unmute   — cancel an active mute\n"
@@ -491,6 +542,10 @@ class TelegramChatBot:
                         continue
                     if text.lower().strip().split("@")[0] == "/cardays":
                         threading.Thread(target=self._send_cardays, args=(chat_id,), daemon=True).start()
+                        continue
+                    _ebp = _parse_ebplan(text)
+                    if _ebp is not None:
+                        threading.Thread(target=self._send_ebplan, args=(chat_id, _ebp), daemon=True).start()
                         continue
                     # /evroom [car %] [[to] target %] — battery room for the car without grid import
                     _ev = _parse_evroom(text)
@@ -1226,6 +1281,105 @@ class TelegramChatBot:
             self._send(chat_id, "\n".join(lines))
         except Exception as e:
             logger.warning("_send_evroom error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
+    def _send_ebplan(self, chat_id: str, args: dict | None = None) -> None:
+        """Respond to /ebplan [car kWh] [load kW] [from H] [to H] -- how much
+        Emergency Backup charge, and by when, keeps the house off the grid for a
+        window (default 2 PM-11 PM, the end of super-off-peak to bedtime)."""
+        args = args or {}
+        try:
+            with self._lock:
+                stats   = self._stats
+                outlook = self._outlook
+                store   = self._hist_store
+            if stats is None:
+                self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+                return
+            if outlook is None or store is None:
+                self._send(chat_id, "I need the weather forecast and usage history for that — not available right now.")
+                return
+
+            from pathlib import Path
+
+            from . import predictor
+            from .advisor import _EB_CHARGE_KW
+            from .alerts import (_afternoon_profile, _eb_plan, _get_hourly_bias,
+                                 _get_performance_ratio, _get_system_peak_kw,
+                                 _GHI_CLOUDY_THRESHOLD, _load_peak_state)
+            from .tou import rate_at
+
+            cfg = self._cfg
+            cap = getattr(cfg, "battery_capacity_kwh", 13.6)
+            floor = getattr(cfg, "ev_charge_floor_soc", 10.0)
+            now = datetime.now()
+            c = stats.current
+            out = self._outdir or Path(getattr(cfg, "output_dir", "output"))
+            state = _load_peak_state(out)
+            peak = _get_system_peak_kw(state)
+            if peak is None:
+                self._send(chat_id, "Solar calibration isn't ready yet, so I can't plan around it.")
+                return
+            pr = _get_performance_ratio(state, cloudy=outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
+            hb = _get_hourly_bias(state)
+            nc = predictor.solar_nowcast_factor(store, outlook, peak, pr, hb, now)
+            profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
+            start_h, end_h = args.get("start") or 14, args.get("end") or 23
+            if now.hour >= end_h:
+                self._send(chat_id, f"That window ({start_h}:00-{end_h}:00) is already over for today.")
+                return
+            house_now = args.get("load_kw") if args.get("load_kw") is not None else c.home_load_kw
+            quiet = profile.quiet_by_hour if profile else {}
+
+            def solar(h: int) -> float:
+                return predictor._hour_bin_kw(outlook, datetime(now.year, now.month, now.day, h), peak, pr, hb) * nc
+
+            def load(h: int) -> float:
+                return house_now if h < start_h else quiet.get(h, 0.5)
+
+            if now.hour >= start_h:
+                car_start = now.hour                                            # already in the window: a planned charge starts now
+            else:
+                car_start = max(start_h, 15) if now.weekday() < 5 else start_h  # home from work ~3 PM on weekdays
+            if args.get("car_kwh") is not None:
+                cases = [(f"planned car charge ({args['car_kwh']:.1f} kWh)", args["car_kwh"])]
+            else:
+                cases = [("no car", 0.0)]
+                if profile is not None and profile.session_kwh > 0.1:
+                    cases.append((f"typical car session ({profile.session_kwh:.1f} kWh)", profile.session_kwh))
+                    if profile.session_kwh_hi is not None:
+                        cases.append((f"big session ({profile.session_kwh_hi:.1f} kWh)", profile.session_kwh_hi))
+            def fmt(h: float) -> str:                       # decimal clock hour -> "1:42 PM"
+                total = int(round(h * 60))
+                return datetime(2000, 1, 1, (total // 60) % 24, total % 60).strftime("%-I:%M %p")
+
+            lines = [f"🔋 <b>EB plan — grid-free {fmt(start_h)}–{fmt(end_h)}</b>"]
+            plans = []
+            for label, kwh in cases:
+                plan = _eb_plan(now, c.battery_soc_pct, cap, floor, 5.0, solar, load, kwh, car_start, 3,
+                                (start_h, end_h), _EB_CHARGE_KW)
+                plans.append(plan)
+            in_window = plans[0]["in_window"]
+            lines.append(f"Now {now.strftime('%-I:%M %p')}: battery {c.battery_soc_pct:.0f}%, house {house_now:.1f} kW. "
+                         + ("You're already inside the window; planning the rest of it."
+                            if in_window else f"Without EB: ~<b>{plans[0]['soc_at_start']:.0f}%</b> at {fmt(start_h)}."))
+            for (label, _kwh), plan in zip(cases, plans):
+                if not plan["feasible"]:
+                    lines.append(f"• {label}: <b>a full battery isn't enough</b> — ~{plan['grid_import_kwh']:.1f} kWh would come from the grid.")
+                elif plan["eb_kwh"] < 0.1:
+                    lines.append(f"• {label}: need {plan['need_at_start']:.0f}%"
+                                 f"{' now' if in_window else ''} → <b>no EB needed</b>.")
+                else:
+                    lines.append(
+                        f"• {label}: need {plan['need_at_start']:.0f}% → EB ~<b>{plan['eb_minutes']:.0f} min</b> "
+                        f"(~{plan['eb_kwh']:.1f} kWh), start by <b>{fmt(max(now.hour + now.minute / 60.0, plan['start_by']))}</b>.")
+            rate = rate_at(now)
+            lines.append(f"<i>Floor {floor:.0f}% + 5-pt margin; EB at ~{_EB_CHARGE_KW:.0f} kW; grid rate now "
+                         f"${rate:.3f}/kWh."
+                         + ("" if in_window else f" Stop EB by {fmt(start_h)} — it gets pricier after.") + "</i>")
+            self._send(chat_id, "\n".join(lines))
+        except Exception as e:
+            logger.warning("_send_ebplan error: %s", e)
             self._send(chat_id, f"Error: {e}")
 
     def _send_ebtarget(self, chat_id: str) -> None:

@@ -10079,3 +10079,145 @@ def test_recording_caps_the_list_like_before():
         alerts._record_sundown_bias(state, float(i))
     assert len(state["sundown_bias_samples"]) == alerts._SUNDOWN_BIAS_CAP
     assert state["sundown_bias_samples"][-1] == float(alerts._SUNDOWN_BIAS_CAP + 4)
+
+
+# ── /ebplan: how much EB, and by when, for a grid-free window ─────────────
+
+def _plan(**kw):
+    base = dict(
+        now=datetime(2026, 10, 12, 11, 0), soc=40.0, cap=10.0, floor=10.0, margin=5.0,
+        solar_kw=lambda h: 1.0 if h < 17 else 0.0, load_kw=lambda h: 0.5,
+        car_kwh=0.0, car_start_hour=15, car_hours=3, window=(14, 23), eb_kw=5.0)
+    base.update(kw)
+    return alerts._eb_plan(**base)
+
+
+def test_eb_plan_needs_nothing_when_the_battery_already_covers_the_window():
+    p = _plan()
+    assert p["soc_at_start"] == pytest.approx(55.0)          # 40% + 3 h x (1.0 - 0.5) of a 10 kWh pack
+    assert p["need_at_start"] == pytest.approx(30.0)         # lowest point is 23:00; 15% = floor + margin
+    assert p["eb_kwh"] == 0.0 and p["eb_minutes"] == 0.0
+    assert p["feasible"] is True
+
+
+def test_eb_plan_sizes_the_charge_and_the_start_time_for_a_car_session():
+    p = _plan(car_kwh=4.0)
+    assert p["need_at_start"] == pytest.approx(70.0)         # 30% + 4 kWh of a 10 kWh pack
+    assert p["eb_kwh"] == pytest.approx(1.5)                 # (70 - 55)% of 10 kWh
+    assert p["eb_minutes"] == pytest.approx(18.0)            # at 5 kW
+    assert p["start_by"] == pytest.approx(14 - 0.3)          # finish by the window start
+    assert p["feasible"] is True
+
+
+def test_eb_plan_reports_a_shortfall_when_even_a_full_battery_cannot_cover_it():
+    p = _plan(car_kwh=12.0)                                  # more than the pack can ever hold
+    assert p["feasible"] is False
+    assert p["need_at_start"] == 100.0
+    assert p["grid_import_kwh"] > 0
+
+
+def test_eb_plan_extra_load_before_the_window_raises_the_charge_needed():
+    base = _plan(car_kwh=4.0)
+    heavy = _plan(car_kwh=4.0, load_kw=lambda h: 1.5)        # house at 1.5 kW the whole time
+    assert heavy["soc_at_start"] < base["soc_at_start"]
+    assert heavy["eb_kwh"] > base["eb_kwh"]
+
+
+def test_parse_ebplan_reads_car_kwh_load_and_window():
+    from franklinwh_scraper.chatbot import _parse_ebplan
+
+    assert _parse_ebplan("/ebplan") == dict(car_kwh=None, load_kw=None, start=None, end=None)
+    assert _parse_ebplan("/ebplan 5") == dict(car_kwh=5.0, load_kw=None, start=None, end=None)
+    assert _parse_ebplan("/ebplan 5 kwh load 0.7")["load_kw"] == 0.7
+    assert _parse_ebplan("/ebplan 4.4 from 2pm to 11pm") == dict(car_kwh=4.4, load_kw=None, start=14, end=23)
+    assert _parse_ebplan("/ebplan load 1.2 until 22") == dict(car_kwh=None, load_kw=1.2, start=None, end=22)
+    assert _parse_ebplan("/EBPLAN@MyBot 3") ["car_kwh"] == 3.0
+
+
+def test_parse_ebplan_rejects_nonsense():
+    from franklinwh_scraper.chatbot import _parse_ebplan
+
+    assert _parse_ebplan("/ebplanx") is None
+    assert _parse_ebplan("what is my ebplan") is None
+    assert _parse_ebplan("/ebplan 5 from 25") is None          # no such hour
+    assert _parse_ebplan("/ebplan 5 from 20 to 14") is None    # window ends before it starts
+    assert _parse_ebplan("/ebplan -3") is None
+
+
+def _ebplan_bot(tmp_path, now, soc=22.0, load=0.4):
+    import json
+    import types
+
+    db = HistoryStore(tmp_path / "h.db")
+    for i in range(1, 25):
+        d = (now - timedelta(days=i)).date()
+        _seed_loads(db, d, _car_day(15) if (i % 3 == 0 and d.weekday() < 5) else _quiet_day())
+    (tmp_path / ".peak_alert_state.json").write_text(json.dumps({"solar_cal_samples": [4.0] * 5}))
+    outlook = types.SimpleNamespace(effective_ghi_at=lambda dt: 500.0 if 9 <= dt.hour < 16 else 0.0,
+                                    is_cloudy=lambda h, t: False)
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._outdir = tmp_path
+    bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(battery_soc_pct=soc, home_load_kw=load))
+    bot._outlook = outlook
+    bot._hist_store = db
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    return bot, sent
+
+
+def test_send_ebplan_without_arguments_shows_no_car_and_car_cases(tmp_path):
+    now = datetime(2026, 10, 12, 11, 16)                                  # a Monday
+    bot, sent = _ebplan_bot(tmp_path, now)
+    _run_at(now, bot._send_ebplan, "123", {})
+    text = sent["text"]
+    assert "EB plan" in text and "2:00 PM–11:00 PM" in text
+    assert "no car" in text and "typical car session" in text
+    assert "Without EB: ~" in text and "Floor 10% + 5-pt margin" in text
+
+
+def test_send_ebplan_with_a_planned_kwh_shows_just_that_case_and_a_start_time(tmp_path):
+    now = datetime(2026, 10, 12, 11, 16)
+    bot, sent = _ebplan_bot(tmp_path, now, soc=15.0)
+    _run_at(now, bot._send_ebplan, "123", {"car_kwh": 9.0, "load_kw": None, "start": None, "end": None})
+    text = sent["text"]
+    assert "planned car charge (9.0 kWh)" in text and "no car:" not in text
+    assert "start by" in text or "isn't enough" in text
+
+
+def test_send_ebplan_says_so_when_the_window_is_over(tmp_path):
+    now = datetime(2026, 10, 12, 23, 30)
+    bot, sent = _ebplan_bot(tmp_path, now)
+    _run_at(now, bot._send_ebplan, "123", {})
+    assert "already over" in sent["text"]
+
+
+def test_eb_plan_inside_the_window_plans_only_the_hours_that_remain():
+    base = dict(now=datetime(2026, 10, 12, 16, 0), cap=10.0)
+    ok = _plan(**base, soc=60.0)                      # 4 kWh needed now (see below); 6 kWh on hand
+    assert ok["in_window"] is True
+    assert ok["need_at_start"] == pytest.approx(40.0)  # 16:00 +0.5, 17:00-22:00 -0.5 x 6 = -2.5 kWh; 1.5 kWh reserve
+    assert ok["eb_kwh"] == 0.0
+    low = _plan(**base, soc=30.0)
+    assert low["eb_kwh"] == pytest.approx(1.0)
+    assert low["eb_minutes"] == pytest.approx(12.0)
+    assert low["start_by"] == pytest.approx(16.0)      # start now, not at the (already passed) window start
+
+
+def test_eb_plan_before_the_window_is_not_marked_in_window():
+    assert _plan()["in_window"] is False
+
+
+def test_eb_plan_mid_hour_counts_only_the_rest_of_the_current_hour():
+    p = _plan(now=datetime(2026, 10, 12, 16, 30), soc=60.0, cap=10.0)
+    assert p["need_at_start"] == pytest.approx(42.5)   # +0.25 kWh for 16:30-17:00, then -3.0 kWh; 1.5 kWh reserve
+
+
+def test_send_ebplan_inside_the_window_starts_a_planned_car_charge_now(tmp_path):
+    now = datetime(2026, 10, 12, 17, 9)
+    bot, sent = _ebplan_bot(tmp_path, now, soc=40.0)
+    _run_at(now, bot._send_ebplan, "123", {"car_kwh": 3.0, "load_kw": None, "start": None, "end": None})
+    with_car = sent["text"]
+    _run_at(now, bot._send_ebplan, "123", {"car_kwh": 0.0, "load_kw": None, "start": None, "end": None})
+    import re
+    need = lambda t: float(re.search(r"need (\d+)%", t).group(1))                  # noqa: E731
+    assert need(with_car) - need(sent["text"]) >= 15       # ~3 kWh of a 13.6 kWh pack is ~22 pts, all of it still ahead
