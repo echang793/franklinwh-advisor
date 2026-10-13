@@ -176,10 +176,36 @@ def _get_sundown_bias(state: dict) -> float:
     is what motivated this fix. Same `_ewma`/`_PR_EWMA_ALPHA` weighting as
     the other calibration layers.
     """
-    samples = state.get("sundown_bias_samples", [])
+    samples = _current_sundown_samples(state)
     if len(samples) < 3:
         return 0.0
     return _ewma(samples)
+
+
+# Bump when the forecast model changes in a way that moves /sundown (solar
+# shape, derating, weather source...). Corrections learned under an older model
+# measure that model's errors, not the current one's, so they are discarded.
+# 2026-10-09: shifted radiation, derated model, per-hour sums.
+# 2026-10-12: default+ECMWF weather blend.
+SOLAR_MODEL_EPOCH = "2026-10-12-weather-blend"
+
+
+def _current_sundown_samples(state: dict) -> list[float]:
+    """Samples graded under the current model. State with no epoch stamp is
+    taken as current (written before epochs existed)."""
+    epoch = state.get("sundown_bias_epoch")
+    if epoch is not None and epoch != SOLAR_MODEL_EPOCH:
+        return []
+    return state.get("sundown_bias_samples", [])
+
+
+def _record_sundown_bias(state: dict, delta: float) -> None:
+    """Append one graded miss (actual - raw prediction, in points), starting a
+    fresh list if the stored ones belong to an older model."""
+    samples = list(_current_sundown_samples(state))
+    samples.append(delta)
+    state["sundown_bias_samples"] = samples[-_SUNDOWN_BIAS_CAP:]
+    state["sundown_bias_epoch"] = SOLAR_MODEL_EPOCH
 
 
 # ── VPP (Virtual Power Plant) grid-support events ─────────────────────
@@ -2425,9 +2451,7 @@ def _alert_eod_digest(
                 logger.info("Sundown bias: EV-level load between request and sundown — "
                             "not a model miss, sample skipped")
             else:
-                bias_samples = state.get("sundown_bias_samples", [])
-                bias_samples.append(actual_pct - raw_pct)
-                state["sundown_bias_samples"] = bias_samples[-_SUNDOWN_BIAS_CAP:]
+                _record_sundown_bias(state, actual_pct - raw_pct)
 
     # "Without EV" is a flat assumed-baseline walk to the next sunrise (no
     # forecast/solar/percentile model, by request 2026-08-17 — see

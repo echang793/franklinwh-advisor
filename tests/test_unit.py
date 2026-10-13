@@ -10047,3 +10047,35 @@ def test_forecast_uses_the_other_model_when_one_is_missing_or_null(monkeypatch):
     by = {h.time.hour: h for h in nulls.hours}
     assert by[6].cloud_cover_pct == pytest.approx(20.0)                   # ecmwf null at 06:00 -> default alone
     assert by[7].cloud_cover_pct == pytest.approx(40.0)                   # both present at 07:00: (30 + 50) / 2
+
+
+# ── The learned sundown correction is tied to the forecast model version ──
+#
+# Two samples graded under the pre-2026-10-09 solar model switched on a -7.1 pt
+# correction for every /sundown after the model was fixed. Samples now carry the
+# model epoch they were graded under; bumping SOLAR_MODEL_EPOCH invalidates them.
+
+def test_sundown_bias_ignores_samples_graded_under_an_older_model():
+    old = {"sundown_bias_samples": [-20.0, -20.0, -20.0], "sundown_bias_epoch": "an-older-model"}
+    assert alerts._get_sundown_bias(old) == 0.0
+    current = {"sundown_bias_samples": [-20.0, -20.0, -20.0], "sundown_bias_epoch": alerts.SOLAR_MODEL_EPOCH}
+    assert alerts._get_sundown_bias(current) == pytest.approx(-20.0)
+    legacy = {"sundown_bias_samples": [-20.0, -20.0, -20.0]}               # state written before epochs existed
+    assert alerts._get_sundown_bias(legacy) == pytest.approx(-20.0)
+
+
+def test_recording_a_sundown_grade_under_a_new_epoch_starts_a_fresh_list():
+    state = {"sundown_bias_samples": [-18.0, -30.0, 5.0], "sundown_bias_epoch": "an-older-model"}
+    alerts._record_sundown_bias(state, 12.0)
+    assert state["sundown_bias_samples"] == [12.0]
+    assert state["sundown_bias_epoch"] == alerts.SOLAR_MODEL_EPOCH
+    alerts._record_sundown_bias(state, -4.0)
+    assert state["sundown_bias_samples"] == [12.0, -4.0]                    # same epoch: it accumulates
+
+
+def test_recording_caps_the_list_like_before():
+    state: dict = {}
+    for i in range(alerts._SUNDOWN_BIAS_CAP + 5):
+        alerts._record_sundown_bias(state, float(i))
+    assert len(state["sundown_bias_samples"]) == alerts._SUNDOWN_BIAS_CAP
+    assert state["sundown_bias_samples"][-1] == float(alerts._SUNDOWN_BIAS_CAP + 4)
