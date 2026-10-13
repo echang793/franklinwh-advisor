@@ -50,6 +50,14 @@ CREATE INDEX IF NOT EXISTS idx_poll_timing_ts ON poll_timing(timestamp);
 
 -- Every VPP event window logged with `franklinwh vpp-event` (the advisor's state
 -- file only keeps the latest one), so latency can be compared against them later.
+-- Each day's forecast high/low (deg C), refreshed through the day, so weather
+-- questions (does AC track the high? how does a cloudy day behave?) can be
+-- re-tested offline against the readings without fetching history.
+CREATE TABLE IF NOT EXISTS daily_weather (
+    day   TEXT PRIMARY KEY,
+    tmax_c REAL NOT NULL,
+    tmin_c REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS vpp_events (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     start     TEXT NOT NULL,
@@ -173,6 +181,19 @@ class HistoryStore:
             "SELECT timestamp, duration_s, ok, error FROM poll_timing WHERE timestamp >= ? ORDER BY timestamp",
             (since_iso,),
         ).fetchall()]
+
+    def record_daily_weather(self, day: str, tmax_c: float, tmin_c: float) -> None:
+        self._conn.execute(
+            "INSERT INTO daily_weather (day, tmax_c, tmin_c) VALUES (?,?,?) "
+            "ON CONFLICT(day) DO UPDATE SET tmax_c=excluded.tmax_c, tmin_c=excluded.tmin_c",
+            (day, tmax_c, tmin_c))
+        self._conn.commit()
+
+    def daily_weather(self, start_day: str, end_day: str) -> dict[str, tuple[float, float]]:
+        """{day: (tmax_c, tmin_c)} for days in [start_day, end_day)."""
+        return {r[0]: (r[1], r[2]) for r in self._conn.execute(
+            "SELECT day, tmax_c, tmin_c FROM daily_weather WHERE day >= ? AND day < ? ORDER BY day",
+            (start_day, end_day)).fetchall()}
 
     def record_vpp_event(self, start_iso: str, end_iso: str) -> None:
         self._conn.execute('INSERT INTO vpp_events (start, "end", logged_at) VALUES (?,?,?)',

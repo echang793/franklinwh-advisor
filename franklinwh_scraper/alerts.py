@@ -1014,6 +1014,19 @@ def _calibrate_solar(state: dict, solar_kw: float, outlook, now: datetime | None
     state["solar_peak_today_samples"].append(sample)
 
 
+def _record_weather_today(store, outlook, now: datetime) -> None:
+    """Store today's forecast high/low (deg C) in history.db. Fail-open: weather
+    bookkeeping must never take an alert cycle down."""
+    if store is None or outlook is None:
+        return
+    try:
+        temps = [h.temp_c for h in outlook.hours if h.time.date() == now.date()]
+        if temps:
+            store.record_daily_weather(now.strftime("%Y-%m-%d"), max(temps), min(temps))
+    except Exception:
+        logger.debug("daily weather record failed", exc_info=True)
+
+
 # Per-hour solar correction ("hourly bias"): how a clock hour's real output
 # compares with the shared model (derated GHI x system peak), learned from
 # per-(hour, day) sums and combined as a recency-weighted ratio of sums.
@@ -4379,6 +4392,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
         state = _load_peak_state(out)
         _calibrate_solar(state, c.solar_production_kw, outlook, now)
         _calibrate_solar_hourly(state, c.solar_production_kw, outlook, now)
+        _record_weather_today(store, outlook, now)
         _track_battery_cycles(state, c)
         _candidates = [
             ("morning_preview",   lambda: _alert_morning_preview(state, today, now, c, outlook, usage_forecast, store, cfg)),

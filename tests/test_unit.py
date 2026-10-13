@@ -10221,3 +10221,30 @@ def test_send_ebplan_inside_the_window_starts_a_planned_car_charge_now(tmp_path)
     import re
     need = lambda t: float(re.search(r"need (\d+)%", t).group(1))                  # noqa: E731
     assert need(with_car) - need(sent["text"]) >= 15       # ~3 kWh of a 13.6 kWh pack is ~22 pts, all of it still ahead
+
+
+# ── Keep each day's forecast high/low so weather questions can be re-tested offline ──
+
+def test_daily_weather_upserts_one_row_per_day(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    db.record_daily_weather("2026-10-12", 36.5, 17.0)
+    db.record_daily_weather("2026-10-12", 37.2, 17.0)          # later poll the same day replaces it
+    db.record_daily_weather("2026-10-13", 30.0, 15.5)
+    assert db.daily_weather("2026-10-12", "2026-10-14") == {"2026-10-12": (37.2, 17.0), "2026-10-13": (30.0, 15.5)}
+    assert db.daily_weather("2026-10-13", "2026-10-14") == {"2026-10-13": (30.0, 15.5)}
+
+
+def test_record_weather_today_takes_the_high_and_low_of_todays_forecast_hours():
+    import types
+    from franklinwh_scraper.weather import HourlyForecast
+
+    def hr(day, hour, t):
+        return HourlyForecast(time=datetime(2026, 10, day, hour), direct_radiation_wm2=0.0,
+                              diffuse_radiation_wm2=0.0, cloud_cover_pct=0.0, temp_c=t)
+    outlook = types.SimpleNamespace(hours=[hr(12, 3, 17.0), hr(12, 15, 36.0), hr(12, 20, 28.0), hr(13, 15, 40.0)])
+    saved = {}
+    store = types.SimpleNamespace(record_daily_weather=lambda d, hi, lo: saved.update(day=d, hi=hi, lo=lo))
+    alerts._record_weather_today(store, outlook, datetime(2026, 10, 12, 9, 0))
+    assert saved == {"day": "2026-10-12", "hi": 36.0, "lo": 17.0}          # tomorrow's 40 C is not counted
+    alerts._record_weather_today(None, outlook, datetime(2026, 10, 12))   # no store: no error
+    alerts._record_weather_today(store, None, datetime(2026, 10, 12))     # no outlook: no error
