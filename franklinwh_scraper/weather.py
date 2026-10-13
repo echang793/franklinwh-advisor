@@ -345,6 +345,28 @@ def fetch_nws_storm_alerts(lat: float, lon: float, timeout: int = 10) -> list[st
     return events
 
 
+# Two forecast models, averaged. Open-Meteo's default ("best_match") is the one
+# that called a marine-layer day at 14.6 kWh when 6.6 arrived (ECMWF said 6.1);
+# averaging it with ECMWF cut replayed daily error 15%, hourly error 13% and
+# cloudy-day error 50% over 167 days of real readings. Multi-model responses name
+# every column <variable>_<model>.
+_FORECAST_MODELS = ("best_match", "ecmwf_ifs025")
+
+
+def _blend_models(hourly: dict, name: str, n: int) -> list:
+    """Per-timestamp mean of `name` across the models that have a value there
+    (None where none do). Falls back to the plain, un-suffixed column that a
+    single-model response uses."""
+    cols = [hourly[f"{name}_{m}"] for m in _FORECAST_MODELS if f"{name}_{m}" in hourly]
+    if not cols and name in hourly:
+        cols = [hourly[name]]
+    out: list = []
+    for i in range(n):
+        vals = [c[i] for c in cols if i < len(c) and c[i] is not None]
+        out.append(sum(vals) / len(vals) if vals else None)
+    return out
+
+
 def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int = 3) -> SolarOutlook:
     """Fetch ~72-hour hourly solar irradiance + temperature forecast for a location."""
     import time as _time
@@ -358,6 +380,7 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
                 "daily": "sunrise",
                 "forecast_days": 3,  # today + tomorrow + day after (multi-day alerts)
                 "timezone": "auto",
+                "models": ",".join(_FORECAST_MODELS),
             }, timeout=timeout)
             resp.raise_for_status()
             break
@@ -370,11 +393,13 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
     js = resp.json()
 
     hourly  = js["hourly"]
-    temps   = hourly.get("temperature_2m", [])
-    winds   = hourly.get("wind_speed_10m", [])
+    n       = len(hourly["time"])
+    temps   = _blend_models(hourly, "temperature_2m", n)
+    winds   = _blend_models(hourly, "wind_speed_10m", n)
+    clouds  = _blend_models(hourly, "cloud_cover", n)
     hours: list[HourlyForecast] = []
-    direct  = hourly["direct_radiation"]
-    diffuse = hourly["diffuse_radiation"]
+    direct  = _blend_models(hourly, "direct_radiation", n)
+    diffuse = _blend_models(hourly, "diffuse_radiation", n)
     for i, t in enumerate(hourly["time"]):
         dt = datetime.fromisoformat(t)
         # Open-Meteo radiation is the average of the PRECEDING hour, labelled
@@ -388,14 +413,15 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
             time=dt,
             direct_radiation_wm2=(direct[nxt] if nxt < len(direct) else 0.0) or 0.0,
             diffuse_radiation_wm2=(diffuse[nxt] if nxt < len(diffuse) else 0.0) or 0.0,
-            cloud_cover_pct=hourly["cloud_cover"][i] or 0.0,
-            temp_c=temps[i] if i < len(temps) and temps[i] is not None else 0.0,
-            wind_speed_ms=winds[i] if i < len(winds) and winds[i] is not None else 0.0,
+            cloud_cover_pct=clouds[i] or 0.0,
+            temp_c=temps[i] if temps[i] is not None else 0.0,
+            wind_speed_ms=winds[i] if winds[i] is not None else 0.0,
         ))
 
-    sunrise_times = [
-        datetime.fromisoformat(s) for s in js.get("daily", {}).get("sunrise", []) if s
-    ]
+    daily = js.get("daily", {})
+    sunrise_raw = daily.get("sunrise") or next(
+        (daily[f"sunrise_{m}"] for m in _FORECAST_MODELS if daily.get(f"sunrise_{m}")), [])
+    sunrise_times = [datetime.fromisoformat(s) for s in sunrise_raw if s]
 
     logger.debug("Fetched %d hourly forecasts for %.4f, %.4f", len(hours), lat, lon)
     return SolarOutlook(

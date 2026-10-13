@@ -9980,3 +9980,70 @@ def test_a_labeled_yes_does_not_get_overridden_by_the_ac_filter_in_the_profile(t
     pulses = _ac_pulses(datetime(2026, 10, 3), 15, [0, 55, 110])    # a Saturday: three 35-min blocks
     assert find_afternoon_session(pulses) is None
     assert find_afternoon_session(pulses, ac_filter=False)["blocks"] == 3     # the "yes, that was the car" path
+
+
+# ── Blend two weather models (2026-10-12) ─────────────────────────────────
+#
+# Open-Meteo's default model overpredicted a marine-layer day badly (14.6 kWh
+# forecast, 6.6 actual) where ECMWF said 6.1. Averaging the default with ECMWF
+# cut replayed daily error 15%, hourly error 13% and cloudy-day error 50%.
+
+def _multi_model_response(default, ecmwf, **extra):
+    """An Open-Meteo multi-model payload for three hourly slots 05:00-07:00."""
+    def cols(suffix, d):
+        return {
+            f"direct_radiation_{suffix}": d["direct"], f"diffuse_radiation_{suffix}": d["diffuse"],
+            f"cloud_cover_{suffix}": d["cloud"], f"temperature_2m_{suffix}": d["temp"],
+            f"wind_speed_10m_{suffix}": d["wind"],
+        }
+    hourly = {"time": ["2026-10-12T05:00", "2026-10-12T06:00", "2026-10-12T07:00"]}
+    if default:
+        hourly.update(cols("best_match", default))
+    if ecmwf:
+        hourly.update(cols("ecmwf_ifs025", ecmwf))
+    daily = {"sunrise_best_match": ["2026-10-12T06:50"], "sunrise_ecmwf_ifs025": ["2026-10-12T06:51"]}
+    return {"hourly": hourly, "daily": daily, "utc_offset_seconds": -25200, **extra}
+
+
+def _fetch_with(monkeypatch, payload):
+    from franklinwh_scraper import weather
+
+    seen = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return payload
+
+    def _get(url, params=None, timeout=None):
+        seen.update(params)
+        return _Resp()
+
+    monkeypatch.setattr(weather.requests, "get", _get)
+    return weather.fetch_solar_outlook(32.9, -117.1), seen
+
+
+def test_forecast_averages_the_default_model_with_ecmwf(monkeypatch):
+    a = {"direct": [0, 100, 300], "diffuse": [0, 10, 30], "cloud": [10, 20, 30], "temp": [10.0, 12.0, 14.0], "wind": [1.0, 1.0, 1.0]}
+    b = {"direct": [0, 300, 100], "diffuse": [0, 30, 10], "cloud": [30, 40, 50], "temp": [14.0, 16.0, 18.0], "wind": [3.0, 3.0, 3.0]}
+    out, seen = _fetch_with(monkeypatch, _multi_model_response(a, b))
+    assert "ecmwf_ifs025" in seen["models"] and "best_match" in seen["models"]
+    by_hour = {h.time.hour: h for h in out.hours}
+    # the 06:00 entry takes the 07:00 label's radiation: (300+30 and 100+10) averaged
+    assert by_hour[6].ghi_wm2 == pytest.approx((330 + 110) / 2)
+    assert by_hour[5].ghi_wm2 == pytest.approx((110 + 330) / 2)          # 06:00 label: (100+10, 300+30)
+    assert by_hour[6].cloud_cover_pct == pytest.approx(30.0)             # (20 + 40) / 2
+    assert by_hour[6].temp_c == pytest.approx(14.0)                      # (12 + 16) / 2
+    assert out.sunrise_times and out.sunrise_times[0].minute == 50       # first model's sunrise
+
+
+def test_forecast_uses_the_other_model_when_one_is_missing_or_null(monkeypatch):
+    a = {"direct": [0, 100, 300], "diffuse": [0, 10, 30], "cloud": [10, 20, 30], "temp": [10.0, 12.0, 14.0], "wind": [1.0, 1.0, 1.0]}
+    only_default, _ = _fetch_with(monkeypatch, _multi_model_response(a, None))
+    assert {h.time.hour: h for h in only_default.hours}[6].ghi_wm2 == pytest.approx(330.0)
+    b = {"direct": [0, None, 100], "diffuse": [0, None, 10], "cloud": [30, None, 50], "temp": [14.0, None, 18.0], "wind": [3.0, None, 3.0]}
+    nulls, _ = _fetch_with(monkeypatch, _multi_model_response(a, b))
+    h5 = {h.time.hour: h for h in nulls.hours}[5]                         # 06:00 label: ecmwf is null -> default only
+    assert h5.ghi_wm2 == pytest.approx(110.0)
+    by = {h.time.hour: h for h in nulls.hours}
+    assert by[6].cloud_cover_pct == pytest.approx(20.0)                   # ecmwf null at 06:00 -> default alone
+    assert by[7].cloud_cover_pct == pytest.approx(40.0)                   # both present at 07:00: (30 + 50) / 2
