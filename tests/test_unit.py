@@ -10248,3 +10248,234 @@ def test_record_weather_today_takes_the_high_and_low_of_todays_forecast_hours():
     assert saved == {"day": "2026-10-12", "hi": 36.0, "lo": 17.0}          # tomorrow's 40 C is not counted
     alerts._record_weather_today(None, outlook, datetime(2026, 10, 12))   # no store: no error
     alerts._record_weather_today(store, None, datetime(2026, 10, 12))     # no outlook: no error
+
+
+# ── Solar backtest (replay of the calibration + prediction pipeline) ──────
+
+def _synthetic_site(tmp_path, first="2026-09-01", days=14, db_name="h.db"):
+    """A sunny-day world: readings every 5 minutes and matching hourly weather."""
+    import math
+
+    def ghi(label_hour):                       # Open-Meteo labels = END of the hour averaged
+        return max(0.0, 900.0 * math.sin(math.pi * (label_hour - 6.5) / 12.5)) if 7 <= label_hour <= 19 else 0.0
+
+    db = HistoryStore(tmp_path / db_name)
+    d0 = datetime.fromisoformat(first)
+    for n in range(days):
+        day = d0 + timedelta(days=n)
+        for hour in range(5, 21):
+            for i in range(12):
+                t = day.replace(hour=hour, minute=i * 5)
+                solar = 4.0 * ghi(hour + 1) / 1000.0 * 0.95
+                db._conn.execute(
+                    "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,solar_kw,battery_soc,"
+                    "grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (t.isoformat(), t.weekday(), hour, 0.5, solar, 50.0, 0.0, "normal", 0.0, 0.0))
+    db._conn.commit()
+    times, direct, diffuse = [], [], []
+    for n in range(days + 3):
+        day = d0 + timedelta(days=n)
+        for hour in range(24):
+            times.append(day.replace(hour=hour).strftime("%Y-%m-%dT%H:00"))
+            g = ghi(hour)
+            direct.append(0.8 * g)
+            diffuse.append(0.2 * g)
+    n_h = len(times)
+    wx = {"hourly": {"time": times, "direct_radiation": direct, "diffuse_radiation": diffuse,
+                     "cloud_cover": [0.0] * n_h, "temperature_2m": [25.0] * n_h, "wind_speed_10m": [1.0] * n_h},
+          "daily": {"time": [(d0 + timedelta(days=n)).strftime("%Y-%m-%d") for n in range(days + 3)],
+                    "sunrise": [(d0 + timedelta(days=n)).strftime("%Y-%m-%dT06:30") for n in range(days + 3)]},
+          "utc_offset_seconds": -25200}
+    return tmp_path / db_name, wx, (d0 + timedelta(days=days - 1)).strftime("%Y-%m-%d")
+
+
+def test_replay_learns_from_readings_and_scores_a_clean_world_well(tmp_path):
+    from franklinwh_scraper import backtest
+
+    db, wx, last = _synthetic_site(tmp_path)
+    out = backtest.run_replay(db, wx, "2026-09-01", last)
+    assert len(out["records"]) == 14
+    scored = backtest.summarize(out["records"], since="2026-09-06")
+    assert scored is not None and scored["n_days"] >= 6
+    assert scored["day_mae"] < 3.0 and scored["hour_mae"] < 0.5          # a self-consistent world is easy
+    assert out["final"]["peak"] is not None
+    assert alerts.datetime is datetime and predictor.datetime is datetime  # the fake clock was removed
+
+
+def test_replay_restores_the_real_clock_even_when_it_fails(tmp_path, monkeypatch):
+    from franklinwh_scraper import backtest
+
+    db, wx, last = _synthetic_site(tmp_path, days=3)
+    monkeypatch.setattr(alerts, "_calibrate_solar", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        backtest.run_replay(db, wx, "2026-09-01", last)
+    assert alerts.datetime is datetime
+
+
+def test_fetch_history_weather_blends_models_and_asks_for_the_replay_window(monkeypatch):
+    from franklinwh_scraper import backtest
+
+    seen = {}
+
+    class _R:
+        def raise_for_status(self): pass
+        def json(self):
+            hours = ["2026-09-01T00:00", "2026-09-01T01:00"]
+            cols = {}
+            for var in ("direct_radiation", "diffuse_radiation", "cloud_cover", "temperature_2m", "wind_speed_10m"):
+                cols[f"{var}_best_match"] = [10.0, 20.0]
+                cols[f"{var}_ecmwf_ifs025"] = [30.0, None]
+            return {"hourly": {"time": hours, **cols},
+                    "daily": {"time": ["2026-09-01"], "sunrise_best_match": ["2026-09-01T06:30"]},
+                    "utc_offset_seconds": -25200}
+
+    def _get(url, params=None, timeout=None):
+        seen.update(url=url, **params)
+        return _R()
+
+    monkeypatch.setattr(backtest.requests, "get", _get)
+    wx = backtest.fetch_history_weather(32.9, -117.1, "2026-09-01", "2026-09-10")
+    assert "historical-forecast" in seen["url"] and seen["end_date"] == "2026-09-12"
+    assert "ecmwf_ifs025" in seen["models"]
+    assert wx["hourly"]["direct_radiation"] == [20.0, 20.0]               # (10+30)/2, then the one model with a value
+    assert wx["daily"]["sunrise"] == ["2026-09-01T06:30"] and wx["utc_offset_seconds"] == -25200
+
+
+def _rec(date, act_kwh, pred_kwh, rem_pred, rem_act):
+    return {"date": date, "cov": True, "actual_kwh": act_kwh, "actual": {h: 1.0 for h in range(6, 19)},
+            "A": {"gen": pred_kwh, "hours": {h: pred_kwh / 9.0 for h in range(8, 17)}},
+            "B": {"at": f"{date}T15:30:00", "hours": {16: rem_pred}}, "rem_actual": rem_act}
+
+
+def test_summarize_scores_days_and_cloudy_days_separately():
+    from franklinwh_scraper import backtest
+
+    recs = [_rec("2026-09-10", 20.0, 22.0, 2.0, 1.0), _rec("2026-09-11", 10.0, 13.0, 1.0, 1.0),
+            _rec("2026-07-01", 20.0, 30.0, 1.0, 1.0)]                       # before `since`: ignored
+    s = backtest.summarize(recs, since="2026-07-15")
+    assert s["n_days"] == 2 and s["n_cloudy"] == 1
+    assert s["day_mae"] == pytest.approx(2.5) and s["day_bias"] == pytest.approx(2.5)
+    assert s["cloudy_mae"] == pytest.approx(3.0)
+    assert s["rem_mae_kwh"] == pytest.approx(0.5)
+    assert backtest.summarize([], since="2026-07-15") is None
+
+
+def test_format_report_shows_the_change_since_last_run():
+    from franklinwh_scraper import backtest
+
+    now = backtest.summarize([_rec("2026-09-10", 20.0, 21.0, 1.0, 1.0)], since="2026-07-15")
+    before = dict(now, day_mae=now["day_mae"] + 0.4)
+    text = backtest.format_report(now, before)
+    assert "1 days replayed" in text and "↓0.40 vs last" in text
+    assert "no days" in backtest.format_report(None).lower()
+
+
+def test_solar_backtest_command_replays_history_logs_the_result_and_compares_with_last_time(tmp_path):
+    import json as _json
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    db, wx, _last = _synthetic_site(tmp_path, db_name="history.db")
+    cfg = Config(output_dir=str(tmp_path), lat=32.9, lon=-117.1)
+    runner = CliRunner()
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg), \
+         patch("franklinwh_scraper.backtest.fetch_history_weather", return_value=wx):
+        first = runner.invoke(cli_mod.cli, ["solar-backtest", "--since", "2026-09-06"])
+        second = runner.invoke(cli_mod.cli, ["solar-backtest", "--since", "2026-09-06"])
+    assert first.exit_code == 0, first.output
+    assert "Solar forecast backtest" in first.output and "days replayed" in first.output
+    log = _json.loads((tmp_path / "solar_backtest.json").read_text())
+    assert len(log["runs"]) == 2 and log["runs"][0]["summary"]["n_days"] >= 6
+    assert "vs last" in second.output
+
+
+def test_solar_backtest_notify_sends_the_report_to_telegram(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    db, wx, _last = _synthetic_site(tmp_path, db_name="history.db")
+    cfg = Config(output_dir=str(tmp_path), lat=32.9, lon=-117.1, telegram_bot_token="t", telegram_chat_id="1")
+    sent = []
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg), \
+         patch("franklinwh_scraper.backtest.fetch_history_weather", return_value=wx), \
+         patch("franklinwh_scraper.cli.notify_telegram", lambda body, tok, chat, **k: sent.append(body)):
+        res = CliRunner().invoke(cli_mod.cli, ["solar-backtest", "--since", "2026-09-06", "--notify"])
+    assert res.exit_code == 0, res.output
+    assert len(sent) == 1 and "Solar forecast backtest" in sent[0]
+
+
+def test_solar_backtest_fails_clearly_without_history(tmp_path):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from franklinwh_scraper import cli as cli_mod
+
+    cfg = Config(output_dir=str(tmp_path), lat=32.9, lon=-117.1)
+    with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
+        res = CliRunner().invoke(cli_mod.cli, ["solar-backtest"])
+    assert res.exit_code != 0 and "history" in res.output.lower()
+
+
+def test_monthly_backtest_launches_once_a_month_in_the_small_hours(monkeypatch, tmp_path):
+    launched = []
+    monkeypatch.setattr(alerts.subprocess, "Popen", lambda cmd, **kw: launched.append(cmd))
+    cfg = Config(output_dir=str(tmp_path))
+    state: dict = {}
+    assert alerts._maybe_launch_monthly_backtest(state, datetime(2026, 11, 1, 14, 0), cfg) is None
+    assert launched == []                                                      # wrong hour
+    alerts._maybe_launch_monthly_backtest(state, datetime(2026, 11, 1, 3, 10), cfg)
+    assert len(launched) == 1 and "solar-backtest" in launched[0] and "--notify" in launched[0]
+    alerts._maybe_launch_monthly_backtest(state, datetime(2026, 11, 1, 3, 15), cfg)
+    assert len(launched) == 1                                                  # once per month
+    alerts._maybe_launch_monthly_backtest(state, datetime(2026, 12, 1, 4, 0), cfg)
+    assert len(launched) == 2                                                  # next month runs again
+
+
+def test_monthly_backtest_never_raises_when_the_launch_fails(monkeypatch, tmp_path):
+    def boom(*a, **k):
+        raise OSError("no fork")
+
+    monkeypatch.setattr(alerts.subprocess, "Popen", boom)
+    assert alerts._maybe_launch_monthly_backtest({}, datetime(2026, 11, 1, 3, 10), Config(output_dir=str(tmp_path))) is None
+
+
+def test_fetch_history_weather_retries_when_the_archive_answers_200_with_a_non_json_body(monkeypatch):
+    from franklinwh_scraper import backtest
+
+    calls = []
+
+    class _Bad:
+        def raise_for_status(self): pass
+        def json(self): raise ValueError("Expecting value")          # "Unexpected error while streaming data: timeoutReached"
+
+    class _Good:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"hourly": {"time": ["2026-09-01T00:00"], "direct_radiation": [1.0], "diffuse_radiation": [1.0],
+                               "cloud_cover": [0.0], "temperature_2m": [20.0], "wind_speed_10m": [1.0]},
+                    "daily": {"time": ["2026-09-01"], "sunrise": ["2026-09-01T06:30"]}, "utc_offset_seconds": 0}
+
+    monkeypatch.setattr(backtest.time, "sleep", lambda s: None)
+    monkeypatch.setattr(backtest.requests, "get", lambda *a, **k: calls.append(1) or (_Bad() if len(calls) < 3 else _Good()))
+    wx = backtest.fetch_history_weather(32.9, -117.1, "2026-09-01", "2026-09-01")
+    assert len(calls) == 3 and wx["hourly"]["direct_radiation"] == [1.0]
+
+
+def test_fetch_history_weather_gives_a_clear_error_when_every_attempt_fails(monkeypatch):
+    from franklinwh_scraper import backtest
+
+    class _Bad:
+        def raise_for_status(self): pass
+        def json(self): raise ValueError("Expecting value")
+
+    monkeypatch.setattr(backtest.time, "sleep", lambda s: None)
+    monkeypatch.setattr(backtest.requests, "get", lambda *a, **k: _Bad())
+    with pytest.raises(RuntimeError, match="weather archive"):
+        backtest.fetch_history_weather(32.9, -117.1, "2026-09-01", "2026-09-01")

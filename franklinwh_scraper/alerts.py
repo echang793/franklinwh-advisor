@@ -10,6 +10,8 @@ import fcntl
 import json
 import logging
 import statistics
+import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -1012,6 +1014,26 @@ def _calibrate_solar(state: dict, solar_kw: float, outlook, now: datetime | None
         state["solar_peak_today_date"] = today_str
         state["solar_peak_today_samples"] = []
     state["solar_peak_today_samples"].append(sample)
+
+
+def _maybe_launch_monthly_backtest(state: dict, now: datetime, cfg: Config) -> None:
+    """Once a month, in the small hours, run `franklinwh solar-backtest --notify` in its
+    own process (it swaps the module clock, so it must never share the advisor's) and
+    let it message the result. Never raises: this is housekeeping."""
+    month = now.strftime("%Y-%m")
+    if state.get("solar_backtest_month") == month or now.hour not in (3, 4):
+        return None
+    state["solar_backtest_month"] = month          # marked first so a failing launch is not retried every cycle
+    try:
+        out = Path(cfg.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        log = open(out / "solar_backtest.log", "a")     # noqa: SIM115 - handed to the child
+        subprocess.Popen(
+            [sys.executable, "-m", "franklinwh_scraper.cli", "solar-backtest", "--notify"],
+            cwd=Path(__file__).resolve().parent.parent, stdout=log, stderr=log, start_new_session=True)
+    except Exception:
+        logger.exception("Could not launch the monthly solar backtest")
+    return None
 
 
 def _record_weather_today(store, outlook, now: datetime) -> None:
@@ -4436,6 +4458,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("car_question",         lambda: _alert_car_question(state, today, now, store)),
             ("load_question",        lambda: _alert_load_question(state, today, now, store)),
             ("car_charge_started",   lambda: _alert_car_charge_started(state, today, now, c, cfg, store)),
+            ("solar_backtest",       lambda: _maybe_launch_monthly_backtest(state, now, cfg)),
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),

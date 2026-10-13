@@ -1321,6 +1321,67 @@ def _parse_vpp_time(s: str) -> datetime:
         raise click.ClickException(f"Can't parse '{s}' — use HH:MM or YYYY-MM-DDTHH:MM")
 
 
+@cli.command("solar-backtest")
+@click.option("--since", default=None, help="First day to SCORE (default 2026-07-15, the 5-minute polling era). "
+                                            "Learning always replays from the first reading.")
+@click.option("--notify", is_flag=True, default=False, help="Also send the report to Telegram.")
+@click.pass_context
+def solar_backtest(ctx: click.Context, since: str | None, notify: bool) -> None:
+    """Replay the solar calibration + prediction code over history.db with historical
+    forecasts and report how accurate it would have been (daily, hourly, 3:30 PM-to-
+    sundown, cloudy days), compared with the last run. Run it after changing weather,
+    predictor or calibration code; the advisor also runs it monthly."""
+    import sqlite3
+    import tempfile
+
+    from . import backtest
+
+    cfg = ctx.obj["config"]
+    outdir = Path(cfg.output_dir)
+    if not outdir.is_absolute():
+        outdir = Path(__file__).parent.parent / outdir
+    live = outdir / "history.db"
+    if not live.exists():
+        raise click.ClickException(f"No history database at {live} yet — nothing to replay.")
+    since = since or backtest.DEFAULT_SINCE
+
+    with tempfile.TemporaryDirectory() as tmp:
+        snap = Path(tmp) / "history.db"
+        src = sqlite3.connect(str(live))
+        dst = sqlite3.connect(str(snap))
+        src.backup(dst)                               # a consistent copy; the advisor keeps writing to the live file
+        src.close()
+        dst.close()
+        conn = sqlite3.connect(str(snap))
+        lo, hi = conn.execute("SELECT MIN(timestamp), MAX(timestamp) FROM readings").fetchone()
+        conn.close()
+        if not lo:
+            raise click.ClickException("history.db has no readings yet.")
+        first = lo[:10]
+        last = min(hi[:10], (datetime.now().date() - timedelta(days=3)).isoformat())   # weather archive needs last+2 days
+        click.echo(f"Replaying {first} .. {last} (scoring from {since}) …")
+        wx = backtest.fetch_history_weather(cfg.lat, cfg.lon, first, last)
+        result = backtest.run_replay(snap, wx, first, last)
+    summary = backtest.summarize(result["records"], since=since)
+
+    log_path = outdir / "solar_backtest.json"
+    try:
+        log = json.loads(log_path.read_text())
+    except (OSError, ValueError):
+        log = {"runs": []}
+    previous = log["runs"][0]["summary"] if log["runs"] else None
+    report = backtest.format_report(summary, previous)
+    click.echo(report)
+    if summary is not None:
+        log["runs"].insert(0, {"ran_at": datetime.now().isoformat(timespec="seconds"), "since": since,
+                               "summary": summary})
+        log["runs"] = log["runs"][:24]
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(json.dumps(log, indent=1))
+    if notify and cfg.telegram_bot_token and cfg.telegram_chat_id:
+        notify_telegram(report, cfg.telegram_bot_token, cfg.telegram_chat_id)
+
+
 @cli.command("vpp-event")
 @click.option("--start", default="", help="Event start: HH:MM (today) or YYYY-MM-DDTHH:MM.")
 @click.option("--end", default="", help="Event end: HH:MM (today) or YYYY-MM-DDTHH:MM.")
