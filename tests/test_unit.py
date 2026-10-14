@@ -4644,9 +4644,10 @@ def test_fast_drain_critical_alert_includes_sundown_projection(monkeypatch):
     assert "🌇 Projected @ sundown" in msg
 
 
-def test_unusual_drain_alert_includes_sundown_projection(monkeypatch):
-    """The lower-urgency 'unusual drain' tier (>=35% SoC) gets the
-    projection too — needs 2 consecutive over-threshold polls to fire."""
+def test_fast_drain_silent_at_or_above_35_pct(monkeypatch):
+    """The 'unusual drain' advisory tier was removed as redundant with the
+    critical 'draining fast' alert (and the big-load alerts): a fast drain
+    at >=35% SoC stays silent, however many polls it persists."""
     import types
 
     now1 = datetime(2026, 7, 15, 12, 0, 0)
@@ -4659,13 +4660,12 @@ def test_unusual_drain_alert_includes_sundown_projection(monkeypatch):
     monkeypatch.setattr(alerts, "predict", lambda *a, **kw: forecast)
 
     state = {"last_soc": 60.0, "last_soc_time": (now1 - timedelta(minutes=10)).isoformat()}
-    alerts._alert_fast_drain(state, "2026-07-15", now1, c1, Config(),
-                             outlook=None, usage_forecast=forecast, store=object())  # 1st poll: builds streak
-    msg = alerts._alert_fast_drain(state, "2026-07-15", now2, c2, Config(),
-                                   outlook=None, usage_forecast=forecast, store=object())
-    assert msg is not None
-    assert "Unusual drain rate" in msg
-    assert "🌇 Projected @ sundown" in msg
+    assert alerts._alert_fast_drain(state, "2026-07-15", now1, c1, Config(),
+                                    outlook=None, usage_forecast=forecast, store=object()) is None
+    assert alerts._alert_fast_drain(state, "2026-07-15", now2, c2, Config(),
+                                    outlook=None, usage_forecast=forecast, store=object()) is None
+    assert "unusual_drain_streak" not in state
+    assert "unusual_drain_alerted_date" not in state
 
 
 # ── system_peak_kw EWMA (closes the P75-lag lead left after the hourly_bias fix) ──

@@ -761,7 +761,7 @@ def snooze_alert(state: dict, name: str, hours: float, now: datetime) -> tuple[b
 
 def _title_key(body: str) -> str:
     """Stable grouping key for an alert logged without a name: first line,
-    tags stripped, numbers collapsed ("Unusual drain rate — 13%/hr" and
+    tags stripped, numbers collapsed ("Battery draining fast — 13%/hr" and
     "— 9%/hr" are one alert type)."""
     import re
     first = re.sub(r"<[^>]+>", "", body).strip().splitlines()[0] if body.strip() else ""
@@ -2443,7 +2443,7 @@ def _sundown_projection_line(
 ) -> str:
     """Live-anchored, bias-corrected sundown SoC projection as a formatted
     alert-body line ('' if no forecast data is available). Shared by every
-    low-battery-flavored alert (1pm, noon, fast/unusual drain) so they all
+    low-battery-flavored alert (1pm, noon, fast drain) so they all
     show the same number via the same math, instead of three
     implementations quietly drifting apart. Display-only — never persists
     sundown_pred_, which stays opt-in to an explicit /sundown ask so this
@@ -3196,10 +3196,9 @@ def _alert_fast_drain(
 ) -> str | None:
     """Always updates last_soc/last_soc_time for rate tracking.
 
-    Two tiers: a critical alert below 35% SoC (unchanged), and a lower-urgency
-    "unusual drain" alert at any SoC — catches an EV plugged in or AC left on
-    while there's still plenty of lead time to act, instead of only firing
-    once the battery is already low.
+    Critical alert only: >=8%/hr below 35% SoC. (A lower-urgency "unusual
+    drain" tier at >=35% was removed as redundant with this and with the
+    car-charge / big-load alerts.)
     """
     prev_soc      = state.get("last_soc")
     prev_soc_time = state.get("last_soc_time")
@@ -3216,7 +3215,6 @@ def _alert_fast_drain(
                 cap = cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH
                 if drain_rate >= 8.0 and c.battery_soc_pct < 35.0 and state.get("fast_drain_alerted_date") != today:
                     _mark_alerted(state, "fast_drain_alerted_date", today)
-                    state.pop("unusual_drain_streak", None)
                     logger.info("Fast drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
                     _tte_fd = _time_to_pct(c.battery_soc_pct, 0.0, cap, c.battery_use_kw)
                     _tte_fd_s = f"\n⏱ ~{_fmt_hours(_tte_fd)} to empty" if _tte_fd is not None else ""
@@ -3228,24 +3226,6 @@ def _alert_fast_drain(
                         f"Time: {now.strftime('%-I:%M %p')}{_tte_fd_s}"
                         f"{sundown_str}"
                     )
-                elif drain_rate >= 6.0 and c.battery_soc_pct >= 35.0:
-                    # Require 2 consecutive polls over threshold to avoid noise
-                    # from a single momentary load spike.
-                    streak = state.get("unusual_drain_streak", 0) + 1
-                    state["unusual_drain_streak"] = streak
-                    if streak >= 2 and state.get("unusual_drain_alerted_date") != today:
-                        _mark_alerted(state, "unusual_drain_alerted_date", today)
-                        logger.info("Unusual drain alert sent for %s (%.0f%%/hr, %.0f%%)", today, drain_rate, c.battery_soc_pct)
-                        sundown_str = _sundown_projection_line(state, now, c, cap, outlook, usage_forecast, store)
-                        body = (
-                            f"🟡 <b>FranklinWH: Unusual drain rate — {drain_rate:.0f}%/hr</b>\n"
-                            f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Load <b>{c.home_load_kw:.2f} kW</b>  ·  "
-                            f"Solar {c.solar_production_kw:.2f} kW\n"
-                            f"Time: {now.strftime('%-I:%M %p')} — check for EV charging or AC left on."
-                            f"{sundown_str}"
-                        )
-                else:
-                    state["unusual_drain_streak"] = 0
         except (ValueError, TypeError):
             pass
     state["last_soc"]      = c.battery_soc_pct
@@ -4466,11 +4446,6 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("vpp_event_started",    lambda: _alert_vpp_event_started(state, today, now, cfg)),
             ("vpp_event_ended",      lambda: _alert_vpp_event_ended(state, today, now, cfg, store)),
         ]
-        # (body, urgent) — fast_drain returns two tiers from one candidate
-        # (critical below 35% SoC, plus a lower-urgency "unusual drain"
-        # advisory) and both inherit urgent=True. Splitting it into two
-        # candidates would fragment its last_soc/last_soc_time bookkeeping,
-        # which is worse; it's an always-on safety alert either way.
         to_send: list[tuple[str, bool, str]] = []
         for _name, _fn in _candidates:
             if _alert_enabled(cfg, _name, state, now):
