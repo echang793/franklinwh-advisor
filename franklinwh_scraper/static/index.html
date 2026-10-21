@@ -14,6 +14,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/html-to-image@1.11.11/dist/html-to-image.js"></script>
+<script src="/sunpath.js?v=1"></script>
 <style>
 html,body{margin:0;padding:0;background:#070c08;}
 a{color:#57e389;text-decoration:none}a:hover{color:#8df0b0;text-decoration:underline}
@@ -171,8 +172,8 @@ const WALL_RELOAD_MS = 6 * 3600 * 1000;   // fresh page every 6 h: no memory cre
 const CAP0 = 13.6;
 const $ = id => document.getElementById(id);
 const M = "'JetBrains Mono',monospace";
-const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','batteryhealth','attribution','savings','alerts','digests','ev','vpp'];
-const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',attribution:'ATTRIBUTION',savings:'SAVINGS',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING',vpp:'VPP EVENT'};
+const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','batteryhealth','attribution','savings','alerts','digests','ev','vpp','sunpath'];
+const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',attribution:'ATTRIBUTION',savings:'SAVINGS',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING',vpp:'VPP EVENT',sunpath:'SUN PATH'};
 
 // ── Live state ───────────────────────────────────────────────────────
 const S = {
@@ -486,6 +487,8 @@ mkPanel('vpp', `
     <div class="mono" style="font-size:9.5px;color:#4c5f50;margin-top:10px;">Payment metric not confirmed — both shown. DSGS pays annually via Visa gift card, not per event.</div>
   </div>`);
 
+const sunpathPanel = mkPanel('sunpath', SunPath.html);
+
 // ── Toolbar ──────────────────────────────────────────────────────────
 function buildToolbar(){
   const tb = $('toolbar');
@@ -567,7 +570,7 @@ function snapshot(){
 }
 
 // ── Layout system ────────────────────────────────────────────────────
-function defaultLayout(){ return { left:['battery','flow','forecast','ebplan','accuracy','attribution','alerts'], right:['history','bill','savings','mode','touclock','batteryhealth','digests','ev','vpp'] }; }
+function defaultLayout(){ return { left:['battery','flow','sunpath','forecast','ebplan','accuracy','attribution','alerts'], right:['history','bill','savings','mode','touclock','batteryhealth','digests','ev','vpp'] }; }
 // Merge a saved layout against the current PANEL_IDS instead of requiring
 // an exact set match — previously, adding (or renaming) even one panel
 // silently discarded every user's custom drag arrangement back to default,
@@ -1725,6 +1728,7 @@ function demoData(){
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────
+SunPath.mount(sunpathPanel);   // after J()/_dashToken exist (it fetches on mount)
 buildToolbar();
 applyPanelStyles();
 renderDigests();

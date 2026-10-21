@@ -43,7 +43,7 @@ from .config import load as load_config
 from .format_utils import time_to_pct
 from .history import HistoryStore, integrate_intervals
 from .predictor import predict
-from . import savings
+from . import savings, sunpath
 from .tou import (BASE_SERVICE_DAILY, TouPeriod, cycle_bounds, export_rate_at,
                   on_peak_window, period_at, rate_at)
 from .weather import fetch_solar_outlook_cached as _fetch_outlook_cached
@@ -306,6 +306,125 @@ def api_history(hours: int = Query(48, ge=1, le=168)):
          "solar_kw": r["solar_kw"], "load_kw": r["home_load_kw"]}
         for r in rows
     ]}
+
+
+_SUNPATH_TILT = 20.0           # 4/12 roof pitch (user-confirmed)
+_SUNPATH_FIT_MAX_AGE = timedelta(days=7)
+_SUNPATH_YEAR_CACHE: dict = {}
+
+
+def _sunpath_model(refit: bool = False) -> tuple[list, float, dict | None]:
+    """(faces, scale_kw, fit). The SE/SW split is fitted from clear-day history
+    and cached on disk; falls back to 80/20 and the learned peak kW."""
+    cache = _OUT / ".sunpath_fit.json"
+    fit = None
+    if not refit:
+        try:
+            cached = json.loads(cache.read_text())
+            age = datetime.now() - datetime.fromisoformat(cached["fitted"])
+            if age <= _SUNPATH_FIT_MAX_AGE and cached.get("tilt") == _SUNPATH_TILT:
+                fit = cached
+        except (OSError, ValueError, KeyError, TypeError):
+            fit = None
+    if fit is None and (_OUT / "history.db").exists():
+        try:
+            with HistoryStore(_OUT / "history.db") as history:
+                fit = sunpath.fit_faces(history, _cfg.lat, _cfg.lon, tilt=_SUNPATH_TILT)
+        except sqlite3.Error:
+            fit = None
+        if fit is not None:
+            fit["fitted"] = datetime.now().isoformat()
+            try:
+                cache.write_text(json.dumps(fit))
+            except OSError:
+                pass
+    if fit is not None:
+        return (sunpath.default_faces(fit["se_weight"], fit["sw_azimuth"], _SUNPATH_TILT),
+                float(fit["scale_kw"]), fit)
+    try:
+        scale = float(_get_system_peak_kw(_load_peak_state(_OUT)) or 4.7)
+    except (TypeError, ValueError):
+        scale = 4.7
+    return sunpath.default_faces(0.8, 225.0, _SUNPATH_TILT), scale, None
+
+
+def _faces_json(faces) -> list[dict]:
+    compass = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    return [{"name": f"{compass[round(f.azimuth / 45) % 8]} roof",
+             "azimuth": f.azimuth, "tilt": f.tilt, "weight": round(f.weight, 4)}
+            for f in faces]
+
+
+@app.get("/api/sunpath", dependencies=_authed)
+def api_sunpath(date_: str | None = Query(None, alias="date"), refit: bool = False):
+    """Clear-sky sun path + per-roof-face output for one day, with the measured
+    curve overlaid when history has that day."""
+    try:
+        day = date.fromisoformat(date_) if date_ else date.today()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    faces, scale, fit = _sunpath_model(refit)
+    curve = sunpath.day_curve(day, _cfg.lat, _cfg.lon, faces, scale)
+    start = datetime(day.year, day.month, day.day)
+    rows = _readings_since(start, start + timedelta(days=1))
+    actual = None
+    actual_kwh = None
+    if rows:
+        actual = [{"min": ts.hour * 60 + ts.minute, "kw": round(float(r["solar_kw"] or 0.0), 3)}
+                  for r in rows for ts in [datetime.fromisoformat(r["timestamp"])]
+                  if r["solar_kw"] is not None and math.isfinite(r["solar_kw"])]
+        try:
+            with HistoryStore(_OUT / "history.db") as history:
+                actual_kwh = float(history.daily_solar_kwh_api(day.isoformat()))
+                if actual_kwh <= 0.0:   # no API running total stored: integrate solar_kw
+                    actual_kwh = float(history.daily_solar_kwh(day.isoformat()))
+        except sqlite3.Error:
+            actual_kwh = None
+    return {**curve, "lat": _cfg.lat, "lon": _cfg.lon, "faces": _faces_json(faces),
+            "scale_kw": round(scale, 3), "fit": fit, "actual": actual or None,
+            "actual_kwh": actual_kwh if actual else None}
+
+
+@app.get("/api/sunpath/year", dependencies=_authed)
+def api_sunpath_year():
+    """365 days of noon sun height, day length and clear-sky kWh, with measured
+    daily kWh where history has it."""
+    faces, scale, _fit = _sunpath_model()
+    today = date.today()
+    key = (today.isoformat(), round(scale, 3), faces[0].weight)
+    if key in _SUNPATH_YEAR_CACHE:
+        return _SUNPATH_YEAR_CACHE[key]
+    actual: dict[str, float] = {}
+    if (_OUT / "history.db").exists():
+        try:
+            with HistoryStore(_OUT / "history.db") as history:
+                days = [r[0] for r in history._conn.execute(
+                    "SELECT DISTINCT substr(timestamp, 1, 10) FROM readings "
+                    "WHERE timestamp >= ?", (f"{today.year}-01-01",))]
+                for d in days:
+                    kwh = history.daily_solar_kwh_api(d)
+                    if kwh > 0:
+                        actual[d] = float(kwh)
+        except sqlite3.Error:
+            actual = {}
+    out = []
+    for doy in range(1, 366):
+        d = date(today.year, 1, 1) + timedelta(days=doy - 1)
+        c = sunpath.day_curve(d, _cfg.lat, _cfg.lon, faces, scale, step_min=20)
+        rise, sset = c["sunrise_min"], c["sunset_min"]
+        out.append({"doy": doy, "date": d.isoformat(), "noon_el": c["noon_el"],
+                    "solar_noon_min": c["solar_noon_min"],
+                    "utc_offset_min": c["utc_offset_min"],
+                    "day_len_h": None if rise is None or sset is None
+                    else round((sset - rise) / 60.0, 2),
+                    "model_kwh": c["model_kwh"], "actual_kwh": actual.get(d.isoformat())})
+    result = {"year": today.year, "days": out,
+              "config": {"lat": _cfg.lat, "lon": _cfg.lon, "tz": sunpath.default_tz(),
+                         "faces": _faces_json(faces), "scale_kw": round(scale, 3),
+                         "fit": _fit}}
+    _SUNPATH_YEAR_CACHE.clear()
+    _SUNPATH_YEAR_CACHE[key] = result
+    return result
 
 
 @app.get("/api/forecast", dependencies=_authed)
