@@ -13,7 +13,11 @@ const C = { green: '#8df0b0', amber: '#f5b942', blue: '#8fb4ff', violet: '#c79bf
             muted: '#5f7263', line: '#1c2a1e', bright: '#e6f2e8', red: '#ff8a7a' };
 const SPEEDS = { slow: 90, med: 240, fast: 720 };   // simulated minutes per second
 const PITCH = 27 * RAD, CP = Math.cos(PITCH), SP = Math.sin(PITCH);
-const H_ROOF = 5.0, WALL_Z = 3.4, DOME_R = 15, GROUND_R = 12.5;
+const DOME_R = 19, GROUND_R = 14;
+const FRONT_AZ = 220;                                    // compass direction the front (garage/door side) faces
+const HOUSE = { w: 8, d: 12.5, floor: 3 };               // front width, depth, storey height (3 storeys)
+const STUCCO = [188, 156, 120], TRIM = [218, 200, 170], STONE = [150, 132, 108], DOOR = [78, 50, 34],
+      GARAGE = [96, 74, 58], ROOF = [84, 70, 62], CONCRETE = [176, 168, 154];
 
 const CSS = `
 .sp-root{display:flex;flex-direction:column;gap:10px;margin-top:12px}
@@ -89,7 +93,7 @@ function sunPos(utcMs, lat, lon) {
   const eot = 4 / RAD * (y * Math.sin(2 * l0 * RAD) - 2 * e * sm + 4 * e * y * sm * Math.cos(2 * l0 * RAD)
             - 0.5 * y * y * Math.sin(4 * l0 * RAD) - 1.25 * e * e * Math.sin(2 * m * RAD));
   const minUtc = ((utcMs / 60000) % 1440 + 1440) % 1440;
-  const tst = (minUtc + eot + 4 * lon) % 1440;
+  const tst = (((minUtc + eot + 4 * lon) % 1440) + 1440) % 1440;   // JS % keeps the sign: normalise like Python
   const ha = tst / 4 - 180, latR = lat * RAD;
   let cz = Math.sin(latR) * Math.sin(decl) + Math.cos(latR) * Math.cos(decl) * Math.cos(ha * RAD);
   cz = Math.max(-1, Math.min(1, cz));
@@ -239,14 +243,14 @@ const STARS = Array.from({ length: 70 }, (_, i) => { const r = Math.sin(i * 91.7
 
 // ── scene ─────────────────────────────────────────────────────────────
 function drawScene() {
-  const cv = els.scene, W0 = cv.clientWidth || 320, H0 = clamp(W0 * 0.66, 230, 420);
+  const cv = els.scene, W0 = cv.clientWidth || 320, H0 = clamp(W0 * 0.74, 260, 480);
   const { ctx, w: W, h: H } = fit(cv, H0);
   if (!st.cfg) {
     ctx.fillStyle = '#0a110b'; ctx.fillRect(0, 0, W, H); ctx.fillStyle = C.muted; ctx.font = `12px ${MONO}`;
     ctx.textAlign = 'center'; ctx.fillText(st.err || 'Loading sun model…', W / 2, H / 2); return;
   }
   const cur = at(st.doy, st.minute), dd = derived(st.doy), cfg = st.cfg;
-  const sc = Math.min(W / 32, H / 22.2), ox = W / 2, oy = H - 7.6 * sc;
+  const sc = Math.min(W / 38, H / 26), ox = W / 2, oy = H - 8.2 * sc;
   const P = (x, y, z) => [ox + x * sc, oy - (z * CP + y * SP) * sc];
   const el = cur.el, azR = cur.az * RAD;
   const sd = [Math.sin(azR) * Math.cos(el * RAD), Math.cos(azR) * Math.cos(el * RAD), Math.sin(el * RAD)];
@@ -271,24 +275,42 @@ function drawScene() {
   ctx.strokeStyle = 'rgba(255,255,255,.06)'; ctx.lineWidth = 1; ring(5); ctx.stroke(); ring(9); ctx.stroke();
   ctx.font = `600 11px ${MONO}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   [['N', 0, 1, C.red], ['E', 1, 0, C.text], ['S', 0, -1, C.text], ['W', -1, 0, C.text]].forEach(([t, x, y, col]) => {
-    const p = P(x * 14.2, y * 14.2, 0); ctx.fillStyle = col; ctx.fillText(t, p[0], p[1]); });
+    const p = P(x * 15.8, y * 15.8, 0); ctx.fillStyle = col; ctx.fillText(t, p[0], p[1]); });
 
-  // sun arcs: ghost solstices + equinox, then the selected day
+  // sun arcs: ghost solstices, then the selected day. The part of an arc north of the house is drawn before it
+  // (hidden behind), the part south of it after it (in front, nearer the camera) — otherwise the path seems to cut through the house.
   const arcPts = (series, stopMin) => series.filter(s => s.el > 0 && (stopMin === undefined || s.min <= stopMin)).map(s => {
     const a = s.az * RAD, ce = Math.cos(s.el * RAD);
-    return { p: P(Math.sin(a) * ce * DOME_R, Math.cos(a) * ce * DOME_R, Math.sin(s.el * RAD) * DOME_R), min: s.min }; });
-  const strokeArc = (pts, style, lw, dash) => { if (pts.length < 2) return; ctx.beginPath(); pts.forEach((q, i) => i ? ctx.lineTo(q.p[0], q.p[1]) : ctx.moveTo(q.p[0], q.p[1]));
-    ctx.setLineDash(dash || []); ctx.strokeStyle = style; ctx.lineWidth = lw; ctx.stroke(); ctx.setLineDash([]); };
-  ctx.font = `9px ${MONO}`; ctx.textAlign = 'left';
-  [[doyOf(5, 21), 'JUN 21'], [doyOf(11, 21), 'DEC 21']].forEach(([d, lab]) => {
-    const pts = arcPts(derived(d).series); strokeArc(pts, 'rgba(255,255,255,.14)', 1, [2, 4]);
-    if (pts.length) { const hi = pts.reduce((a, b) => b.p[1] < a.p[1] ? b : a); ctx.fillStyle = 'rgba(255,255,255,.38)'; ctx.fillText(lab, hi.p[0] + 6, hi.p[1] - 4); } });
-  strokeArc(arcPts(dd.series), 'rgba(245,185,66,.42)', 1.5, [5, 5]);
-  strokeArc(arcPts(dd.series, st.minute), 'rgba(245,185,66,.95)', 2.2);
+    return { p: P(Math.sin(a) * ce * DOME_R, Math.cos(a) * ce * DOME_R, Math.sin(s.el * RAD) * DOME_R), y: Math.cos(a), min: s.min }; });
+  const strokeArc = (pts, front, style, lw, dash) => {
+    let run = [];
+    const flush = () => { if (run.length > 1) { ctx.beginPath(); run.forEach((q, i) => i ? ctx.lineTo(q.p[0], q.p[1]) : ctx.moveTo(q.p[0], q.p[1]));
+      ctx.setLineDash(dash || []); ctx.strokeStyle = style; ctx.lineWidth = lw; ctx.stroke(); ctx.setLineDash([]); } run = []; };
+    pts.forEach((q, i) => {
+      if ((q.y <= 0) === front) { if (!run.length && i > 0) run.push(pts[i - 1]); run.push(q); }
+      else { if (run.length) run.push(q); flush(); }
+    });
+    flush();
+  };
+  const drawArcs = front => {
+    ctx.font = `9px ${MONO}`; ctx.textAlign = 'left';
+    [[doyOf(5, 21), 'JUN 21'], [doyOf(11, 21), 'DEC 21']].forEach(([d, lab]) => {
+      const pts = arcPts(derived(d).series); strokeArc(pts, front, 'rgba(255,255,255,.14)', 1, [2, 4]);
+      if (!front && pts.length) { const hi = pts.reduce((a, b) => b.p[1] < a.p[1] ? b : a); ctx.fillStyle = 'rgba(255,255,255,.38)'; ctx.fillText(lab, hi.p[0] + 6, hi.p[1] - 4); } });
+    strokeArc(arcPts(dd.series), front, 'rgba(245,185,66,.42)', 1.5, [5, 5]);
+    strokeArc(arcPts(dd.series, st.minute), front, 'rgba(245,185,66,.95)', 2.2);
+  };
+  drawArcs(false);
 
   // sun / moon behind the house when north of it
   const sunXYZ = [sd[0] * DOME_R, sd[1] * DOME_R, sd[2] * DOME_R], sp = P(...sunXYZ);
   const drawSun = () => {
+    if (el > 0) {                                           // drop line + ground marker: shows how far in front of / behind the house the sun is
+      const foot = P(sunXYZ[0], sunXYZ[1], 0);
+      ctx.beginPath(); ctx.moveTo(sp[0], sp[1]); ctx.lineTo(foot[0], foot[1]); ctx.setLineDash([2, 4]); ctx.strokeStyle = 'rgba(245,185,66,.4)'; ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+      ctx.beginPath(); ctx.ellipse(foot[0], foot[1], 6, 6 * SP, 0, 0, 6.2832); ctx.fillStyle = 'rgba(245,185,66,.5)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(245,185,66,.9)'; ctx.lineWidth = 1; ctx.stroke();
+    }
     if (el > -1) {
       const col = el < 4 ? '#ff9a4a' : el < 12 ? '#ffc15e' : '#fff3b0', gl = ctx.createRadialGradient(sp[0], sp[1], 0, sp[0], sp[1], 46);
       gl.addColorStop(0, col + 'cc'); gl.addColorStop(0.35, col + '44'); gl.addColorStop(1, col + '00');
@@ -300,67 +322,126 @@ function drawScene() {
     ctx.globalAlpha = night; ctx.beginPath(); ctx.arc(mp[0], mp[1], 6.5, 0, 6.2832); ctx.fillStyle = '#dfe6f5'; ctx.fill(); ctx.globalAlpha = 1; }
   if (sd[1] > 0) drawSun();
 
-  // house geometry (square rotated 45°: corners point S, E, N, W so the roof's two south planes face SE and SW)
-  const d = H_ROOF * Math.SQRT2, apexZ = WALL_Z + H_ROOF * Math.tan(cfg.faces[0].tilt * RAD);
-  const corner = { S: [0, -d], E: [d, 0], N: [0, d], W: [-d, 0] };
-  // cast shadow
-  if (el > 0.5) {
+  // ── house: three storeys, front facing FRONT_AZ, low hip roof. Local frame: a = along the front (viewer's right),
+  //    b = out from the front. The long side roof (~SE) carries most panels, the front hip roof (~SW) the rest.
+  const Wh = HOUSE.w / 2, Dh = HOUSE.d / 2, FL = HOUSE.floor, TOP = FL * 3, OVER = 0.45;
+  const tv = [Math.sin((FRONT_AZ - 90) * RAD), Math.cos((FRONT_AZ - 90) * RAD)], nv = [Math.sin(FRONT_AZ * RAD), Math.cos(FRONT_AZ * RAD)];
+  const tanR = Math.tan(cfg.faces[0].tilt * RAD), Zr = TOP + Wh * tanR, br = Dh - Wh, A = Wh + OVER, B = Dh + OVER, ze = Zr - A * tanR;
+  const w3 = (a, b, z) => [a * tv[0] + b * nv[0], a * tv[1] + b * nv[1], z];
+  const PP = (a, b, z) => P(...w3(a, b, z));
+  const hn = az => [Math.sin(az * RAD), Math.cos(az * RAD), 0];
+  const poly = (pts, fill, stroke, lw) => { ctx.beginPath(); pts.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])); ctx.closePath();
+    ctx.fillStyle = fill; ctx.fill(); if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw || 1; ctx.stroke(); } };
+  if (el > 0.5) {                                          // cast shadow, clipped to the ground disc
     const k = 1 / Math.max(Math.tan(el * RAD), 0.12), hx = Math.sin(azR), hy = Math.cos(azR), pts = [];
-    Object.values(corner).forEach(([x, y]) => { pts.push([x, y]); pts.push([x - hx * WALL_Z * k, y - hy * WALL_Z * k]); });
-    pts.push([-hx * apexZ * k, -hy * apexZ * k]);
-    const hull = convexHull(pts); ctx.save(); ring(GROUND_R); ctx.clip(); ctx.beginPath(); hull.forEach(([x, y], i) => { const p = P(x, y, 0); i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]); });
-    ctx.closePath(); ctx.fillStyle = `rgba(0,0,0,${0.42 * clamp(el / 8, 0, 1)})`; ctx.fill(); ctx.restore();
+    const add = (a, b, z) => { const w = w3(a, b, z); pts.push([w[0] - hx * z * k, w[1] - hy * z * k]); };
+    for (const sa of [-1, 1]) for (const sb of [-1, 1]) { add(sa * Wh, sb * Dh, 0); add(sa * Wh, sb * Dh, TOP); }
+    add(0, br, Zr); add(0, -br, Zr);
+    ctx.save(); ring(GROUND_R); ctx.clip();
+    poly(convexHull(pts).map(([x, y]) => P(x, y, 0)), `rgba(0,0,0,${0.42 * clamp(el / 8, 0, 1)})`);
+    ctx.restore();
   }
   const amb = mix([34, 40, 62], [92, 100, 118], day).map(v => v / 255);
   const sunRGB = el < 6 ? [1, 0.62, 0.34] : el < 14 ? [1, 0.84, 0.6] : [1, 0.97, 0.88];
   const lightOn = nrm => { const l = Math.max(0, nrm[0] * sd[0] + nrm[1] * sd[1] + nrm[2] * sd[2]) * (el > 0 ? 1 : 0);
     return [0, 1, 2].map(i => clamp(amb[i] + l * sunRGB[i] * 0.95, 0, 1.2)); };
-  const shade = (base, nrm) => rgb(lightOn(nrm).map((l, i) => clamp(Math.round(base[i] * l), 0, 255)));
-  const nSW = [Math.sin(225 * RAD), Math.cos(225 * RAD), 0], nSE = [Math.sin(135 * RAD), Math.cos(135 * RAD), 0];
-  const wall = (a, b, nrm, winU) => {
-    const pa = P(a[0], a[1], 0), pb = P(b[0], b[1], 0), pc = P(b[0], b[1], WALL_Z), pd = P(a[0], a[1], WALL_Z);
-    ctx.beginPath(); ctx.moveTo(...pa); ctx.lineTo(...pb); ctx.lineTo(...pc); ctx.lineTo(...pd); ctx.closePath();
-    ctx.fillStyle = shade([218, 208, 190], nrm); ctx.fill(); ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 1; ctx.stroke();
-    const f = (u, z) => P(a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, z), u0 = winU, u1 = winU + 0.22;
-    ctx.beginPath(); ctx.moveTo(...f(u0, 1.0)); ctx.lineTo(...f(u1, 1.0)); ctx.lineTo(...f(u1, 2.3)); ctx.lineTo(...f(u0, 2.3)); ctx.closePath();
-    ctx.fillStyle = night > 0.3 ? '#ffd48a' : shade([40, 56, 78], nrm); ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,.5)'; ctx.stroke();
-  };
-  wall(corner.W, corner.S, nSW, 0.58); wall(corner.S, corner.E, nSE, 0.2);
+  const shade = (base, nrm, k) => rgb(lightOn(nrm).map((l, i) => clamp(Math.round(base[i] * l * (k || 1)), 0, 255)));
+  const glass = idx => night > 0.3 ? (idx % 3 === 1 ? '#3a3a44' : '#ffd48a') : rgb(mix([22, 34, 52], [100, 138, 176], day));
 
-  // roof planes with panels. Each face: eave corners e0→e1, apex; t along eave, v toward the apex.
-  const tiltOf = i => cfg.faces[i].tilt * RAD, TOTAL = 16, ROWS = [5, 4, 3, 2];
-  const counts = cfg.faces.map(f => Math.round(TOTAL * f.weight));
-  const roof = (e0, e1, faceIdx, az) => {
-    const A = [0, 0, apexZ], E0 = [e0[0], e0[1], WALL_Z], E1 = [e1[0], e1[1], WALL_Z];
-    const tri = [E0, E1, A].map(v => P(...v)), tl = tiltOf(faceIdx);
-    const nrm = [Math.sin(az * RAD) * Math.sin(tl), Math.cos(az * RAD) * Math.sin(tl), Math.cos(tl)];
-    ctx.beginPath(); tri.forEach((p, i) => i ? ctx.lineTo(...p) : ctx.moveTo(...p)); ctx.closePath();
-    ctx.fillStyle = shade([86, 96, 112], nrm); ctx.fill(); ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 1; ctx.stroke();
-    const pt = (t, v) => { const ex = E0[0] + (E1[0] - E0[0]) * t, ey = E0[1] + (E1[1] - E0[1]) * t;
-      return P(ex * (1 - v), ey * (1 - v), WALL_Z + (apexZ - WALL_Z) * v); };
-    let left = counts[faceIdx];
-    const f = clamp(cur.fr[faceIdx], 0, 1.2), lit = mix(hex('#12202a'), hex('#8df0b0'), clamp(f, 0, 1)), dark = hex('#101a28');
-    const fill = rgb(mix(dark, lit, el > 0 ? 1 : 0));
-    ROWS.forEach((cap, r) => {
-      const n = Math.min(cap, left); if (n <= 0) return; left -= n;
-      const v0 = 0.1 + r * 0.17, v1 = v0 + 0.135, tw = 0.18 / (1 - (v0 + v1) / 2);   // equal real-world cell width
+  // ground details: driveway + walkway on the front
+  const flat = (a0, a1, b0, b1, base) => poly([PP(a0, b0, 0), PP(a1, b0, 0), PP(a1, b1, 0), PP(a0, b1, 0)], shade(base, [0, 0, 1], 0.9), 'rgba(0,0,0,.25)');
+  flat(-3.6, 0.6, Dh, Dh + 5.8, CONCRETE); flat(2.0, 2.9, Dh, Dh + 4.6, [120, 112, 104]);
+
+  // walls
+  const sides = [
+    { id: 'front', az: FRONT_AZ, pt: (u, z) => PP(-Wh + 2 * Wh * u, Dh, z) },
+    { id: 'right', az: FRONT_AZ - 90, pt: (u, z) => PP(Wh, Dh - 2 * Dh * u, z) },
+    { id: 'back', az: FRONT_AZ + 180, pt: (u, z) => PP(Wh - 2 * Wh * u, -Dh, z) },
+    { id: 'left', az: FRONT_AZ + 90, pt: (u, z) => PP(-Wh, -Dh + 2 * Dh * u, z) },
+  ];
+  const sq = (sd, u0, u1, z0, z1) => [sd.pt(u0, z0), sd.pt(u1, z0), sd.pt(u1, z1), sd.pt(u0, z1)];
+  let wi = 0;
+  const win = (sd, u0, u1, z0, z1) => { poly(sq(sd, u0, u1, z0, z1), glass(wi++), 'rgba(40,28,20,.85)', 1.2); };
+  const uA = a => (a + Wh) / (2 * Wh);
+  sides.filter(sd => Math.cos(sd.az * RAD) < -0.05).forEach(sd => {
+    const nrm = hn(sd.az);
+    poly(sq(sd, 0, 1, 0, TOP), shade(STUCCO, nrm), 'rgba(0,0,0,.35)');
+    [FL, 2 * FL].forEach(z => poly(sq(sd, 0, 1, z - 0.13, z + 0.13), shade(TRIM, nrm), 'rgba(0,0,0,.18)', 0.8));
+    if (sd.id === 'front') {
+      // stone veneer + front door + lanterns
+      const stoneRows = 8, stoneCols = 4, su0 = uA(1.3), su1 = uA(3.6);
+      for (let r = 0; r < stoneRows; r++) for (let c = 0; c < stoneCols; c++) {
+        const j = ((r * 7 + c * 13) % 5) / 5, off = (r % 2) * 0.5 / stoneCols;
+        const ua = su0 + (su1 - su0) * clamp((c + off) / stoneCols, 0, 1), ub = su0 + (su1 - su0) * clamp((c + 1 + off) / stoneCols, 0, 1);
+        poly(sq(sd, ua, ub, r * 3 / stoneRows, (r + 1) * 3 / stoneRows - 0.03), shade(mix(STONE, [176, 158, 130], j), nrm), 'rgba(0,0,0,.3)', 0.7);
+      }
+      poly(sq(sd, uA(2.0), uA(2.9), 0, 2.45), shade(DOOR, nrm), 'rgba(0,0,0,.5)', 1);
+      // garage door with panel lines
+      poly(sq(sd, uA(-3.6), uA(0.5), 0, 2.5), shade(GARAGE, nrm, 0.9), 'rgba(0,0,0,.5)', 1.2);
+      for (let i = 1; i < 4; i++) { ctx.beginPath(); ctx.moveTo(...sd.pt(uA(-3.6), 2.5 * i / 4)); ctx.lineTo(...sd.pt(uA(0.5), 2.5 * i / 4));
+        ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 1; ctx.stroke(); }
+      [[uA(1.0)], [uA(3.85)]].forEach(([u]) => { poly(sq(sd, u, u + 0.012, 1.5, 2.1), night > 0.3 ? '#ffd48a' : '#2a2420'); });
+      // second-floor loggia, recessed 1.6 under the third floor
+      const z0 = FL + 0.35, z1 = 2 * FL - 0.3, a0 = -3.7, a1 = 0.9, dep = 1.6;
+      poly([PP(a0, Dh, z0), PP(a1, Dh, z0), PP(a1, Dh, z1), PP(a0, Dh, z1)], '#1a1614');
+      poly([PP(a0, Dh - dep, z0), PP(a1, Dh - dep, z0), PP(a1, Dh - dep, z1), PP(a0, Dh - dep, z1)], shade(STUCCO, nrm, 0.62));
+      poly([PP(a0, Dh, z0), PP(a0, Dh - dep, z0), PP(a0, Dh - dep, z1), PP(a0, Dh, z1)], shade(STUCCO, hn(FRONT_AZ - 90), 0.85));
+      poly([PP(a0, Dh, z0), PP(a1, Dh, z0), PP(a1, Dh - dep, z0), PP(a0, Dh - dep, z0)], shade(CONCRETE, [0, 0, 1], 0.85));
+      const gz1 = z1 - 0.25;
+      for (let i = 0; i < 3; i++) { const ga = a0 + 0.35 + i * 1.3;
+        poly([PP(ga, Dh - dep, z0), PP(ga + 1.2, Dh - dep, z0), PP(ga + 1.2, Dh - dep, gz1), PP(ga, Dh - dep, gz1)], glass(wi++), 'rgba(40,28,20,.85)', 1.2); }
+      ctx.strokeStyle = '#1b1715'; ctx.lineWidth = 1.7;                      // railing: rails + balusters on the front plane
+      [[z0 + 1.05], [z0 + 0.08]].forEach(([zz]) => { ctx.beginPath(); ctx.moveTo(...PP(a0, Dh, zz)); ctx.lineTo(...PP(a1, Dh, zz)); ctx.stroke(); });
+      ctx.lineWidth = 1.1; for (let a = a0; a <= a1 + 0.01; a += 0.34) { ctx.beginPath(); ctx.moveTo(...PP(a, Dh, z0 + 0.08)); ctx.lineTo(...PP(a, Dh, z0 + 1.05)); ctx.stroke(); }
+      // windows: second-floor slit + third-floor groups
+      win(sd, uA(2.3), uA(2.8), FL + 1.0, FL + 2.5);
+      [-3.4, -2.3, -1.2].forEach(a => win(sd, uA(a), uA(a + 0.85), 2 * FL + 0.55, 2 * FL + 2.2));
+      [0.8, 1.85, 2.9].forEach(a => win(sd, uA(a), uA(a + 0.8), 2 * FL + 0.55, 2 * FL + 2.2));
+    } else if (sd.id === 'right') {
+      [0, 1, 2].forEach(f => [[0.16, 0.34], [0.5, 0.68], [0.78, 0.9]].forEach(([u0, u1], k) => { if (f === 0 && k < 2) return;
+        win(sd, u0, u1, f * FL + 0.8, f * FL + 2.2); }));
+    } else {
+      [1, 2].forEach(f => win(sd, 0.3, 0.45, f * FL + 0.8, f * FL + 2.2));
+    }
+  });
+
+  // roof: four low planes (back planes first). Panels go on the planes closest to the fitted face azimuths.
+  const planes = [
+    { az: FRONT_AZ - 90, E: [[A, -B], [A, B]], R: [[0, -br], [0, br]] },
+    { az: FRONT_AZ + 90, E: [[-A, -B], [-A, B]], R: [[0, -br], [0, br]] },
+    { az: FRONT_AZ, E: [[-A, B], [A, B]], R: [[0, br], [0, br]] },
+    { az: FRONT_AZ + 180, E: [[-A, -B], [A, -B]], R: [[0, -br], [0, -br]] },
+  ];
+  const angDiff = (x, y) => Math.abs(((x - y + 540) % 360) - 180);
+  const pick = (az, skip) => planes.map((pl, i) => [angDiff(pl.az, az), i]).filter(([, i]) => i !== skip).sort((x, y) => x[0] - y[0])[0][1];
+  const pi0 = pick(cfg.faces[0].azimuth, -1), pi1 = pick(cfg.faces[1].azimuth, pi0), TOTAL = 24;
+  const faceOf = i => i === pi0 ? 0 : i === pi1 ? 1 : -1;
+  const lerp2 = (p, q, t) => [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+  planes.map((pl, i) => [pl, i]).sort((x, y) => Math.cos(y[0].az * RAD) - Math.cos(x[0].az * RAD)).forEach(([pl, i]) => {
+    const pt = (s, v) => { const ab = lerp2(lerp2(pl.E[0], pl.E[1], s), lerp2(pl.R[0], pl.R[1], s), v); return PP(ab[0], ab[1], ze + (Zr - ze) * v); };
+    const nrm = [Math.sin(pl.az * RAD) * Math.sin(cfg.faces[0].tilt * RAD), Math.cos(pl.az * RAD) * Math.sin(cfg.faces[0].tilt * RAD), Math.cos(cfg.faces[0].tilt * RAD)];
+    const outline = [pt(0, 0), pt(1, 0), pt(1, 1), pt(0, 1)];
+    poly(pl.R[0][0] === pl.R[1][0] && pl.R[0][1] === pl.R[1][1] ? [outline[0], outline[1], outline[2]] : outline, shade(ROOF, nrm), 'rgba(0,0,0,.5)', 1.1);
+    const fi = faceOf(i); if (fi < 0) return;
+    const eaveL = Math.hypot(pl.E[1][0] - pl.E[0][0], pl.E[1][1] - pl.E[0][1]), ridgeL = Math.hypot(pl.R[1][0] - pl.R[0][0], pl.R[1][1] - pl.R[0][1]);
+    const realW = v => eaveL * (1 - v) + ridgeL * v, CELL = 1.05;
+    const f = clamp(cur.fr[fi], 0, 1.2), fill = rgb(mix(hex('#101a28'), mix(hex('#12202a'), hex('#8df0b0'), clamp(f, 0, 1)), el > 0 ? 1 : 0));
+    let left = Math.round(TOTAL * cfg.faces[fi].weight);
+    for (let r = 0; r < 3 && left > 0; r++) {
+      const v0 = 0.08 + r * 0.29, v1 = v0 + 0.24, cap = Math.max(1, Math.floor(realW((v0 + v1) / 2) * 0.88 / CELL)), n = Math.min(cap, left); left -= n;
+      const tw = CELL / realW((v0 + v1) / 2);
       for (let j = 0; j < n; j++) {
         const ta = 0.5 - (n * tw) / 2 + j * tw + tw * 0.05, tb = 0.5 - (n * tw) / 2 + (j + 1) * tw - tw * 0.05;
-        const q = [pt(ta, v0), pt(tb, v0), pt(tb, v1), pt(ta, v1)];
-        ctx.beginPath(); q.forEach((p, i) => i ? ctx.lineTo(...p) : ctx.moveTo(...p)); ctx.closePath();
+        ctx.beginPath(); [pt(ta, v0), pt(tb, v0), pt(tb, v1), pt(ta, v1)].forEach((q, k) => k ? ctx.lineTo(...q) : ctx.moveTo(...q)); ctx.closePath();
         ctx.shadowColor = `rgba(141,240,176,${0.5 * clamp(f, 0, 1)})`; ctx.shadowBlur = f > 0.35 ? 9 : 0;
-        ctx.fillStyle = fill; ctx.fill(); ctx.shadowBlur = 0;
-        ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 0.8; ctx.stroke();
+        ctx.fillStyle = fill; ctx.fill(); ctx.shadowBlur = 0; ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 0.8; ctx.stroke();
       }
-    });
-  };
-  // back planes are hidden from this camera; draw the two south-facing planes
-  roof([corner.W[0], corner.W[1]], [corner.S[0], corner.S[1]], 1, 225);
-  roof([corner.S[0], corner.S[1]], [corner.E[0], corner.E[1]], 0, 135);
+    }
+  });
 
-  if (el > 2) { const rp = P(0, 0, apexZ + 0.4); ctx.beginPath(); ctx.moveTo(...sp); ctx.lineTo(...rp);
+  if (el > 2) { const rp = P(...w3(0, 0, Zr + 0.6)); ctx.beginPath(); ctx.moveTo(...sp); ctx.lineTo(...rp);
     ctx.setLineDash([3, 5]); ctx.strokeStyle = 'rgba(245,185,66,.3)'; ctx.lineWidth = 1.2; ctx.stroke(); ctx.setLineDash([]); }
+  drawArcs(true);
   if (sd[1] <= 0) drawSun();
 
   // HUD
@@ -537,5 +618,5 @@ function mount(section) {
   loadYear(); setInterval(() => { if (Date.now() - yearLoaded > 30 * 60000) loadYear(); }, 60000);
   syncUI(); requestDraw();
 }
-window.SunPath = { html: HTML, mount };
+window.SunPath = { html: HTML, mount, _test: { sunPos, clearSky, poaFrac } };   // _test: parity checks vs sunpath.py
 })();

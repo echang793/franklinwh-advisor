@@ -190,3 +190,48 @@ def test_sunpath_static_asset_served_and_linked():
     assert (webapi._STATIC / "sunpath.js").exists()
     assert '<script src="/sunpath.js' in (webapi._STATIC / "index.html").read_text()
     assert TestClient(webapi.app).get("/sunpath.js").status_code == 200
+
+
+def test_browser_sun_math_matches_python_all_day():
+    """sunpath.js reimplements sun_position/clear_sky/POA so scrubbing needs no
+    network. JS `%` keeps the dividend's sign (Python's doesn't), which once
+    mirrored the azimuth after ~5 PM — so check the whole day, not just noon."""
+    import shutil
+    import subprocess
+    import textwrap
+
+    from franklinwh_scraper import webapi
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    js = (webapi._STATIC / "sunpath.js").read_text()
+    runner = textwrap.dedent("""
+        const vm = require('vm');
+        const ctx = { window: {}, CanvasRenderingContext2D: { prototype: { roundRect() {} } },
+                      document: {}, console };
+        vm.createContext(ctx);
+        vm.runInContext(process.argv[1], ctx);
+        const T = ctx.window.SunPath._test, out = [];
+        for (const d of [[2026,0,5],[2026,2,20],[2026,5,21],[2026,7,27],[2026,11,21]])
+          for (let m = 0; m < 1440; m += 37) {
+            const ms = Date.UTC(d[0], d[1], d[2]) + m * 60000;
+            const p = T.sunPos(ms, 32.975, -117.077), sky = T.clearSky(p.el);
+            out.push([ms, p.az, p.el, T.poaFrac(sky, p.az, p.el, 135, 20)]);
+          }
+        console.log(JSON.stringify(out));
+    """)
+    res = subprocess.run([node, "-e", runner, js], capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    rows = json.loads(res.stdout)
+    assert len(rows) == 5 * len(range(0, 1440, 37))
+    bad = []
+    for ms, az, el, poa in rows:
+        pa, pe = sunpath.sun_position(datetime.fromtimestamp(ms / 1000, tz=timezone.utc), LAT, LON)
+        if abs(pe - el) > 1e-6 or (pe > -5 and min(abs(pa - az), 360 - abs(pa - az)) > 1e-6):
+            bad.append((ms, az, pa))
+        if pe > 0:
+            dni, dhi, ghi = sunpath.clear_sky(pe)
+            want = sunpath._poa(dni, dhi, ghi, pa, pe, 135.0, 20.0) / 1000.0
+            assert poa == pytest.approx(want, abs=1e-6)
+    assert not bad, f"JS/Python sun position differ at {len(bad)} points, e.g. {bad[:3]}"
