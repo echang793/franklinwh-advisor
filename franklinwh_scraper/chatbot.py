@@ -1768,6 +1768,13 @@ class TelegramChatBot:
                 if ok:
                     self._send(chat_id, reply)
                 return
+        if data.startswith("mis:"):
+            parts = data.split(":")
+            ok, reply = self._set_miss_label(parts[1], parts[2]) if len(parts) == 3 else (False, "")
+            self._answer_callback_query(cq_id, "Got it" if ok else "Can't read that")
+            if ok:
+                self._send(chat_id, reply)
+            return
         if data.startswith("spk:"):
             key, _, code = data[4:].rpartition(":")
             ok, reply = self._set_spike_label(key, code)
@@ -1798,6 +1805,37 @@ class TelegramChatBot:
             state["load_labels"] = {k: labels[k] for k in sorted(labels)[-200:]}
             _save_peak_state(out, state)
         return True, f"Noted: {key.replace('T', ' ')} was {category}."
+
+    def _set_miss_label(self, day: str, code: str) -> tuple[bool, str]:
+        """Record what threw `day`'s /sundown projection off. A car answer also counts the day as a
+        car day and marks its misses explained (kept out of the likely range)."""
+        from datetime import date as _date
+        from pathlib import Path
+
+        from .alerts import _MISS_CAUSES, _save_peak_state, _state_lock
+        cause = _MISS_CAUSES.get(code)
+        try:
+            _date.fromisoformat(day)
+        except ValueError:
+            return False, ""
+        if cause is None:
+            return False, ""
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        with _state_lock(out):
+            state = _load_peak_state(out)
+            labels = state.get("miss_labels", {})
+            labels[day] = cause
+            state["miss_labels"] = {d: labels[d] for d in sorted(labels)[-180:]}
+            for r in state.get("sundown_resid", []):
+                if r.get("day") == day:
+                    r["cause"] = cause
+                    r["explained"] = cause == "car"
+            if cause == "car":
+                cars = state.get("car_day_labels", {})
+                cars[day] = True
+                state["car_day_labels"] = {d: cars[d] for d in sorted(cars)[-180:]}
+            _save_peak_state(out, state)
+        return True, f"Noted: {day} was {cause}."
 
     def _set_car_label(self, day: str, was_car: bool) -> tuple[bool, str]:
         """Record the answer to "was that the car?" for `day` (YYYY-MM-DD).

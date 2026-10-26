@@ -356,7 +356,8 @@ def _sundown_band(state: dict, now: datetime, early_ok: bool = False) -> tuple[f
         if not early_ok:
             return None
         chosen = _slot_key(*_SUNDOWN_SLOTS[0])      # before the first snapshot time: the earliest record is the best proxy
-    errs = [r["err"] for r in _current_sundown_resid(state) if r.get("slot") == chosen and not r.get("grid")]
+    errs = [r["err"] for r in _current_sundown_resid(state)
+            if r.get("slot") == chosen and not r.get("grid") and not r.get("explained")]
     if len(errs) < _SUNDOWN_BAND_MIN:
         return None
     q = statistics.quantiles(errs, n=10, method="inclusive")
@@ -389,7 +390,8 @@ def _alert_sundown_drift(state: dict, today: str, now: datetime) -> str | None:
         return None
     cutoff = (now.date() - timedelta(days=14)).isoformat()
     errs = [r["err"] for r in _current_sundown_resid(state)
-            if r.get("slot") in ("14:00", "15:30") and not r.get("grid") and r.get("day", "") >= cutoff]
+            if r.get("slot") in ("14:00", "15:30") and not r.get("grid") and not r.get("explained")
+            and r.get("day", "") >= cutoff]
     if len(errs) < _DRIFT_MIN_SAMPLES:
         return None
     med = statistics.median(errs)
@@ -445,6 +447,13 @@ def _accuracy_report(state: dict, now: datetime) -> str:
         lean = ("no consistent lean" if abs(bias) < 1.0
                 else f"actual ran {'above' if bias > 0 else 'below'} forecast by {abs(bias):.0f}% on average")
         lines.append(f"☀️ Solar, whole-day total: typical miss ±{mae:.0f}% over the last {len(ratios)} days ({lean}).")
+    causes: dict[str, int] = {}
+    for _day, cause in sorted(state.get("miss_labels", {}).items())[-60:]:
+        if cause not in ("nothing unusual", "car"):
+            causes[cause] = causes.get(cause, 0) + 1
+    if causes:
+        ranked = sorted(causes.items(), key=lambda kv: -kv[1])
+        lines.append("🔎 What threw the projection off lately: " + ", ".join(f"{c} ×{n}" for c, n in ranked) + ".")
     sunrise = state.get("sunrise_resid", [])[-30:]
     if sunrise:
         inside = sum(1 for e in sunrise if e.get("miss", 0) == 0)
@@ -1217,6 +1226,51 @@ def alerts_digest(entries: list[dict], state: dict, now: datetime, days: int = 3
         lines.append("Suggestions:")
         lines.extend(tips[:4])
     return "\n".join(lines)
+
+
+_MISS_CAUSES = {"d": "dryer/laundry", "a": "AC or heat", "h": "cooking or guests", "c": "car",
+                "n": "nothing unusual"}
+_MISS_MIN_PTS = 12.0
+_MISS_SLOT_ORDER = ("14:00", "12:30", "15:30", "11:00", "09:00")   # which snapshot to ask about when several missed
+
+
+def _miss_question_buttons(day: str) -> list[dict]:
+    """Answers to "what threw it off?" for `day` (callback mis:<day>:<code>)."""
+    labels = {"d": "👕 Dryer/laundry", "a": "♨️ AC/heat", "h": "🍳 Cooking/guests", "c": "🚗 Car", "n": "🤷 Nothing unusual"}
+    return [{"text": text, "callback_data": f"mis:{day}:{code}"} for code, text in labels.items()]
+
+
+def _alert_miss_question(state: dict, today: str, now: datetime) -> str | None:
+    """After the evening grading, if one of today's /sundown snapshots missed by 12+ points on a day you
+    did not grid-charge, ask what used (or saved) the power. The answer feeds /accuracy and keeps
+    car days out of the "likely range" so it reflects ordinary days. A day you already called a car
+    day is labelled without asking."""
+    if now.hour < 19 or state.get("miss_question_date") == today or today in state.get("miss_labels", {}):
+        return None
+    cands = [r for r in _current_sundown_resid(state)
+             if r.get("day") == today and not r.get("grid") and abs(r.get("err", 0)) >= _MISS_MIN_PTS]
+    if not cands:
+        return None
+    if state.get("car_day_labels", {}).get(today) is True:
+        state.setdefault("miss_labels", {})[today] = "car"
+        for r in state["sundown_resid"]:
+            if r.get("day") == today:
+                r["cause"], r["explained"] = "car", True
+        return None
+    pick = min(cands, key=lambda r: (_MISS_SLOT_ORDER.index(r["slot"]) if r["slot"] in _MISS_SLOT_ORDER else 9,
+                                     -abs(r["err"])))
+    shot = state.get(f"sundown_shadow_{today}", {}).get(pick["slot"])
+    if not shot:
+        return None
+    _mark_alerted(state, "miss_question_date", today)
+    state["miss_question_day"] = today
+    h, m = (int(x) for x in pick["slot"].split(":"))
+    when = _clock_str(h + m / 60.0)
+    return (
+        f"🔎 <b>FranklinWH: my {when} /sundown guess was off</b>\n"
+        f"I said ~{shot['pct']:.0f}%; the battery ended at ~{shot['pct'] + pick['err']:.0f}% ({pick['err']:+.0f} pts).\n"
+        f"What used (or saved) the power? One tap helps me learn."
+    )
 
 
 def _alert_enabled(cfg: Config, name: str, state: dict, now: datetime) -> bool:
@@ -5170,6 +5224,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("car_charge_started",   lambda: _alert_car_charge_started(state, today, now, c, cfg, store)),
             ("solar_backtest",       lambda: _maybe_launch_monthly_backtest(state, now, cfg)),
             ("sundown_drift",        lambda: _alert_sundown_drift(state, today, now)),
+            ("miss_question",        lambda: _alert_miss_question(state, today, now)),
             ("sundown_tracker",      lambda: _alert_sundown_tracker(state, today, now, c, outlook, usage_forecast, store,
                                                                     cfg.battery_capacity_kwh,
                                                                     _effective_reserve_pct(cfg, store, now))),
@@ -5201,6 +5256,8 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
         extra = {}
         if name == "car_question":
             extra = {"extra_buttons": _car_question_buttons(today)}
+        elif name == "miss_question" and state.get("miss_question_day"):
+            extra = {"extra_buttons": _miss_question_buttons(state["miss_question_day"])}
         elif name == "load_question" and state.get("load_question_key"):
             extra = {"extra_buttons": _spike_question_buttons(state["load_question_key"])}
         _send_alert(body, cfg, urgent=urgent, alert_name=name, **extra)

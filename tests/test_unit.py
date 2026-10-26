@@ -11608,3 +11608,75 @@ def test_send_alerts_reads_the_log_and_the_snoozes(tmp_path):
     bot, sent = _bot_with(tmp_path)
     bot._send_alerts("1")
     assert "export_arbitrage" in sent["text"] and "Alerts, last 30 days" in sent["text"]
+
+
+# ── asking what threw a projection off, and learning from the answer ──────
+
+def _miss_state(err=-22.0, grid=False, slot="14:00", day="2026-10-26"):
+    return {"sundown_resid": [{"day": day, "slot": slot, "err": err, "grid": grid}],
+            "sundown_resid_epoch": alerts.SOLAR_MODEL_EPOCH,
+            f"sundown_shadow_{day}": {slot: {"pct": 74.0, "dt": f"{day}T18:02:00", "soc0": 50.0, "at": f"{day}T14:05:00"}}}
+
+
+def test_miss_question_asks_about_a_big_miss_once_after_the_evening_grading():
+    state = _miss_state()
+    msg = alerts._alert_miss_question(state, "2026-10-26", datetime(2026, 10, 26, 19, 30))
+    assert "2 PM" in msg and "74%" in msg and "52%" in msg and "-22" in msg
+    assert state["miss_question_day"] == "2026-10-26"
+    assert alerts._alert_miss_question(state, "2026-10-26", datetime(2026, 10, 26, 19, 40)) is None   # once a day
+
+
+def test_miss_question_stays_quiet_for_small_misses_early_hours_and_grid_charged_days():
+    now = datetime(2026, 10, 26, 19, 30)
+    assert alerts._alert_miss_question(_miss_state(err=-6.0), "2026-10-26", now) is None
+    assert alerts._alert_miss_question(_miss_state(), "2026-10-26", datetime(2026, 10, 26, 16, 0)) is None
+    assert alerts._alert_miss_question(_miss_state(grid=True), "2026-10-26", now) is None
+    answered = _miss_state()
+    answered["miss_labels"] = {"2026-10-26": "AC or heat"}
+    assert alerts._alert_miss_question(answered, "2026-10-26", now) is None
+
+
+def test_miss_question_on_a_day_you_called_the_car_labels_it_without_asking():
+    state = _miss_state()
+    state["car_day_labels"] = {"2026-10-26": True}
+    assert alerts._alert_miss_question(state, "2026-10-26", datetime(2026, 10, 26, 19, 30)) is None
+    assert state["miss_labels"]["2026-10-26"] == "car"
+    assert state["sundown_resid"][0]["explained"] is True
+
+
+def test_miss_buttons_carry_the_day_and_a_code():
+    buttons = alerts._miss_question_buttons("2026-10-26")
+    assert all(b["callback_data"].startswith("mis:2026-10-26:") for b in buttons)
+    assert {b["callback_data"].rsplit(":", 1)[1] for b in buttons} == set(alerts._MISS_CAUSES)
+
+
+def test_answering_a_miss_question_labels_the_day_and_explains_car_days(tmp_path):
+    state = _miss_state()
+    alerts._save_peak_state(tmp_path, state)
+    bot, _sent = _bot_with(tmp_path)
+    ok, reply = bot._set_miss_label("2026-10-26", "a")
+    assert ok and "AC or heat" in reply
+    saved = alerts._load_peak_state(tmp_path)
+    assert saved["miss_labels"]["2026-10-26"] == "AC or heat"
+    assert saved["sundown_resid"][0]["cause"] == "AC or heat" and not saved["sundown_resid"][0].get("explained")
+    ok, _ = bot._set_miss_label("2026-10-26", "c")
+    saved = alerts._load_peak_state(tmp_path)
+    assert saved["sundown_resid"][0]["explained"] is True and saved["car_day_labels"]["2026-10-26"] is True
+    assert bot._set_miss_label("not-a-date", "a") == (False, "")
+    assert bot._set_miss_label("2026-10-26", "zzz") == (False, "")
+
+
+def test_explained_days_do_not_widen_the_band_or_trigger_drift():
+    resid = [{"day": f"2026-10-{i + 1:02d}", "slot": "15:30", "err": 1.0, "grid": False} for i in range(10)]
+    resid += [{"day": f"2026-10-{i + 11:02d}", "slot": "15:30", "err": -40.0, "grid": False, "explained": True}
+              for i in range(5)]
+    state = {"sundown_resid": resid, "sundown_resid_epoch": alerts.SOLAR_MODEL_EPOCH}
+    lo, hi, n = alerts._sundown_band(state, datetime(2026, 10, 26, 15, 40))
+    assert n == 10 and lo == pytest.approx(1.0)
+
+
+def test_accuracy_report_says_what_has_been_throwing_the_projection_off():
+    state = {"miss_labels": {"2026-10-20": "AC or heat", "2026-10-21": "AC or heat", "2026-10-22": "dryer/laundry",
+                             "2026-10-23": "nothing unusual"}}
+    text = alerts._accuracy_report(state, datetime(2026, 10, 26, 9, 0))
+    assert "AC or heat ×2" in text and "dryer/laundry ×1" in text and "nothing unusual" not in text
