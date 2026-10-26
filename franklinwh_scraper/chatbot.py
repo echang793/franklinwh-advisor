@@ -451,6 +451,7 @@ class TelegramChatBot:
                             "/today    — the day so far: solar, load, grid cost, what's still to come\n"
                             "/reserve  — what to charge the battery to overnight\n"
                             "/accuracy — how accurate /sundown and the solar forecast have been\n"
+                            "/alerts   — what fired lately, what you snooze, what to turn off\n"
                             "/whatif kW [hours] [from H] — what a load (dryer 3 kW, AC) does to the sundown battery\n"
                             "/cardays  — label which recent afternoons were the car\n"
                             "/ebplan [kWh] [load kW] [from H] [to H] — EB charge needed for a grid-free window\n"
@@ -577,7 +578,7 @@ class TelegramChatBot:
                         continue
                     _cmd = text.lower().strip().split("@")[0]
                     _simple = {"/accuracy": self._send_accuracy, "/today": self._send_today,
-                               "/reserve": self._send_reserve}.get(_cmd)
+                               "/reserve": self._send_reserve, "/alerts": self._send_alerts}.get(_cmd)
                     if _simple is not None:
                         threading.Thread(target=_simple, args=(chat_id,), daemon=True).start()
                         continue
@@ -1347,6 +1348,28 @@ class TelegramChatBot:
             self._send(chat_id, _accuracy_report(state, datetime.now()))
         except Exception as e:
             logger.warning("_send_accuracy error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
+    def _send_alerts(self, chat_id: str) -> None:
+        """/alerts: what fired in the last 30 days, which you snooze, and what to consider turning off."""
+        try:
+            from pathlib import Path
+
+            from .alerts import alerts_digest
+            _stats, _fc, _ol, _store, state = self._snapshot_for_report()
+            out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+            entries = []
+            try:
+                for line in (out / "alerts_log.jsonl").read_text().splitlines():
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            except OSError:
+                pass
+            self._send(chat_id, alerts_digest(entries, state, datetime.now(), 30))
+        except Exception as e:
+            logger.warning("_send_alerts error: %s", e)
             self._send(chat_id, f"Error: {e}")
 
     def _send_today(self, chat_id: str) -> None:

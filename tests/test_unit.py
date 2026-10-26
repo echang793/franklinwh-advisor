@@ -11564,3 +11564,47 @@ def test_sundown_drift_alert_stays_quiet_when_projections_are_fine():
     assert alerts._alert_sundown_drift(_drift_state([-2.0, 3.0] * 6), "2026-10-26", now) is None
     assert alerts._alert_sundown_drift(_drift_state([-9.0] * 4), "2026-10-26", now) is None   # too few
     assert alerts._alert_sundown_drift(_drift_state([-9.0] * 12), "2026-10-26", datetime(2026, 10, 26, 15, 0)) is None
+
+
+# ── alert engagement: which alerts you snooze, and a digest of the noisy ones ──
+
+def test_snoozing_an_alert_is_logged_for_the_engagement_digest():
+    now = datetime(2026, 10, 26, 10, 0)
+    state: dict = {}
+    ok, _msg = alerts.snooze_alert(state, "low_noon_soc", 8, now)
+    assert ok and state["snooze_log"] == [{"alert": "low_noon_soc", "ts": now.isoformat()}]
+    alerts.snooze_alert(state, "low_noon_soc", 0, now)                     # clearing is not engagement
+    assert len(state["snooze_log"]) == 1
+    for i in range(300):
+        alerts.snooze_alert(state, "low_noon_soc", 1, now + timedelta(minutes=i))
+    assert len(state["snooze_log"]) == 200                                 # capped
+
+
+def _log(name, n, now, urgent=False, per_day=True):
+    return [{"ts": (now - timedelta(days=i % 28, hours=i)).isoformat(), "alert": name, "urgent": urgent, "body": "x"}
+            for i in range(n)]
+
+
+def test_alerts_digest_flags_alerts_you_keep_snoozing_and_ones_that_fire_too_often():
+    now = datetime(2026, 10, 26, 10, 0)
+    entries = _log("low_noon_soc", 10, now) + _log("export_arbitrage", 60, now) + _log("grid_down", 3, now, urgent=True)
+    state = {"snooze_log": [{"alert": "low_noon_soc", "ts": (now - timedelta(days=d)).isoformat()} for d in (1, 3, 5)]}
+    text = alerts.alerts_digest(entries, state, now, days=30)
+    assert "snoozed low_noon_soc 3 times" in text
+    assert "turning it off" in text                                        # the snooze suggestion
+    assert "export_arbitrage" in text and "/day" in text                   # the noisy one
+    assert "grid_down" in text                                             # safety alerts are listed ...
+    assert "grid_down" not in text.split("Suggestions")[-1]                # ... but never suggested for removal
+    _assert_left_aligned(text)
+
+
+def test_alerts_digest_with_nothing_logged():
+    assert "No alerts" in alerts.alerts_digest([], {}, datetime(2026, 10, 26), days=30)
+
+
+def test_send_alerts_reads_the_log_and_the_snoozes(tmp_path):
+    now = datetime.now()
+    (tmp_path / "alerts_log.jsonl").write_text("\n".join(json.dumps(e) for e in _log("export_arbitrage", 40, now)) + "\n")
+    bot, sent = _bot_with(tmp_path)
+    bot._send_alerts("1")
+    assert "export_arbitrage" in sent["text"] and "Alerts, last 30 days" in sent["text"]

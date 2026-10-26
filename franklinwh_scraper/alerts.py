@@ -1130,6 +1130,8 @@ def snooze_alert(state: dict, name: str, hours: float, now: datetime) -> tuple[b
         return True, f"🔔 {key} is no longer snoozed."
     until = now + timedelta(hours=hours)
     state.setdefault("alert_snoozed_until", {})[key] = until.isoformat()
+    # Engagement record: which alerts you reach for the snooze on (see alerts_digest).
+    state["snooze_log"] = (state.get("snooze_log", []) + [{"alert": key, "ts": now.isoformat()}])[-200:]
     return True, f"😴 {key} snoozed until {until.strftime('%a %-I:%M %p')} ({hours:g}h)."
 
 
@@ -1171,6 +1173,50 @@ def summarize_alert_log(entries: list[dict], now: datetime, days: int) -> list[d
     for row in rows.values():
         row["per_day"] = row["count"] / span
     return sorted(rows.values(), key=lambda r: (-r["count"], r["key"]))
+
+
+_DIGEST_SNOOZE_MIN = 2             # snoozes before it counts as "you keep snoozing this"
+_DIGEST_SNOOZE_SHARE = 0.2         # ... and at least this share of its alerts
+_DIGEST_NOISY_PER_DAY = 1.5        # a non-safety alert firing more often than this is worth a look
+
+
+def alerts_digest(entries: list[dict], state: dict, now: datetime, days: int = 30) -> str:
+    """Plain-text report for /alerts: what fired and how often, which ones you snooze, and
+    suggestions to turn the noisy or ignored ones off. Safety alerts are listed but never
+    suggested for removal."""
+    rows = summarize_alert_log(entries, now, days)
+    if not rows:
+        return f"🔔 No alerts in the last {days} days."
+    cutoff = now - timedelta(days=days)
+    snoozes: dict[str, int] = {}
+    for e in state.get("snooze_log", []):
+        try:
+            if datetime.fromisoformat(e["ts"]) >= cutoff:
+                snoozes[e["alert"]] = snoozes.get(e["alert"], 0) + 1
+        except (KeyError, TypeError, ValueError):
+            continue
+    total = sum(r["count"] for r in rows)
+    lines = [f"🔔 <b>Alerts, last {days} days</b>: {total} sent, {len(rows)} types, "
+             f"{sum(r['per_day'] for r in rows):.1f}/day"]
+    for r in rows[:10]:
+        sn = snoozes.get(r["key"], 0)
+        lines.append(f"{r['count']}× {r['key']} ({r['per_day']:.1f}/day)" + (f" 😴{sn}" if sn else "")
+                     + (" ❗" if r["urgent"] else ""))
+    tips = []
+    for r in rows:
+        if r["urgent"] or r["key"] in _ALWAYS_ON_ALERTS:
+            continue
+        sn = snoozes.get(r["key"], 0)
+        if sn >= _DIGEST_SNOOZE_MIN and sn / max(1, r["count"]) >= _DIGEST_SNOOZE_SHARE:
+            tips.append(f"You snoozed {r['key']} {sn} times ({r['count']} sent): consider turning it off for good "
+                        "(add it to disabled_alerts in ~/.franklinwh.json).")
+        elif r["per_day"] >= _DIGEST_NOISY_PER_DAY:
+            tips.append(f"{r['key']} fires {r['per_day']:.1f}/day: is it still earning its place? "
+                        f"/snooze {r['key']} 24 to test life without it.")
+    if tips:
+        lines.append("Suggestions:")
+        lines.extend(tips[:4])
+    return "\n".join(lines)
 
 
 def _alert_enabled(cfg: Config, name: str, state: dict, now: datetime) -> bool:
