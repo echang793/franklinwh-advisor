@@ -8580,7 +8580,7 @@ def test_chatbot_answers_a_history_question_through_a_tool_call(monkeypatch, tmp
     assert reply == "You made 12.5 kWh of solar."
     calls = _FakeAnthropic.last.calls
     assert len(calls) == 2 and all("tools" in c for c in calls)
-    assert {t["name"] for t in calls[0]["tools"]} == {"daily_summary", "soc_at"}
+    assert {"daily_summary", "soc_at", "get_sundown"} <= {t["name"] for t in calls[0]["tools"]}   # history + app tools
     # the second request carries the tool result back, as JSON
     result_msg = calls[1]["messages"][-1]
     assert result_msg["role"] == "user" and result_msg["content"][0]["type"] == "tool_result"
@@ -8599,12 +8599,13 @@ def test_chatbot_tool_loop_is_bounded(monkeypatch, tmp_path):
     assert "couldn't" in reply.lower()
 
 
-def test_chatbot_without_history_store_sends_no_tools(monkeypatch, tmp_path):
+def test_chatbot_without_history_store_sends_only_the_app_tools(monkeypatch, tmp_path):
     script = [_FakeBlock(stop_reason="end_turn", content=[_FakeBlock(type="text", text="ok")])]
     bot = _chat_bot_with_script(monkeypatch, tmp_path, script)
     bot._hist_store = None
     assert bot._call_claude("c1", "q", "ctx") == "ok"
-    assert "tools" not in _FakeAnthropic.last.calls[0]
+    names = {t["name"] for t in _FakeAnthropic.last.calls[0]["tools"]}
+    assert "daily_summary" not in names and "get_sundown" in names
 
 
 # ── login token cache (survives restarts; 2026-10-03 login-route outage) ─
@@ -11386,3 +11387,116 @@ def test_morning_alert_without_a_forecast_still_sends():
 def test_daily_plan_inside_the_window_speaks_of_now_not_of_2_pm():
     text, _state = _daily_plan_for(soc=70.0, solar=_SUNNY, hour=15, minute=20)
     assert "now" in text and "by 2 PM" not in text
+
+
+# ── the chat bot's app tools: the same numbers as the commands, plus what-ifs ──
+
+def test_app_tools_have_unique_names_and_valid_schemas():
+    from franklinwh_scraper.chat_tools import APP_TOOLS, TOOLS
+
+    names = [t["name"] for t in TOOLS + APP_TOOLS]
+    assert len(names) == len(set(names))
+    for t in APP_TOOLS:
+        assert t["description"] and t["input_schema"]["type"] == "object"
+    assert {"get_sundown", "get_reserve_plan", "get_ev_room", "get_eb_plan", "get_today",
+            "get_accuracy", "what_if_load"} <= set(names)
+
+
+def test_app_tool_returns_the_commands_text_without_sending_it_to_telegram(tmp_path, monkeypatch):
+    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+    hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0})
+    fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
+    from franklinwh_scraper import chatbot as chatbot_mod
+
+    bot, _sent = _bot_with(tmp_path, soc=30.0, forecast=fc)
+    del bot._send                                                        # use the real _send, network stubbed
+    posted = []
+    monkeypatch.setattr(chatbot_mod, "urlopen", lambda req, timeout=None: posted.append(json.loads(req.data)))
+    out = bot._run_app_tool("1", "get_reserve_plan", {})
+    assert "Charge to" in out["text"] and "<b>" not in out["text"]       # plain text for the model
+    assert posted == []                                                  # nothing went to the chat
+    bot._send("1", "hello")                                              # and sending still works afterwards
+    assert posted[0]["text"] == "hello"
+
+
+def test_app_tool_unknown_name_or_failure_is_an_error_not_an_exception(tmp_path):
+    bot, _sent = _bot_with(tmp_path)
+    assert "error" in bot._run_app_tool("1", "no_such_tool", {})
+    bot._stats = None
+    assert "text" in bot._run_app_tool("1", "get_today", {})             # the command's own "no data yet" message
+
+
+def test_what_if_load_reports_the_change_to_sundown():
+    now = datetime(2026, 10, 26, 12, 14)
+    fc = _sunset_forecast(now)
+    base, with_load, sundown_dt = alerts._what_if_sundown(fc, now, 40.0, 40.0, None, 2.0, 2.0, None, 0.0, None)
+    assert with_load == pytest.approx(base - 4.0 / 40.0 * 100)           # 2 kW x 2 h of a 40 kWh pack
+    base, later, _ = alerts._what_if_sundown(fc, now, 40.0, 40.0, None, 2.0, 1.0, 14, 0.0, None)
+    assert later == pytest.approx(base - 2.0 / 40.0 * 100)               # starting at 2 PM still before sundown
+    base, never, _ = alerts._what_if_sundown(fc, now, 40.0, 40.0, None, 2.0, 1.0, 20, 0.0, None)
+    assert never == pytest.approx(base)                                  # after sundown: no change to the sundown number
+
+
+def test_call_claude_offers_the_app_tools(tmp_path, monkeypatch):
+    import sys
+    import types as _t
+
+    seen = {}
+
+    class _Msgs:
+        def create(self, **kw):
+            seen.update(kw)
+            return _t.SimpleNamespace(stop_reason="end_turn", content=[_t.SimpleNamespace(type="text", text="ok")])
+
+    monkeypatch.setitem(sys.modules, "anthropic", _t.SimpleNamespace(Anthropic=lambda api_key=None: _t.SimpleNamespace(messages=_Msgs())))
+    bot, _ = _bot_with(tmp_path)
+    assert bot._call_claude("1", "hi", "ctx") == "ok"
+    assert "get_sundown" in {t["name"] for t in seen["tools"]}
+
+
+def test_call_claude_runs_an_app_tool_and_feeds_the_text_back(tmp_path, monkeypatch):
+    import sys
+    import types as _t
+
+    calls = []
+
+    class _Msgs:
+        def create(self, **kw):
+            calls.append(kw["messages"][-1])
+            if len(calls) == 1:
+                return _t.SimpleNamespace(stop_reason="tool_use", content=[
+                    _t.SimpleNamespace(type="tool_use", id="t1", name="get_accuracy", input={})])
+            return _t.SimpleNamespace(stop_reason="end_turn", content=[_t.SimpleNamespace(type="text", text="done")])
+
+    monkeypatch.setitem(sys.modules, "anthropic", _t.SimpleNamespace(Anthropic=lambda api_key=None: _t.SimpleNamespace(messages=_Msgs())))
+    from franklinwh_scraper import chatbot as chatbot_mod
+
+    bot, _sent = _bot_with(tmp_path)
+    del bot._send
+    posted = []
+    monkeypatch.setattr(chatbot_mod, "urlopen", lambda req, timeout=None: posted.append(json.loads(req.data)))
+    assert bot._call_claude("1", "how accurate are you?", "ctx") == "done"
+    result = calls[1]["content"][0]
+    assert result["type"] == "tool_result" and "accurate" in result["content"].lower()
+    assert posted == []
+
+
+def test_send_whatif_reports_before_and_after(tmp_path):
+    now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    fc = _sunset_forecast(now)
+    bot, sent = _bot_with(tmp_path, soc=40.0, forecast=fc)
+    bot._send_whatif("1", 3.0, 1.5, None)
+    assert "+3 kW for 1.5 h" in sent["text"] and "pts" in sent["text"] and "→" in sent["text"]
+    bot._send_whatif("1", None, None, None)
+    assert "kW" in sent["text"]
+
+
+def test_parse_whatif_reads_kw_hours_and_start():
+    from franklinwh_scraper.chatbot import _parse_whatif
+
+    assert _parse_whatif("/whatif 3") == (3.0, None, None)
+    assert _parse_whatif("/whatif 3 1.5") == (3.0, 1.5, None)
+    assert _parse_whatif("/whatif 3 1.5 from 2pm") == (3.0, 1.5, 14)
+    assert _parse_whatif("/whatif 7.5 2 from 14") == (7.5, 2.0, 14)
+    assert _parse_whatif("/whatif") == (None, None, None)
+    assert _parse_whatif("/sundown") is None

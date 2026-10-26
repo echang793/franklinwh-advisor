@@ -46,6 +46,47 @@ TOOLS = [
     },
 ]
 
+# The app's own calculations, as tools: the model asks for the number instead of estimating one,
+# so a chat answer matches what the matching command (/sundown, /reserve ...) would say.
+APP_TOOLS = [
+    {"name": "get_sundown",
+     "description": ("Projected battery % at sunset today (with a likely range and the car / Emergency Backup cases). "
+                     "Use for any question about where the battery will be at the end of the solar day."),
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_reserve_plan",
+     "description": ("What to charge the battery to overnight (the reserve) so tomorrow morning needs no grid, "
+                     "when it would reach the floor on its own, and what the battery held at on recent nights."),
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_ev_room",
+     "description": ("How much of the house battery can go into the car without importing from the grid. "
+                     "Give the car's current % to compare it with the 80% limit, or a trip target (up to 100)."),
+     "input_schema": {"type": "object", "properties": {
+         "car_soc": {"type": "number", "description": "car battery % now"},
+         "target_soc": {"type": "number", "description": "trip target %, if not the usual 80"}}}},
+    {"name": "get_eb_plan",
+     "description": ("Emergency Backup plan: how much to charge and start-by time to keep the house off the grid for "
+                     "a window (default 2 PM to 11 PM), optionally with a planned car charge or a different house load."),
+     "input_schema": {"type": "object", "properties": {
+         "car_kwh": {"type": "number"}, "load_kw": {"type": "number"},
+         "from_hour": {"type": "integer", "description": "window start, 0-23"},
+         "to_hour": {"type": "integer", "description": "window end, 0-23"}}}},
+    {"name": "get_today",
+     "description": "The day so far: solar, house load, grid in/out and cost, battery flows, and solar still to come.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_accuracy",
+     "description": "How accurate the sundown projection and the solar forecast have actually been.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "what_if_load",
+     "description": ("What a planned load does to the battery at sunset: extra kW for some hours (dryer, AC, car charging), "
+                     "optionally starting at a given hour. Use for 'what if I run X' questions."),
+     "input_schema": {"type": "object", "properties": {
+         "extra_kw": {"type": "number", "description": "added load in kW"},
+         "hours": {"type": "number", "description": "how long, in hours (default 1)"},
+         "start_hour": {"type": "integer", "description": "clock hour it starts, 0-23 (default: now)"}},
+         "required": ["extra_kw"]}},
+]
+APP_TOOL_NAMES = frozenset(t["name"] for t in APP_TOOLS)
+
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 

@@ -64,6 +64,9 @@ Battery modes:
 The data block below describes right now only. For anything about a past day or \
 moment, call the history tools (daily_summary, soc_at) instead of guessing; if a tool \
 returns an error or covers_solar_day is false, say the data is missing or incomplete.
+For projections and plans (sundown, tonight's reserve, car room, Emergency Backup, \
+what-ifs, how accurate the forecasts are), call the matching tool and report ITS numbers; \
+never work out your own estimate.
 
 Answer in 1-3 short sentences, Telegram-message length. No preamble, no restating \
 the question, no bullet lists unless the user asks for a breakdown. Give the direct \
@@ -243,6 +246,27 @@ def build_context(stats, history, outlook, cfg, *, rec=None, forecast=None,
     return "\n".join(lines)
 
 
+_WHATIF_RE = re.compile(r"/whatif(?:@\w+)?(?:\s+(\d+(?:\.\d+)?))?(?:\s+(\d+(?:\.\d+)?))?(?:\s+(?:from|at)\s+(\d{1,2})\s*(am|pm)?)?\s*$", re.I)
+
+
+def _parse_whatif(text: str) -> tuple[float | None, float | None, int | None] | None:
+    """/whatif [kW] [hours] [from H] -> (kW, hours, start hour 0-23), or None if not the command."""
+    m = _WHATIF_RE.match(text.strip())
+    if not m:
+        return None
+    kw = float(m.group(1)) if m.group(1) else None
+    hrs = float(m.group(2)) if m.group(2) else None
+    start = None
+    if m.group(3):
+        start = int(m.group(3)) % 24
+        mer = (m.group(4) or "").lower()
+        if mer == "pm" and start < 12:
+            start += 12
+        elif mer == "am" and start == 12:
+            start = 0
+    return kw, hrs, start
+
+
 _EBPLAN_RE = re.compile(r"/ebplan(?:@\w+)?(?:\s+(.*))?$", re.I)
 _HOUR = r"(\d{1,2})\s*(am|pm)?"
 
@@ -344,6 +368,9 @@ class TelegramChatBot:
         self._rec            = None
         self._call_count_date: str = ""
         self._call_count: int = 0
+        # While a chat tool runs a command's code, that thread's _send() collects the text
+        # for the model instead of sending it (per thread: other chats are unaffected).
+        self._tls = threading.local()
 
     def _is_authorized(self, chat_id: str) -> bool:
         """True if chat_id is the configured owner, or no owner is configured."""
@@ -424,6 +451,7 @@ class TelegramChatBot:
                             "/today    — the day so far: solar, load, grid cost, what's still to come\n"
                             "/reserve  — what to charge the battery to overnight\n"
                             "/accuracy — how accurate /sundown and the solar forecast have been\n"
+                            "/whatif kW [hours] [from H] — what a load (dryer 3 kW, AC) does to the sundown battery\n"
                             "/cardays  — label which recent afternoons were the car\n"
                             "/ebplan [kWh] [load kW] [from H] [to H] — EB charge needed for a grid-free window\n"
                             "/ebtarget — Emergency Backup charge target for today\n"
@@ -552,6 +580,10 @@ class TelegramChatBot:
                                "/reserve": self._send_reserve}.get(_cmd)
                     if _simple is not None:
                         threading.Thread(target=_simple, args=(chat_id,), daemon=True).start()
+                        continue
+                    _wi = _parse_whatif(text)
+                    if _wi is not None:
+                        threading.Thread(target=self._send_whatif, args=(chat_id, *_wi), daemon=True).start()
                         continue
                     _ebp = _parse_ebplan(text)
                     if _ebp is not None:
@@ -890,7 +922,7 @@ class TelegramChatBot:
         # dropping one message's turn from the conversation.
         import anthropic
 
-        from .chat_tools import TOOLS, run_tool
+        from .chat_tools import APP_TOOL_NAMES, APP_TOOLS, TOOLS, run_tool
 
         client = anthropic.Anthropic(api_key=self._api_key)
         with self._lock:
@@ -906,9 +938,8 @@ class TelegramChatBot:
             # Tool turns live only in this local list; the saved conversation
             # keeps plain text turns so it stays small and replayable.
             messages = list(history)
-            kwargs = {"model": _MODEL, "max_tokens": 300, "system": _SYSTEM_PROMPT}
-            if store is not None:
-                kwargs["tools"] = TOOLS
+            kwargs = {"model": _MODEL, "max_tokens": 300, "system": _SYSTEM_PROMPT,
+                      "tools": (TOOLS if store is not None else []) + APP_TOOLS}
 
             reply = None
             for round_no in range(self._MAX_TOOL_ROUNDS + 1):
@@ -922,7 +953,8 @@ class TelegramChatBot:
                 messages.append({"role": "assistant", "content": resp.content})
                 messages.append({"role": "user", "content": [
                     {"type": "tool_result", "tool_use_id": b.id,
-                     "content": json.dumps(run_tool(store, b.name, b.input))}
+                     "content": json.dumps(self._run_app_tool(chat_id, b.name, b.input) if b.name in APP_TOOL_NAMES
+                                           else run_tool(store, b.name, b.input))}
                     for b in resp.content if getattr(b, "type", "") == "tool_use"
                 ]})
             if reply is None:
@@ -930,6 +962,74 @@ class TelegramChatBot:
             history.append({"role": "assistant", "content": reply or "(no answer)"})
             self._convos[chat_id] = history[-(_MAX_TURNS * 2):]
         return reply or "(no answer)"
+
+    def _run_app_tool(self, chat_id: str, name: str, args: dict) -> dict:
+        """Run one of the app's own commands for the model and hand back its text (tags
+        stripped). The command's code is unchanged: its _send() is captured for this thread."""
+        args = args if isinstance(args, dict) else {}
+
+        def num(key):
+            v = args.get(key)
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+        runners = {
+            "get_sundown": lambda: self._send_sundown(chat_id),
+            "get_reserve_plan": lambda: self._send_reserve(chat_id),
+            "get_ev_room": lambda: self._send_evroom(chat_id, num("car_soc"), num("target_soc")),
+            "get_eb_plan": lambda: self._send_ebplan(chat_id, {"car_kwh": num("car_kwh"), "load_kw": num("load_kw"),
+                                                                "start": int(num("from_hour")) if num("from_hour") is not None else None,
+                                                                "end": int(num("to_hour")) if num("to_hour") is not None else None}),
+            "get_today": lambda: self._send_today(chat_id),
+            "get_accuracy": lambda: self._send_accuracy(chat_id),
+            "what_if_load": lambda: self._send_whatif(chat_id, num("extra_kw"), num("hours"), num("start_hour")),
+        }
+        run = runners.get(name)
+        if run is None:
+            return {"error": f"unknown tool {name!r}"}
+        self._tls.capture = []
+        try:
+            run()
+            text = "\n".join(self._tls.capture)
+        except Exception as e:
+            return {"error": f"{name} failed: {e}"}
+        finally:
+            self._tls.capture = None
+        return {"text": re.sub(r"<[^>]+>", "", text)}
+
+    def _send_whatif(self, chat_id: str, extra_kw: float | None, hours: float | None,
+                     start_hour: float | None) -> None:
+        """What a planned load does to the battery at sunset."""
+        try:
+            if extra_kw is None:
+                self._send(chat_id, "Tell me the added load in kW, e.g. a dryer is about 3 kW.")
+                return
+            stats, forecast, outlook, store, state = self._snapshot_for_report()
+            if stats is None or forecast is None:
+                self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+                return
+            from .alerts import (_afternoon_profile, _effective_reserve_pct, _live_anchored_forecast,
+                                 _sunset_today, _what_if_sundown)
+            c, now = stats.current, datetime.now()
+            cap = getattr(self._cfg, "battery_capacity_kwh", 13.6)
+            live = _live_anchored_forecast(state, c, outlook, forecast, store)
+            profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
+            dur = hours if hours and hours > 0 else 1.0
+            start = int(start_hour) if start_hour is not None else None
+            base, with_load, sundown_dt = _what_if_sundown(
+                live, now, c.battery_soc_pct, cap, profile, extra_kw, dur, start,
+                _effective_reserve_pct(self._cfg, store, now), _sunset_today(outlook, now))
+            if base is None:
+                self._send(chat_id, "Solar is already done for today, so there is no sundown number to change.")
+                return
+            when = f"from {datetime(2000, 1, 1, start).strftime('%-I %p')}" if start is not None else "starting now"
+            delta = with_load - base
+            note = ("" if abs(delta) > 0.05 else " (it would run after sundown, so the sundown number does not change)")
+            self._send(chat_id,
+                       f"🔮 +{extra_kw:g} kW for {dur:g} h {when}: sundown ~{sundown_dt.strftime('%-I:%M %p')} "
+                       f"{base:.0f}% → <b>{with_load:.0f}%</b> ({delta:+.0f} pts){note}.")
+        except Exception as e:
+            logger.warning("_send_whatif error: %s", e)
+            self._send(chat_id, f"Error: {e}")
 
     def _call_ollama(self, chat_id: str, question: str, context: str) -> str:
         with self._convo_lock:
@@ -1835,6 +1935,10 @@ class TelegramChatBot:
         return "\n".join(parts)
 
     def _send(self, chat_id: str, text: str, reply_markup: dict | None = None) -> None:
+        captured = getattr(self._tls, "capture", None)
+        if captured is not None:
+            captured.append(text)
+            return
         url = f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}/sendMessage"
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         if reply_markup:

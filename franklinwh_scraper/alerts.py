@@ -1668,6 +1668,31 @@ def _plan_scorecard(state: dict, store, today: str, now: datetime) -> str:
     return "\n" + "\n".join(lines) if lines else ""
 
 
+def _what_if_sundown(live, now: datetime, soc: float, cap: float, profile, extra_kw: float,
+                     duration_h: float, start_hour: int | None, floor_pct: float,
+                     sunset: datetime | None) -> tuple[float, float, datetime] | tuple[None, None, None]:
+    """(sundown % as forecast, sundown % with `extra_kw` more load for `duration_h` hours
+    starting at clock hour `start_hour` (default: now), sundown time), or (None x3) when the
+    solar day is already over. Same quiet-load walk as /sundown."""
+    import dataclasses
+
+    base = _afternoon_scenarios(live, now, soc, cap, profile, None, floor_pct=floor_pct, sunset=sunset)["quiet"]
+    if base is None:
+        return None, None, None
+    one_hour = timedelta(hours=1)
+    hours = list(live.hours)
+    today_idx = [i for i, h in enumerate(hours) if h.dt.date() == now.date() and h.dt + one_hour > now]
+    if profile is not None:
+        for i in today_idx[1:]:
+            quiet = profile.quiet_by_hour.get(hours[i].dt.hour)
+            if quiet is not None:
+                hours[i] = dataclasses.replace(hours[i], predicted_load_kw=quiet)
+    idx = [i for i in today_idx if start_hour is None or hours[i].dt.hour >= start_hour]
+    fc = dataclasses.replace(live, hours=_add_session_load(hours, idx, base[1], extra_kw, duration_h))
+    with_load = _predict_sundown_soc(fc, now, soc, cap, floor_pct, sunset)
+    return base[0], (with_load[0] if with_load else base[0]), base[1]
+
+
 def _daily_plan(state: dict, today: str, now: datetime, c, cfg, outlook, usage_forecast, store) -> str:
     """The morning alert's "Today's plan": where the battery should end the day, whether
     Emergency Backup is worth running (how much, start by when, and what skipping it
