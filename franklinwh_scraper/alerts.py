@@ -1228,6 +1228,33 @@ def alerts_digest(entries: list[dict], state: dict, now: datetime, days: int = 3
     return "\n".join(lines)
 
 
+_MODE_PROBE_EVERY = timedelta(minutes=15)
+
+
+def maybe_probe_mode(client, gateway: str, outdir: Path, now: datetime) -> bool:
+    """Read the gateway's mode settings (read-only) at most every 15 minutes and log them to
+    state["mode_probe_log"] when they change. The mode code is opaque, so the log is how it
+    gets decoded: the changes line up with the Emergency Backup sessions the history shows.
+    True if a probe ran. Never raises: it must not disturb the poll loop."""
+    try:
+        with _state_lock(outdir):
+            state = _load_peak_state(outdir)
+            last = state.get("mode_probe_at")
+            if last and now - datetime.fromisoformat(last) < _MODE_PROBE_EVERY:
+                return False
+            status = client.get_mode_status(gateway)
+            state["mode_probe_at"] = now.isoformat()
+            log = state.get("mode_probe_log", [])
+            if status and (not log or {k: log[-1].get(k) for k in status} != status):
+                log.append({"ts": now.isoformat(), **status})
+                state["mode_probe_log"] = log[-100:]
+            _save_peak_state(outdir, state)
+        return True
+    except Exception:
+        logger.debug("Mode probe failed", exc_info=True)
+        return False
+
+
 _MISS_CAUSES = {"d": "dryer/laundry", "a": "AC or heat", "h": "cooking or guests", "c": "car",
                 "n": "nothing unusual"}
 _MISS_MIN_PTS = 12.0

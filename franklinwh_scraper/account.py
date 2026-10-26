@@ -352,6 +352,26 @@ class AccountClient:
             logger.warning("Smart-switch dataArea was not JSON: %r", str(data_area)[:200])
             return {"_raw": data_area}
 
+    _MODE_FIELDS = ("modeChoose", "runingMode", "selfMinSoc", "touMinSoc", "backupMaxSoc")
+
+    def get_mode_status(self, gateway: str) -> dict[str, Any]:
+        """The gateway's mode settings via MQTT cmd 311 (a read: opt 0 is a query; nothing is
+        changed). selfMinSoc / touMinSoc are the reserve for Self-Consumption / Time-of-Use and
+        backupMaxSoc is the Emergency Backup target. runingMode is an opaque code the community
+        client cannot decode either, so it is only recorded, never interpreted. {} when the
+        gateway answers with nothing."""
+        payload = self._build_mqtt_payload(311, {"opt": 0, "order": gateway}, gateway)
+        result = self._mqtt_send(payload, gateway).get("result") or {}
+        data_area = result.get("dataArea")
+        if not data_area:
+            return {}
+        try:
+            data = json.loads(data_area)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Mode status dataArea was not JSON: %r", str(data_area)[:200])
+            return {}
+        return {k: data[k] for k in self._MODE_FIELDS if k in data}
+
     def get_stats(self, gateway: str, _empty_retries: int = 2) -> Stats:
         """Get instantaneous + daily total stats for a gateway."""
         info = self.get_composite_info(gateway)

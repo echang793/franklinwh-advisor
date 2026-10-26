@@ -250,6 +250,8 @@ Enable it by running `python3 scrape.py setup` again and picking a chatbot backe
 | `/today` | The day so far: solar, house load, grid in/out and its cost, battery charge/discharge, and how much solar is still to come against the sunrise forecast |
 | `/reserve` | What to charge the battery to overnight so the morning needs no grid: when it would reach the floor on its own, the 6 AM level, and the grid energy and cost to get there |
 | `/accuracy` | A scoreboard of how far `/sundown` (by time of day) and the whole-day solar forecast have actually been off. `/sundown` itself now shows a likely range from this record |
+| `/whatif kW [hours] [from H]` | What a planned load (dryer ~3 kW, AC) does to the battery at sunset, e.g. `/whatif 3 1.5 from 2pm` |
+| `/alerts` | What fired in the last 30 days, which alerts you snooze, and which to consider turning off |
 | `/mute` | Snooze non-safety alerts — tap 2h or 8h, or type `/mute 2` / `/mute 8` directly. Grid outage, fast drain, and area-outage alerts are never muted |
 | `/unmute` | Cancel an active mute |
 | `/clear` | Reset conversation history |

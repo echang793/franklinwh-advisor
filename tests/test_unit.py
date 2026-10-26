@@ -11680,3 +11680,60 @@ def test_accuracy_report_says_what_has_been_throwing_the_projection_off():
                              "2026-10-23": "nothing unusual"}}
     text = alerts._accuracy_report(state, datetime(2026, 10, 26, 9, 0))
     assert "AC or heat ×2" in text and "dryer/laundry ×1" in text and "nothing unusual" not in text
+
+
+# ── reading the gateway's mode settings (read-only) ─────────────────────
+
+_MODE_DATA = {"modeChoose": 14, "runingMode": 39812, "selfMinSoc": 10, "touMinSoc": 50, "backupMaxSoc": 100,
+              "genStartSoc": 0, "Sw1Mode": 0}
+
+
+def test_get_mode_status_is_a_read_only_status_query(monkeypatch):
+    from franklinwh_scraper.account import AccountClient
+
+    client = AccountClient("a@b.c", "pw")
+    sent = {}
+
+    def fake(payload, gateway, **kw):
+        sent["payload"] = json.loads(payload)
+        return {"code": 200, "result": {"dataArea": json.dumps(_MODE_DATA)}}
+
+    monkeypatch.setattr(client, "_mqtt_send", fake)
+    out = client.get_mode_status("gw1")
+    assert out == {"modeChoose": 14, "runingMode": 39812, "selfMinSoc": 10, "touMinSoc": 50, "backupMaxSoc": 100}
+    assert sent["payload"]["cmdType"] == 311 and sent["payload"]["dataArea"]["opt"] == 0      # opt 0 = query, not set
+
+
+def test_get_mode_status_survives_a_missing_answer(monkeypatch):
+    from franklinwh_scraper.account import AccountClient
+
+    client = AccountClient("a@b.c", "pw")
+    monkeypatch.setattr(client, "_mqtt_send", lambda *a, **k: {"code": 200})
+    assert client.get_mode_status("gw1") == {}
+
+
+def test_mode_probe_logs_changes_only_and_not_more_often_than_every_15_minutes(tmp_path):
+    class _Client:
+        def __init__(self): self.calls, self.data = 0, dict(_MODE_DATA)
+        def get_mode_status(self, gw):
+            self.calls += 1
+            return {k: self.data[k] for k in ("modeChoose", "runingMode", "selfMinSoc", "touMinSoc", "backupMaxSoc")}
+
+    c = _Client()
+    t0 = datetime(2026, 10, 26, 10, 0)
+    assert alerts.maybe_probe_mode(c, "gw1", tmp_path, t0) is True
+    assert alerts.maybe_probe_mode(c, "gw1", tmp_path, t0 + timedelta(minutes=5)) is False        # too soon
+    assert c.calls == 1
+    assert alerts.maybe_probe_mode(c, "gw1", tmp_path, t0 + timedelta(minutes=16)) is True        # due, unchanged
+    c.data["runingMode"] = 12345                                                                    # e.g. EB switched on
+    alerts.maybe_probe_mode(c, "gw1", tmp_path, t0 + timedelta(minutes=32))
+    log = alerts._load_peak_state(tmp_path)["mode_probe_log"]
+    assert [e["runingMode"] for e in log] == [39812, 12345]                                        # only the two distinct states
+    assert log[1]["ts"] == (t0 + timedelta(minutes=32)).isoformat()
+
+
+def test_mode_probe_never_raises(tmp_path):
+    class _Broken:
+        def get_mode_status(self, gw): raise ConnectionError("gateway offline")
+
+    assert alerts.maybe_probe_mode(_Broken(), "gw1", tmp_path, datetime(2026, 10, 26, 10, 0)) is False

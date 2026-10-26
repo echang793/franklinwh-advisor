@@ -25,6 +25,7 @@ from .alerts import (
     _SOLAR_CAL_LOG_FILE,
     _check_peak_alerts,
     ewma_vs_constant_backtest,
+    maybe_probe_mode,
     _get_hourly_bias,
     _get_performance_ratio,
     _get_system_peak_kw,
@@ -2429,6 +2430,9 @@ def cmd_advise(
                     # recommendation the user was just alerted about.
                     _chatbot.update_state(stats, history, outlook, system_peak_kw, perf_ratio,
                                           usage_forecast=usage_forecast, rec=rec)
+
+                # Read-only look at the gateway's mode settings, every 15 min, logged on change.
+                maybe_probe_mode(client, gateway, outdir, datetime.now())
 
                 # Home Assistant webhook state push
                 if getattr(cfg, "ha_webhook_url", ""):
