@@ -11500,3 +11500,67 @@ def test_parse_whatif_reads_kw_hours_and_start():
     assert _parse_whatif("/whatif 7.5 2 from 14") == (7.5, 2.0, 14)
     assert _parse_whatif("/whatif") == (None, None, None)
     assert _parse_whatif("/sundown") is None
+
+
+# ── grading everything: sunrise SoC, the plan, and drift ─────────────────
+
+def _sunrise_graded_state(actual):
+    import types
+
+    now = datetime.now().replace(hour=7, minute=45, second=0, microsecond=0)
+    today = now.strftime("%Y-%m-%d")
+    pred_dt = now.replace(hour=7, minute=0)
+    made_at = pred_dt - timedelta(hours=10)
+    state = {f"soc_7am_pred_{today}": {"pct": 27.0, "low_pct": 21.0, "high_pct": 35.0,
+                                        "dt": pred_dt.isoformat(), "made_at": made_at.isoformat()}}
+    store = _AttrStore(attr=(8.2, 5.1, 0.9))
+    store.soc_near = lambda ts: actual
+    store.readings_between = lambda a, b: [((made_at + timedelta(hours=i)).isoformat(), 0.0, 0.4, 0.0) for i in range(11)]
+    c = types.SimpleNamespace(battery_soc_pct=actual, solar_production_kw=0.5)
+    alerts._alert_morning_preview(state, today, now, c, None, None, store, Config())
+    return state, today
+
+
+def test_morning_alert_logs_how_far_the_sunrise_prediction_missed():
+    state, today = _sunrise_graded_state(actual=40.0)             # range 21-35%: 5 above it
+    assert state["sunrise_resid"][-1] == {"day": today, "pred": 27.0, "low": 21.0, "high": 35.0,
+                                          "actual": 40.0, "miss": 5.0}
+    state, _ = _sunrise_graded_state(actual=30.0)                 # inside the range: no miss
+    assert state["sunrise_resid"][-1]["miss"] == 0.0
+    state, _ = _sunrise_graded_state(actual=15.0)
+    assert state["sunrise_resid"][-1]["miss"] == -6.0
+
+
+def test_accuracy_report_covers_sunrise_and_the_plan():
+    state = {"sunrise_resid": [{"day": f"2026-10-{i + 1:02d}", "pred": 27.0, "low": 21.0, "high": 35.0,
+                                 "actual": 30.0, "miss": 0.0} for i in range(7)]
+             + [{"day": "2026-10-20", "pred": 27.0, "low": 21.0, "high": 35.0, "actual": 15.0, "miss": -6.0}],
+             "plan_log": [
+                 {"day": "2026-10-21", "planned_eb_kwh": 3.0, "ran_eb_kwh": 3.2, "grid_kwh": 0.1, "grid_cost": 0.04},
+                 {"day": "2026-10-22", "planned_eb_kwh": 0.0, "ran_eb_kwh": 0.0, "grid_kwh": 0.0, "grid_cost": 0.0},
+                 {"day": "2026-10-23", "planned_eb_kwh": 2.0, "ran_eb_kwh": 0.0, "grid_kwh": 1.9, "grid_cost": 0.80}]}
+    text = alerts._accuracy_report(state, datetime(2026, 10, 26, 9, 0))
+    assert "Sunrise" in text and "7 of 8" in text                  # inside the predicted range 7 of 8 nights
+    assert "plan" in text.lower() and "followed 1 of 2" in text    # of the 2 days it asked for EB, you ran it once
+    _assert_left_aligned(text)
+
+
+def _drift_state(errs, slot="15:30"):
+    return {"sundown_resid": [{"day": f"2026-10-{20 + i // 2:02d}", "slot": slot if i % 2 == 0 else "14:00",
+                                "err": e, "grid": False} for i, e in enumerate(errs)],
+            "sundown_resid_epoch": alerts.SOLAR_MODEL_EPOCH}
+
+
+def test_sundown_drift_alert_fires_on_a_sustained_miss_once_a_week():
+    state = _drift_state([-9.0] * 12)
+    now = datetime(2026, 10, 26, 9, 30)
+    msg = alerts._alert_sundown_drift(state, "2026-10-26", now)
+    assert msg is not None and "high" in msg and "9" in msg
+    assert alerts._alert_sundown_drift(state, "2026-10-26", now) is None          # once a week
+
+
+def test_sundown_drift_alert_stays_quiet_when_projections_are_fine():
+    now = datetime(2026, 10, 26, 9, 30)
+    assert alerts._alert_sundown_drift(_drift_state([-2.0, 3.0] * 6), "2026-10-26", now) is None
+    assert alerts._alert_sundown_drift(_drift_state([-9.0] * 4), "2026-10-26", now) is None   # too few
+    assert alerts._alert_sundown_drift(_drift_state([-9.0] * 12), "2026-10-26", datetime(2026, 10, 26, 15, 0)) is None

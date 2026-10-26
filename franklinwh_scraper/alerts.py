@@ -363,6 +363,50 @@ def _sundown_band(state: dict, now: datetime, early_ok: bool = False) -> tuple[f
     return q[0], q[-1], len(errs)
 
 
+def _record_sunrise_resid(state: dict, day: str, pred: float, low: float, high: float, actual: float) -> None:
+    """Keep each graded sunrise prediction (miss = distance outside the predicted range, 0 inside)
+    so /accuracy can say how often it lands in range."""
+    miss = 0.0 if low <= actual <= high else (actual - high if actual > high else actual - low)
+    log = [e for e in state.get("sunrise_resid", []) if e.get("day") != day]
+    log.append({"day": day, "pred": round(pred, 1), "low": round(low, 1), "high": round(high, 1),
+                "actual": round(actual, 1), "miss": round(miss, 1)})
+    state["sunrise_resid"] = log[-60:]
+
+
+_DRIFT_MIN_SAMPLES = 8
+_DRIFT_MEDIAN_PTS = 6.0
+
+
+def _alert_sundown_drift(state: dict, today: str, now: datetime) -> str | None:
+    """Weekly watchdog for the sundown projection, like the solar one: if the last two weeks of
+    afternoon projections (2:00 and 3:30 PM, grid-charged days excluded) have a median miss of
+    6+ points in one direction, something the model does not know about has changed (a new
+    load, the season). Nothing learns this away on its own, so a human should look."""
+    if now.hour not in (9, 10):
+        return None
+    last = state.get("sundown_drift_alert_date")
+    if last and (now - datetime.strptime(last, "%Y-%m-%d")).days < 7:
+        return None
+    cutoff = (now.date() - timedelta(days=14)).isoformat()
+    errs = [r["err"] for r in _current_sundown_resid(state)
+            if r.get("slot") in ("14:00", "15:30") and not r.get("grid") and r.get("day", "") >= cutoff]
+    if len(errs) < _DRIFT_MIN_SAMPLES:
+        return None
+    med = statistics.median(errs)
+    if abs(med) < _DRIFT_MEDIAN_PTS:
+        return None
+    _mark_alerted(state, "sundown_drift_alert_date", today)
+    logger.info("Sundown drift alert: median miss %+.1f pts over %d projections", med, len(errs))
+    direction = "high" if med < 0 else "low"
+    return (
+        f"📐 <b>FranklinWH: /sundown has been running {direction}</b>\n"
+        f"The last {len(errs)} afternoon projections ended a median {abs(med):.0f} pts "
+        f"{'below' if med < 0 else 'above'} what I said.\n"
+        f"Usually something new in the house (AC or heating, a new appliance) or the season changing. "
+        f"The monthly backtest will show whether the forecast itself moved; /accuracy has the detail."
+    )
+
+
 def _accuracy_report(state: dict, now: datetime) -> str:
     """Plain-text scoreboard for /accuracy: how far /sundown's projection has been
     from the real battery %, by the time of day it was made, plus the whole-day
@@ -401,6 +445,22 @@ def _accuracy_report(state: dict, now: datetime) -> str:
         lean = ("no consistent lean" if abs(bias) < 1.0
                 else f"actual ran {'above' if bias > 0 else 'below'} forecast by {abs(bias):.0f}% on average")
         lines.append(f"☀️ Solar, whole-day total: typical miss ±{mae:.0f}% over the last {len(ratios)} days ({lean}).")
+    sunrise = state.get("sunrise_resid", [])[-30:]
+    if sunrise:
+        inside = sum(1 for e in sunrise if e.get("miss", 0) == 0)
+        outside = [abs(e["miss"]) for e in sunrise if e.get("miss", 0) != 0]
+        usual = f"; when outside, by a median {statistics.median(outside):.0f} pts" if outside else ""
+        lines.append(f"🌅 Sunrise battery %: inside the predicted range {inside} of {len(sunrise)} nights{usual}.")
+    plans = state.get("plan_log", [])[-30:]
+    asked = [e for e in plans if (e.get("planned_eb_kwh") or 0) >= 0.1 and e.get("ran_eb_kwh") is not None]
+    if asked:
+        followed = [e for e in asked if e["ran_eb_kwh"] >= 0.5 * e["planned_eb_kwh"]]
+        skipped = [e for e in asked if e not in followed]
+        text = f"📋 EB plan: you followed {len(followed)} of {len(asked)} days it asked for EB"
+        if followed and skipped:
+            text += (f"; grid import 2–11 PM averaged {sum(e['grid_kwh'] for e in followed) / len(followed):.1f} kWh "
+                     f"when you did vs {sum(e['grid_kwh'] for e in skipped) / len(skipped):.1f} kWh when you didn't")
+        lines.append(text + ".")
     if n_grid:
         lines.append(f"<i>Left out: {n_grid} snapshot{'s' if n_grid != 1 else ''} from grid-charged "
                      f"(Emergency Backup) days: that was your decision, not a forecast miss.</i>")
@@ -1922,6 +1982,7 @@ def _alert_morning_preview(
                 f"({_NO_EV_RANGE_LOW_KW:.1f}-{_NO_EV_RANGE_HIGH_KW:.1f} kWh/hr), "
                 f"actual {actual_pct:.0f}% — {fit}"
             )
+            _record_sunrise_resid(state, today, pred_pct, low_pct, high_pct, actual_pct)
         else:
             delta = actual_pct - pred_pct
             soc_7am_acc_str = (
@@ -5062,6 +5123,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("load_question",        lambda: _alert_load_question(state, today, now, store)),
             ("car_charge_started",   lambda: _alert_car_charge_started(state, today, now, c, cfg, store)),
             ("solar_backtest",       lambda: _maybe_launch_monthly_backtest(state, now, cfg)),
+            ("sundown_drift",        lambda: _alert_sundown_drift(state, today, now)),
             ("sundown_tracker",      lambda: _alert_sundown_tracker(state, today, now, c, outlook, usage_forecast, store,
                                                                     cfg.battery_capacity_kwh,
                                                                     _effective_reserve_pct(cfg, store, now))),
