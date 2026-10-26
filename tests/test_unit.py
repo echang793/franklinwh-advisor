@@ -10829,6 +10829,21 @@ def test_today_report_without_a_store_says_so():
     assert "history" in text.lower()
 
 
+def _freeze_chatbot_clock(monkeypatch, now):
+    """Pin datetime.now() inside the chat bot so these tests do not depend on the hour they run
+    at (CI runs them in UTC, hours from a developer's evening)."""
+    from franklinwh_scraper import chatbot as chatbot_mod
+
+    real = chatbot_mod.datetime
+
+    class _Frozen(real):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(chatbot_mod, "datetime", _Frozen)
+
+
 def _bot_with(tmp_path, soc=50.0, forecast=None, store=None, saved_state=None):
     import types
     from pathlib import Path
@@ -10853,8 +10868,9 @@ def test_send_accuracy_replies_with_the_scoreboard(tmp_path):
     assert "How accurate" in sent["text"] and "3:30 PM" in sent["text"]
 
 
-def test_send_reserve_recommends_a_charge_level(tmp_path):
-    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+def test_send_reserve_recommends_a_charge_level(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 26, 21, 0)
+    _freeze_chatbot_clock(monkeypatch, now)
     hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0})
     fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
     bot, sent = _bot_with(tmp_path, soc=30.0, forecast=fc)
@@ -10865,8 +10881,9 @@ def test_send_reserve_recommends_a_charge_level(tmp_path):
     _assert_left_aligned(sent["text"])
 
 
-def test_send_reserve_says_when_no_charge_is_needed(tmp_path):
-    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+def test_send_reserve_says_when_no_charge_is_needed(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 26, 21, 0)
+    _freeze_chatbot_clock(monkeypatch, now)
     hours = _night_hours(now, 24, load=0.3, solar_by_hour={8: 1.0, 9: 2.0})
     fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
     bot, sent = _bot_with(tmp_path, soc=95.0, forecast=fc)
@@ -10874,8 +10891,9 @@ def test_send_reserve_says_when_no_charge_is_needed(tmp_path):
     assert "No grid charge needed" in sent["text"]
 
 
-def test_send_today_replies_with_the_day_so_far(tmp_path):
-    now = datetime.now().replace(hour=12, minute=10, second=0, microsecond=0)
+def test_send_today_replies_with_the_day_so_far(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 26, 12, 10)
+    _freeze_chatbot_clock(monkeypatch, now)
     hours = _night_hours(now.replace(minute=0), 5, load=0.5, solar_by_hour={12: 2.0, 13: 2.0, 14: 2.0})
     fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
     bot, sent = _bot_with(tmp_path, forecast=fc, store=_today_store())
@@ -11037,8 +11055,9 @@ def test_effective_reserve_never_raises():
     assert alerts._effective_reserve_pct(Config(), _Broken(), datetime(2026, 10, 10, 7, 30)) == 10.0
 
 
-def test_send_reserve_shows_what_the_battery_held_at_recently(tmp_path):
-    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+def test_send_reserve_shows_what_the_battery_held_at_recently(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 26, 21, 0)
+    _freeze_chatbot_clock(monkeypatch, now)
     hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0})
     fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
 
@@ -11054,8 +11073,9 @@ def test_send_reserve_shows_what_the_battery_held_at_recently(tmp_path):
     assert "Recent nights" in sent["text"]
 
 
-def test_send_reserve_default_is_the_configured_reserve(tmp_path):
-    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+def test_send_reserve_default_is_the_configured_reserve(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 26, 21, 0)
+    _freeze_chatbot_clock(monkeypatch, now)
     hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0})
     fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
     bot, sent = _bot_with(tmp_path, soc=30.0, forecast=fc)
@@ -11403,7 +11423,8 @@ def test_app_tools_have_unique_names_and_valid_schemas():
 
 
 def test_app_tool_returns_the_commands_text_without_sending_it_to_telegram(tmp_path, monkeypatch):
-    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+    now = datetime(2026, 10, 26, 21, 0)
+    _freeze_chatbot_clock(monkeypatch, now)
     hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0})
     fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
     from franklinwh_scraper import chatbot as chatbot_mod
@@ -11481,8 +11502,9 @@ def test_call_claude_runs_an_app_tool_and_feeds_the_text_back(tmp_path, monkeypa
     assert posted == []
 
 
-def test_send_whatif_reports_before_and_after(tmp_path):
-    now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+def test_send_whatif_reports_before_and_after(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 26, 12, 0)
+    _freeze_chatbot_clock(monkeypatch, now)
     fc = _sunset_forecast(now)
     bot, sent = _bot_with(tmp_path, soc=40.0, forecast=fc)
     bot._send_whatif("1", 3.0, 1.5, None)
