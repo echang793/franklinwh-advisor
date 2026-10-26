@@ -2506,9 +2506,9 @@ def _alert_eod_digest(
         delta_str = f"{delta_str:>5}"
         solar_delta_str = (
             f"\n🎯 Solar forecast vs actual:\n"
-            f"<code>  Predicted: {pred_str} kWh\n"
-            f"  Actual:    {act_str} kWh\n"
-            f"  Delta:     {delta_str} kWh ({sign}{delta_kwh / predicted_kwh * 100:.0f}%)</code>"
+            f"<code>Predicted: {pred_str} kWh\n"
+            f"Actual:    {act_str} kWh\n"
+            f"Delta:     {delta_str} kWh ({sign}{delta_kwh / predicted_kwh * 100:.0f}%)</code>"
         )
 
     sundown_acc_str = ""

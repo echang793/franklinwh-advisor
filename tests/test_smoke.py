@@ -182,9 +182,12 @@ def test_eod_digest_format_locked(tmp_path):
     assert "Backup:" not in msg
     assert "Predicted SoC @" in msg
     assert f"soc_7am_pred_{checkpoint.strftime('%Y-%m-%d')}" in state  # still stashed for tomorrow's accuracy line
-    assert "  Predicted: 100.0 kWh" in msg
-    assert "  Actual:     30.0 kWh" in msg  # right-aligned to width 5 — extra space vs "100.0"
-    assert "  Delta:     -70.0 kWh" in msg  # "-70.0" is already 5 chars, no extra pad
+    assert "Predicted: 100.0 kWh" in msg
+    assert "Actual:     30.0 kWh" in msg  # right-aligned to width 5 — extra space vs "100.0"
+    assert "Delta:     -70.0 kWh" in msg  # "-70.0" is already 5 chars, no extra pad
+    # Every line starts at the left margin: no indented lines, including inside <code> blocks.
+    import re as _re
+    assert [ln for ln in _re.sub(r"</?(?:b|code)>", "", msg).splitlines() if ln[:1].isspace()] == []
 
 
 def test_notifiers_graceful_when_unconfigured():
