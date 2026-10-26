@@ -1266,7 +1266,7 @@ class TelegramChatBot:
     def _send_reserve(self, chat_id: str) -> None:
         """/reserve: what to charge the battery to overnight so the morning needs no grid."""
         try:
-            from .alerts import _live_anchored_forecast, _reserve_plan
+            from .alerts import _live_anchored_forecast, _reserve_offset, _reserve_plan
             from .reservehold import detect_reserve_hold
             from .tou import rate_at
             stats, forecast, outlook, store, state = self._snapshot_for_report()
@@ -1282,7 +1282,8 @@ class TelegramChatBot:
             c = stats.current
             now = datetime.now()
             live = _live_anchored_forecast(state, c, outlook, forecast, store)
-            plan = _reserve_plan(now, c.battery_soc_pct, cap, live.hours, floor)
+            offset = _reserve_offset(state)
+            plan = _reserve_plan(now, c.battery_soc_pct, cap, live.hours, floor, offset)
             if plan is None:
                 self._send(chat_id, "Not enough forecast to plan the night.")
                 return
@@ -1304,7 +1305,8 @@ class TelegramChatBot:
                 lines.append(f"⚡ <b>Charge to ~{plan['needed_pct']}%</b> overnight "
                              f"(~{plan['charge_kwh']:.1f} kWh from the grid, ~${cost:.2f} at the 1 AM rate).")
             lines.append(f"<i>That is the {floor:.0f}% floor + the {plan['morning_gap_kwh']:.1f} kWh the battery carries "
-                         f"from 6 AM until solar takes over + a 0.5 kWh margin, rounded up to 5%.</i>")
+                         f"from 6 AM until solar takes over + a 0.5 kWh margin, rounded up to 5%"
+                         + (f", plus the {offset:+.0f}% you usually add" if offset else "") + ".</i>")
             # What the battery actually did: a long flat stretch at one SoC is the reserve setting.
             if store is not None:
                 holds = []

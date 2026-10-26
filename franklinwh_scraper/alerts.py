@@ -344,7 +344,7 @@ def _alert_sundown_tracker(state: dict, today: str, now: datetime, c, outlook, u
     return None
 
 
-def _sundown_band(state: dict, now: datetime) -> tuple[float, float, int] | None:
+def _sundown_band(state: dict, now: datetime, early_ok: bool = False) -> tuple[float, float, int] | None:
     """(low, high, n): the 10th and 90th percentile of past misses (actual - raw
     projection, in points) for the latest snapshot slot at or before `now`, or None
     until there is enough history. Grid-charged days are excluded."""
@@ -353,7 +353,9 @@ def _sundown_band(state: dict, now: datetime) -> tuple[float, float, int] | None
         if now.replace(hour=h, minute=m, second=0, microsecond=0) <= now:
             chosen = _slot_key(h, m)
     if chosen is None:
-        return None
+        if not early_ok:
+            return None
+        chosen = _slot_key(*_SUNDOWN_SLOTS[0])      # before the first snapshot time: the earliest record is the best proxy
     errs = [r["err"] for r in _current_sundown_resid(state) if r.get("slot") == chosen and not r.get("grid")]
     if len(errs) < _SUNDOWN_BAND_MIN:
         return None
@@ -408,7 +410,8 @@ def _accuracy_report(state: dict, now: datetime) -> str:
 _RESERVE_MARGIN_KWH = 0.5
 
 
-def _reserve_plan(now: datetime, soc: float, cap: float, hours: list, floor_pct: float) -> dict | None:
+def _reserve_plan(now: datetime, soc: float, cap: float, hours: list, floor_pct: float,
+                  offset_pct: float = 0.0) -> dict | None:
     """What to charge the battery to overnight so tomorrow morning needs no grid.
 
     Walks the hourly forecast from `now`, clipped at empty and full (a full
@@ -463,7 +466,7 @@ def _reserve_plan(now: datetime, soc: float, cap: float, hours: list, floor_pct:
             if run < lowest:
                 lowest, lowest_dt = run, h.dt + one_hour
     needed_kwh = floor_kwh + gap + _RESERVE_MARGIN_KWH
-    needed_pct = min(100, int(-(-(needed_kwh / cap * 100.0) // 5) * 5))
+    needed_pct = max(5, min(100, int(-(-(needed_kwh / cap * 100.0 + offset_pct) // 5) * 5)))   # + the owner's usual margin
     return {
         "natural_6am_pct": natural_6am / cap * 100.0,
         "morning_gap_kwh": gap,
@@ -1203,7 +1206,7 @@ _DATE_KEYED_PREFIXES = (
     # by one key per day per prefix, forever, for the life of the install.
     "predicted_kwh_", "predicted_avg_ghi_", "predicted_cloudy_", "daily_import_cost_",
     "outages_", "sundown_pred_", "savings_daily_", "soc_7am_pred_",
-    "actual_bill_", "perf_ratio_used_", "sundown_shadow_",
+    "actual_bill_", "perf_ratio_used_", "sundown_shadow_", "daily_plan_", "reserve_plan_",
 )
 
 
@@ -1553,6 +1556,212 @@ def _overnight_use_too_high(store, sunrise_pred: dict) -> bool:
     return avg is not None and avg > _NO_EV_RANGE_HIGH_KW
 
 
+_PLAN_WINDOW = (14, 23)          # the grid-free window the EB decision protects: end of super-off-peak to bedtime
+_PLAN_MARGIN_PCT = 5.0
+_PLAN_SURPLUS_KW = 1.5           # solar above the house by this much counts as car-charging surplus
+_HOT_DAY_C = 33.9                # ~93 F: where the owner says the AC starts
+
+
+def _clock_str(hour: float) -> str:
+    """A decimal clock hour as '1:42 PM' ('2 PM' on the hour)."""
+    total = int(round(hour * 60))
+    t = datetime(2000, 1, 1, (total // 60) % 24, total % 60)
+    return t.strftime("%-I %p") if t.minute == 0 else t.strftime("%-I:%M %p")
+
+
+def _window_grid_import(soc_pct: float, cap: float, floor_pct: float, solar, load, window: tuple[int, int],
+                        now: datetime) -> tuple[float, float]:
+    """(kWh, dollars) the grid would supply over `window` from a battery at `soc_pct`
+    when the window starts (or right now, if already inside it): hour by hour, the
+    battery carries the house down to the reserve and the grid covers the rest."""
+    start_h, end_h = window
+    k, floor_kwh = soc_pct / 100.0 * cap, floor_pct / 100.0 * cap
+    imported = cost = 0.0
+    for h in range(max(start_h, now.hour) if now.hour >= start_h else start_h, end_h):
+        frac = (60 - now.minute) / 60.0 if (now.hour >= start_h and h == now.hour) else 1.0
+        k = min(cap, k + (solar(h) - load(h)) * frac)
+        if k < floor_kwh:
+            short = floor_kwh - k
+            imported += short
+            cost += short * rate_at(datetime(now.year, now.month, now.day, h))
+            k = floor_kwh
+    return imported, cost
+
+
+def _plan_curves(live, now: datetime, profile):
+    """(solar(h), load(h)) closures from the live forecast: kW for clock hour h today. Hours
+    after this one use the learned quiet load when there is one."""
+    solar: dict[int, float] = {}
+    load: dict[int, float] = {}
+    for h in live.hours:
+        if h.dt.date() != now.date() or h.dt.hour in solar:
+            continue
+        solar[h.dt.hour] = h.predicted_solar_kw
+        q = profile.quiet_by_hour.get(h.dt.hour) if profile is not None else None
+        load[h.dt.hour] = q if (q is not None and h.dt.hour != now.hour) else h.predicted_load_kw
+    return (lambda h: solar.get(h, 0.0)), (lambda h: load.get(h, 0.5))
+
+
+_RESERVE_OFFSET_MIN_NIGHTS = 4
+_RESERVE_OFFSET_MAX = 10.0
+
+
+def _reserve_offset(state: dict) -> float:
+    """How many points above the suggestion the owner usually sets the reserve, from the
+    nights they raised it (median of held - suggested, at least 4 nights, clamped to
+    +-10). Nights held at the default are not a margin signal: the suggestion was not
+    followed because nothing was set, not because it was too low."""
+    reserve_default = DEFAULT_RESERVE_PCT
+    diffs = [e["reserve_held"] - e["reserve_suggested"] for e in state.get("plan_log", [])
+             if e.get("reserve_suggested") is not None and e.get("reserve_held") is not None
+             and e["reserve_suggested"] > reserve_default + 2 and e["reserve_held"] > reserve_default + 2]
+    if len(diffs) < _RESERVE_OFFSET_MIN_NIGHTS:
+        return 0.0
+    return max(-_RESERVE_OFFSET_MAX, min(_RESERVE_OFFSET_MAX, float(statistics.median(diffs))))
+
+
+def _plan_scorecard(state: dict, store, today: str, now: datetime) -> str:
+    """Yesterday's plan against what happened: the EB the plan asked for vs the EB you ran,
+    the grid import 2-11 PM that resulted, and the reserve suggested the night before vs
+    the level the battery then held. Logged to state["plan_log"] (one entry per day) so
+    the margin you usually add can be learned. "" when there was no plan or no store."""
+    yesterday = (now.date() - timedelta(days=1)).isoformat()
+    plan = state.get(f"daily_plan_{yesterday}")
+    rplan = state.get(f"reserve_plan_{yesterday}")
+    if store is None or not (plan or rplan):
+        return ""
+    entry: dict = {"day": yesterday}
+    lines: list[str] = []
+    try:
+        if plan:
+            from .ebpattern import find_eb_sessions
+            raw = store.soc_flow_readings(f"{yesterday}T00:00:00", f"{today}T00:00:00")
+            sessions = find_eb_sessions([(ts, grid, batt) for ts, _soc, batt, grid in raw])
+            ran = sum(sv["grid_kwh"] for sv in sessions)
+            grid_kwh = grid_cost = 0.0
+            start_h, end_h = plan.get("window", list(_PLAN_WINDOW))
+            for dt, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(store.weekly_readings(yesterday, yesterday)):
+                if grid_kw > 0 and start_h <= dt.hour < end_h:
+                    grid_kwh += grid_kw * hours
+                    grid_cost += grid_kw * hours * rate_at(dt)
+            planned = (f"EB ~{plan['eb_kwh']:.1f} kWh by {_clock_str(plan['start_by'])}" if plan.get("eb_kwh", 0) >= 0.1
+                       else "EB not needed")
+            did = (f"you ran {ran:.1f} kWh at {_clock_str(sessions[0]['start'].hour + sessions[0]['start'].minute / 60)}"
+                   if sessions else "you ran none")
+            lines.append(f"📋 Yesterday's plan: {planned}; {did}. Grid {_clock_str(start_h)}–{_clock_str(end_h)}: "
+                         f"{grid_kwh:.1f} kWh (${grid_cost:.2f}).")
+            entry.update(planned_eb_kwh=round(float(plan.get("eb_kwh", 0.0)), 2), ran_eb_kwh=round(ran, 2),
+                         grid_kwh=round(grid_kwh, 2), grid_cost=round(grid_cost, 2))
+        if rplan:
+            from .reservehold import detect_reserve_hold
+            hold = detect_reserve_hold(store.night_readings(today))
+            held = hold["level"] if hold else None
+            lines.append(f"🌙 Reserve: suggested {rplan['needed_pct']}%, "
+                         + (f"held {held}%." if held is not None else "no steady hold found."))
+            entry.update(reserve_suggested=rplan["needed_pct"], reserve_held=held)
+    except Exception:
+        logger.exception("Plan scorecard failed")
+        return ""
+    log = [e for e in state.get("plan_log", []) if e.get("day") != yesterday]
+    log.append(entry)
+    state["plan_log"] = log[-60:]
+    return "\n" + "\n".join(lines) if lines else ""
+
+
+def _daily_plan(state: dict, today: str, now: datetime, c, cfg, outlook, usage_forecast, store) -> str:
+    """The morning alert's "Today's plan": where the battery should end the day, whether
+    Emergency Backup is worth running (how much, start by when, and what skipping it
+    costs), and when the car can charge for free. Records what it said under
+    state["daily_plan_<today>"] so tomorrow's alert can show how it went. "" when there is
+    no forecast; never raises."""
+    try:
+        live = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
+        if live is None or not getattr(live, "hours", None):
+            return ""
+        cap = getattr(cfg, "battery_capacity_kwh", None) or _BATTERY_CAPACITY_KWH
+        reserve = _effective_reserve_pct(cfg, store, now)
+        profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
+        sunset = _sunset_today(outlook, now)
+        quiet = _afternoon_scenarios(live, now, c.battery_soc_pct, cap, profile, getattr(c, "home_load_kw", None),
+                                     floor_pct=reserve, sunset=sunset)["quiet"]
+        lines: list[str] = []
+        record: dict = {"window": list(_PLAN_WINDOW)}
+
+        if quiet is not None:
+            raw_pct, sundown_dt, export_kwh = quiet
+            end_pct = max(0.0, min(100.0, raw_pct + _get_sundown_bias(state)))
+            line = f"🌇 Sundown (~{sundown_dt.strftime('%-I:%M %p').lstrip('0')}): ~{end_pct:.0f}%"
+            band = _sundown_band(state, now, early_ok=True)
+            if band is not None:
+                line += (f" (likely {max(0.0, min(100.0, raw_pct + band[0])):.0f}–"
+                         f"{max(0.0, min(100.0, raw_pct + band[1])):.0f}%)")
+            lines.append(line)
+            record["sundown_pct"] = round(end_pct, 1)
+
+        # Emergency Backup for the grid-free window
+        start_h, end_h = _PLAN_WINDOW
+        if now.hour < end_h:
+            from .advisor import _EB_CHARGE_KW
+            solar, load = _plan_curves(live, now, profile)
+            eb = _eb_plan(now, c.battery_soc_pct, cap, reserve, _PLAN_MARGIN_PCT, solar, load, 0.0, 15, 3,
+                          _PLAN_WINDOW, _EB_CHARGE_KW)
+            w = f"{_clock_str(start_h)}–{_clock_str(end_h)}"
+            imp_kwh, imp_cost = _window_grid_import(eb["soc_at_start"], cap, reserve, solar, load, _PLAN_WINDOW, now)
+            record.update(eb_kwh=round(float(eb["eb_kwh"]), 2), start_by=round(float(eb["start_by"]), 2),
+                          eb_feasible=bool(eb["feasible"]), grid_no_eb_kwh=round(imp_kwh, 2),
+                          grid_no_eb_cost=round(imp_cost, 2))
+            if not eb["feasible"]:
+                lines.append(f"⚡ EB: even a full battery won't carry {w}: ~{eb['grid_import_kwh']:.1f} kWh would "
+                             "come from the grid. Charge as full as you can.")
+            elif eb["eb_kwh"] < 0.1:
+                when = f"~{eb['soc_at_start']:.0f}% now" if eb["in_window"] else f"~{eb['soc_at_start']:.0f}% by {_clock_str(start_h)}"
+                lines.append(f"⚡ EB: not needed. The battery ({when}) plus this afternoon's sun covers "
+                             f"{'the rest of ' if eb['in_window'] else ''}{w}.")
+            else:
+                start_dt = datetime(now.year, now.month, now.day) + timedelta(hours=float(eb["start_by"]))
+                cost = eb["eb_kwh"] * rate_at(start_dt)
+                lines.append(
+                    f"⚡ EB: ~{eb['eb_kwh']:.1f} kWh (~{eb['eb_minutes']:.0f} min at {_EB_CHARGE_KW:.0f} kW), start by "
+                    f"{_clock_str(eb['start_by'])}, so the battery is ~{eb['need_at_start']:.0f}% at "
+                    f"{_clock_str(start_h)}. Costs ~${cost:.2f}; skipping it means ~{imp_kwh:.1f} kWh from the "
+                    f"grid {w} (~${imp_cost:.2f}).")
+
+        # Car: free room, and the hours with surplus solar
+        if quiet is not None:
+            sunrise_next = _next_sunrise_after(sundown_dt, outlook)
+            room = _ev_room_plan(end_pct, export_kwh, sundown_dt, sunrise_next, cap, reserve,
+                                 getattr(cfg, "no_ev_baseline_load_kw", 0.4))
+            solar, load = _plan_curves(live, now, profile)
+            surplus_hours = [h for h in range(max(now.hour, 6), 19) if solar(h) - load(h) >= _PLAN_SURPLUS_KW]
+            if room["budget_kwh"] >= 1.0:
+                gain = _ev_car_gain_pct(room["budget_kwh"], getattr(cfg, "ev_pack_kwh", 75.0),
+                                        getattr(cfg, "ev_charge_efficiency", 0.90))
+                where = ""
+                if surplus_hours:
+                    a, b = surplus_hours[0], surplus_hours[-1] + 1
+                    kwh = sum(solar(h) - load(h) for h in surplus_hours)
+                    where = f"; best window {_clock_str(a)}–{_clock_str(b)} ({kwh:.1f} kWh of surplus solar)"
+                    record["car_window"] = [a, b]
+                lines.append(f"🚗 Car: ~{room['budget_kwh']:.1f} kWh of room without importing (about +{gain:.0f}% on "
+                             f"the car){where}.")
+            else:
+                lines.append("🚗 Car: no free room today. Charging would pull from the grid.")
+
+        # Heat
+        temps = [h.temp_c for h in getattr(outlook, "hours", []) if h.time.date() == now.date()]
+        if temps and max(temps) >= _HOT_DAY_C:
+            lines.append(f"🌡️ Hot day (high {max(temps) * 9 / 5 + 32:.0f}°F): AC is today's biggest unknown and can "
+                         "swing sundown by 10+ points.")
+
+        if not lines:
+            return ""
+        state[f"daily_plan_{today}"] = record
+        return "\n\n📋 <b>Today's plan</b>\n" + "\n".join(lines)
+    except Exception:
+        logger.exception("Daily plan failed; sending the alert without it")
+        return ""
+
+
 def _alert_morning_preview(
     state: dict, today: str, now: datetime, c,
     outlook, usage_forecast, store, cfg: Config | None = None,
@@ -1773,12 +1982,14 @@ def _alert_morning_preview(
         solar_est       = "Solar forecast unavailable"
         peak_window_str = ""
 
+    plan_str = _daily_plan(state, today, now, c, cfg, outlook, usage_forecast, store)
+    score_str = _plan_scorecard(state, store, today, now)
     _mark_alerted(state, "morning_preview_date", today)
     logger.info("Morning preview alert sent for %s", today)
     return (
         f"☀️ <b>FranklinWH: {_morning_greeting(now)}</b>\n"
         f"🔋 {_soc_bar(soc)}  ·  Solar: <b>{solar_kw:.2f} kW</b>\n"
-        f"{solar_est}{peak_window_str}{soc_7am_acc_str}"
+        f"{solar_est}{peak_window_str}{plan_str}{soc_7am_acc_str}{score_str}"
     )
 
 
@@ -2954,6 +3165,30 @@ def _alert_eod_digest(
             precharge_str  = _precharge_plan(now, soc, tmrw_kwh, bat_cap)
             tmrw_solar_str = f"\n☀️ Tomorrow's solar: ~{tmrw_kwh:.1f} kWh ({'cloudy' if cloudy else 'sunny'})"
 
+    # Tonight's reserve: what to charge to so the morning needs no grid, with the margin
+    # you have usually added on top. Recorded so the next morning's alert can show how
+    # it compared with what you set.
+    reserve_str = ""
+    try:
+        live_fc = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
+        if live_fc is not None and getattr(live_fc, "hours", None):
+            floor_pct = getattr(cfg, "battery_reserve_pct", DEFAULT_RESERVE_PCT)
+            rp = _reserve_plan(now, soc, bat_cap, live_fc.hours, floor_pct, _reserve_offset(state))
+            if rp is not None:
+                state[f"reserve_plan_{today}"] = {"needed_pct": rp["needed_pct"],
+                                                  "charge_kwh": round(rp["charge_kwh"], 2),
+                                                  "natural_6am_pct": round(rp["natural_6am_pct"], 1)}
+                if rp["charge_kwh"] <= 0.05:
+                    reserve_str = (f"\n🌙 Tonight: no grid charge needed (~{rp['natural_6am_pct']:.0f}% at 6 AM "
+                                   "covers the morning).")
+                else:
+                    cost = rp["charge_kwh"] * rate_at((now + timedelta(days=1 if now.hour >= 1 else 0)).replace(
+                        hour=1, minute=0, second=0, microsecond=0))
+                    reserve_str = (f"\n🌙 Tonight: set the reserve to ~{rp['needed_pct']}% "
+                                   f"(grid +{rp['charge_kwh']:.1f} kWh, ~${cost:.2f}).")
+    except Exception:
+        logger.exception("Tonight's reserve suggestion failed; digest sent without it")
+
     self_suff_str = ""
     attribution_str = ""
 
@@ -3076,7 +3311,7 @@ def _alert_eod_digest(
         f"Batt dis: {batt_dis_kwh:.1f} kWh\n"
         f"Home:     {home_kwh:.1f} kWh</code>{attribution_str}{self_suff_str}{peak_cov_str}{tou_str}{outage_str}\n"
         f"<code>─────────────────────</code>\n"
-        f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{precharge_str}"
+        f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{precharge_str}{reserve_str}"
     )
 
 

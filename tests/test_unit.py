@@ -11211,3 +11211,178 @@ def test_sunset_today_helper_reads_the_outlook_when_it_can():
     assert alerts._sunset_today(outlook, now) == sunset
     assert alerts._sunset_today(None, now) is None
     assert alerts._sunset_today(object(), now) is None               # an outlook without the method
+
+
+# ── the daily plan in the morning alert ─────────────────────────────────
+
+def _day_forecast(day, solar_by_hour, load=0.5, start_hour=7):
+    """Hourly forecast from `start_hour` to 23:00 on `day` (a date)."""
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+    hours = []
+    for h in range(start_hour, 24):
+        s = solar_by_hour.get(h, 0.0)
+        hours.append(HourPrediction(dt=datetime(day.year, day.month, day.day, h), predicted_load_kw=load,
+                                    predicted_solar_kw=s, net_kw=s - load, confidence="high"))
+    return UsageForecast(hours=hours, total_load_kwh=0.0, total_solar_kwh=0.0, net_kwh=0.0,
+                         peak_load_kw=load, confidence="high", data_days=30)
+
+
+_SUNNY = {7: 0.5, 8: 1.5, 9: 2.5, 10: 3.5, 11: 4.2, 12: 4.5, 13: 4.3, 14: 3.8, 15: 3.0, 16: 1.8, 17: 0.6}
+_GLOOM = {9: 0.3, 10: 0.5, 11: 0.8, 12: 0.9, 13: 0.8, 14: 0.6, 15: 0.4, 16: 0.2}
+
+
+def _daily_plan_for(soc, solar, hour=7, minute=30, cfg=None, store=None, state=None, load=0.5):
+    now = datetime(2026, 10, 26, hour, minute)
+    fc = _day_forecast(now.date(), solar, load=load, start_hour=hour)
+    st = {} if state is None else state
+    text = alerts._daily_plan(st, "2026-10-26", now, _tracker_c(soc), cfg or Config(battery_capacity_kwh=13.6),
+                              None, fc, store)
+    return text, st
+
+
+def test_daily_plan_on_a_sunny_day_says_eb_is_not_needed():
+    text, state = _daily_plan_for(soc=30.0, solar=_SUNNY)
+    assert "Today's plan" in text
+    assert "EB" in text and "not needed" in text
+    assert "Sundown" in text
+    assert state["daily_plan_2026-10-26"]["eb_kwh"] == 0.0
+
+
+def test_daily_plan_on_a_gloomy_day_says_how_much_eb_and_by_when():
+    text, state = _daily_plan_for(soc=30.0, solar=_GLOOM, load=0.8)
+    assert "EB" in text and "start by" in text
+    rec = state["daily_plan_2026-10-26"]
+    assert rec["eb_kwh"] > 1.0 and rec["start_by"] < 14.0
+    assert "grid" in text.lower()                      # what skipping EB would cost
+    _assert_left_aligned(text)
+
+
+def test_daily_plan_names_the_car_window_when_there_is_surplus_solar():
+    text, state = _daily_plan_for(soc=60.0, solar=_SUNNY)
+    assert "Car" in text
+    assert "10" in text and "kWh" in text              # a window around the midday surplus
+    assert "car_window" in state["daily_plan_2026-10-26"]
+
+
+def test_daily_plan_warns_about_a_hot_day():
+    class _Hot:
+        hours = [type("H", (), {"time": datetime(2026, 10, 26, h), "temp_c": 36.0})() for h in range(8, 18)]
+        def sunset_on(self, d): return None
+        def sunrise_on(self, d): return None
+    now = datetime(2026, 10, 26, 7, 30)
+    fc = _day_forecast(now.date(), _SUNNY)
+    text = alerts._daily_plan({}, "2026-10-26", now, _tracker_c(40.0), Config(), _Hot(), fc, None)
+    assert "Hot day" in text and "AC" in text
+
+
+def test_daily_plan_is_empty_without_a_forecast():
+    now = datetime(2026, 10, 26, 7, 30)
+    assert alerts._daily_plan({}, "2026-10-26", now, _tracker_c(40.0), Config(), None, None, None) == ""
+
+
+# ── scoring the plan, and the reserve suggestion ────────────────────────
+
+class _ScoreStore:
+    """Yesterday: an EB top-off at 12:00 (12 polls) and some evening grid import."""
+    def __init__(self, ran_eb=True, hold_level=None):
+        self.ran_eb, self.hold_level = ran_eb, hold_level
+
+    def soc_flow_readings(self, start, end):
+        return _eb_day_rows(start[:10], [(12, 12)] if self.ran_eb else [])
+
+    def weekly_readings(self, start, end):
+        # (ts, grid_kw, home_kw, solar_kw): 18:00-20:00 importing 0.5 kW
+        day = start[:10]
+        return [(f"{day}T{h:02d}:{m:02d}:00", 0.5 if 18 <= h < 20 else 0.0, 1.0, 0.0)
+                for h in range(0, 24) for m in range(0, 60, 5)]
+
+    def night_readings(self, day):
+        if self.hold_level is None:
+            return []
+        return _night_rows([float(self.hold_level)] * 100, start=f"{day}T01:00:00")
+
+
+def test_plan_scorecard_compares_the_plan_with_what_happened():
+    state = {"daily_plan_2026-10-25": {"eb_kwh": 2.4, "start_by": 11.5, "window": [14, 23]}}
+    text = alerts._plan_scorecard(state, _ScoreStore(), "2026-10-26", datetime(2026, 10, 26, 7, 30))
+    assert "Yesterday" in text and "2.4 kWh" in text           # what the plan said
+    assert "you ran" in text and "12 PM" in text               # what happened
+    assert "Grid" in text and "$" in text
+    _assert_left_aligned(text)
+    log = state["plan_log"]
+    assert log[-1]["day"] == "2026-10-25" and log[-1]["planned_eb_kwh"] == 2.4 and log[-1]["ran_eb_kwh"] > 1.0
+
+
+def test_plan_scorecard_when_eb_was_not_needed_and_not_run():
+    state = {"daily_plan_2026-10-25": {"eb_kwh": 0.0, "start_by": 14.0, "window": [14, 23]}}
+    text = alerts._plan_scorecard(state, _ScoreStore(ran_eb=False), "2026-10-26", datetime(2026, 10, 26, 7, 30))
+    assert "not needed" in text and "you ran none" in text
+
+
+def test_plan_scorecard_includes_the_reserve_you_set():
+    state = {"reserve_plan_2026-10-25": {"needed_pct": 25, "charge_kwh": 1.5}}
+    text = alerts._plan_scorecard(state, _ScoreStore(hold_level=30), "2026-10-26", datetime(2026, 10, 26, 7, 30))
+    assert "suggested 25%" in text and "held 30%" in text
+    assert state["plan_log"][-1]["reserve_held"] == 30
+
+
+def test_plan_scorecard_is_empty_with_no_plan_and_idempotent_in_the_log():
+    assert alerts._plan_scorecard({}, _ScoreStore(), "2026-10-26", datetime(2026, 10, 26, 7, 30)) == ""
+    state = {"daily_plan_2026-10-25": {"eb_kwh": 0.0, "start_by": 14.0, "window": [14, 23]}}
+    for _ in range(2):
+        alerts._plan_scorecard(state, _ScoreStore(), "2026-10-26", datetime(2026, 10, 26, 7, 30))
+    assert len(state["plan_log"]) == 1
+
+
+def test_reserve_offset_learns_your_usual_margin_but_needs_enough_nights():
+    def log(pairs):
+        return {"plan_log": [{"day": f"2026-10-{i + 1:02d}", "reserve_suggested": s, "reserve_held": h}
+                             for i, (s, h) in enumerate(pairs)]}
+    few = log([(25, 35), (25, 35), (25, 35)])
+    assert alerts._reserve_offset(few) == 0.0
+    enough = log([(25, 35), (25, 30), (30, 40), (25, 35), (20, 30)])
+    assert alerts._reserve_offset(enough) == 10.0                         # median +10
+    capped = log([(20, 60)] * 5)
+    assert alerts._reserve_offset(capped) == 10.0                         # clamped
+    ignored = log([(25, 11)] * 6)                                         # held at the default: not a margin signal
+    assert alerts._reserve_offset(ignored) == 0.0
+
+
+def test_reserve_plan_applies_the_learned_offset():
+    now = datetime(2026, 10, 26, 21, 0)
+    hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0})
+    base = alerts._reserve_plan(now, 50.0, 13.6, hours, floor_pct=10.0)
+    more = alerts._reserve_plan(now, 50.0, 13.6, hours, floor_pct=10.0, offset_pct=10.0)
+    assert more["needed_pct"] == base["needed_pct"] + 10
+
+
+def test_eod_digest_says_what_to_set_the_reserve_to_tonight():
+    now = datetime(2026, 10, 26, 21, 30)
+    hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0})
+    fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
+    state: dict = {}
+    text = alerts._alert_eod_digest(state, "2026-10-26", now, _digest_stats(soc=30.0), Config(), None, fc, None)
+    assert "Tonight" in text and "reserve" in text.lower()
+    assert state["reserve_plan_2026-10-26"]["needed_pct"] > 10
+
+
+def test_morning_alert_carries_the_plan_and_yesterdays_scorecard():
+    now = datetime(2026, 10, 26, 7, 30)
+    fc = _day_forecast(now.date(), _GLOOM, load=0.8, start_hour=7)
+    state = {"daily_plan_2026-10-25": {"eb_kwh": 0.0, "start_by": 14.0, "window": [14, 23]}}
+    msg = alerts._alert_morning_preview(state, "2026-10-26", now, _tracker_c(30.0), None, fc, _ScoreStore(ran_eb=False),
+                                        Config(battery_capacity_kwh=13.6))
+    assert "Today's plan" in msg and "EB:" in msg
+    assert "Yesterday's plan" in msg
+    assert state["daily_plan_2026-10-26"]["eb_kwh"] > 0
+
+
+def test_morning_alert_without_a_forecast_still_sends():
+    now = datetime(2026, 10, 26, 7, 30)
+    msg = alerts._alert_morning_preview({}, "2026-10-26", now, _tracker_c(30.0), None, None, None, Config())
+    assert msg is not None and "Today's plan" not in msg
+
+
+def test_daily_plan_inside_the_window_speaks_of_now_not_of_2_pm():
+    text, _state = _daily_plan_for(soc=70.0, solar=_SUNNY, hour=15, minute=20)
+    assert "now" in text and "by 2 PM" not in text
