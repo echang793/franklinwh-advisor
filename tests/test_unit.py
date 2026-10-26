@@ -9501,7 +9501,7 @@ def _profile(**kw):
 def test_afternoon_scenarios_split_quiet_day_from_car_day():
     now = datetime(2026, 10, 9, 12, 0, 0)
     fc = _scenario_forecast(now)
-    out = alerts._afternoon_scenarios(fc, now, soc=40.0, cap=10.0, profile=_profile(), current_load_kw=0.5)
+    out = alerts._afternoon_scenarios(fc, now, soc=40.0, cap=10.0, profile=_profile(), current_load_kw=0.5, floor_pct=0.0)
     quiet_pct, sundown, _ = out["quiet"]
     # quiet: 12:00 entry keeps the live-anchored 1.4 kW (net +0.1), then 0.4 kW (net +1.1) x5 -> 4.0 + 0.1 + 5.5
     assert quiet_pct == pytest.approx(96.0)
@@ -9867,7 +9867,7 @@ def test_afternoon_profile_reports_a_session_size_range():
     prof = _profile(session_kwh=6.0, session_kwh_lo=3.0, session_kwh_hi=9.0)
     now = datetime(2026, 10, 9, 12, 0, 0)
     fc = _scenario_forecast(now)
-    out = alerts._afternoon_scenarios(fc, now, soc=40.0, cap=20.0, profile=prof, current_load_kw=0.5)
+    out = alerts._afternoon_scenarios(fc, now, soc=40.0, cap=20.0, profile=prof, current_load_kw=0.5, floor_pct=0.0)
     typical = out["with_car"][0]
     small, big = out["with_car_range"]                  # battery % after the small / the big session
     assert big < typical < small
@@ -9882,7 +9882,7 @@ def test_morning_topoff_scenario_applies_only_before_late_morning():
     early = datetime(2026, 10, 9, 6, 0, 0)
     fc = _scenario_forecast(early)
     out = alerts._afternoon_scenarios(fc, early, soc=10.0, cap=40.0, profile=_profile(), current_load_kw=0.5,
-                                      morning=z, morning_done=False)
+                                      morning=z, morning_done=False, floor_pct=0.0)
     assert out["with_morning"] is not None and out["with_morning"][0] < out["quiet"][0]
     assert out["with_morning_range"][1] < out["with_morning"][0] < out["with_morning_range"][0]
     done = alerts._afternoon_scenarios(fc, early, soc=10.0, cap=40.0, profile=_profile(), current_load_kw=0.5,
@@ -10064,7 +10064,8 @@ def _multi_model_response(default, ecmwf, **extra):
         hourly.update(cols("best_match", default))
     if ecmwf:
         hourly.update(cols("ecmwf_ifs025", ecmwf))
-    daily = {"sunrise_best_match": ["2026-10-12T06:50"], "sunrise_ecmwf_ifs025": ["2026-10-12T06:51"]}
+    daily = {"sunrise_best_match": ["2026-10-12T06:50"], "sunrise_ecmwf_ifs025": ["2026-10-12T06:51"],
+             "sunset_best_match": ["2026-10-12T17:58"], "sunset_ecmwf_ifs025": ["2026-10-12T17:59"]}
     return {"hourly": hourly, "daily": daily, "utc_offset_seconds": -25200, **extra}
 
 
@@ -10389,7 +10390,8 @@ def test_fetch_history_weather_blends_models_and_asks_for_the_replay_window(monk
                 cols[f"{var}_best_match"] = [10.0, 20.0]
                 cols[f"{var}_ecmwf_ifs025"] = [30.0, None]
             return {"hourly": {"time": hours, **cols},
-                    "daily": {"time": ["2026-09-01"], "sunrise_best_match": ["2026-09-01T06:30"]},
+                    "daily": {"time": ["2026-09-01"], "sunrise_best_match": ["2026-09-01T06:30"],
+                              "sunset_best_match": ["2026-09-01T19:20"]},
                     "utc_offset_seconds": -25200}
 
     def _get(url, params=None, timeout=None):
@@ -10402,6 +10404,7 @@ def test_fetch_history_weather_blends_models_and_asks_for_the_replay_window(monk
     assert "ecmwf_ifs025" in seen["models"]
     assert wx["hourly"]["direct_radiation"] == [20.0, 20.0]               # (10+30)/2, then the one model with a value
     assert wx["daily"]["sunrise"] == ["2026-09-01T06:30"] and wx["utc_offset_seconds"] == -25200
+    assert wx["daily"]["sunset"] == ["2026-09-01T19:20"] and "sunset" in seen["daily"]
 
 
 def _rec(date, act_kwh, pred_kwh, rem_pred, rem_act):
@@ -10652,7 +10655,7 @@ def test_sundown_shadow_state_is_pruned_with_the_other_date_keyed_entries():
     assert list(kept) == [f"sundown_shadow_{new}"]
 
 
-def _run_send_sundown(tmp_path, current, saved_state=None, hour=12, minute=40):
+def _run_send_sundown(tmp_path, current, saved_state=None, hour=12, minute=40, store=None):
     """Drive /sundown against a canned forecast; returns the message text."""
     import types
     from pathlib import Path
@@ -10675,6 +10678,7 @@ def _run_send_sundown(tmp_path, current, saved_state=None, hour=12, minute=40):
     bot._outdir = tmp_path
     bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(**current))
     bot._usage_forecast = forecast
+    bot._hist_store = store
     sent = {}
     bot._send = lambda chat_id, text: sent.__setitem__("text", text)
     real = chatbot_mod.datetime
@@ -10901,3 +10905,309 @@ def test_reserve_plan_says_when_the_battery_reaches_the_floor_tonight():
     assert 2 <= plan["floor_at"].hour <= 3
     full = alerts._reserve_plan(now, 100.0, 13.6, _night_hours(now, 24, load=0.1, solar_by_hour={8: 1.0}), 10.0)
     assert full["floor_at"] is None
+
+
+# ── the battery reserve is a floor the walks must respect ───────────────
+
+def _drain_forecast(now):
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+    hours = [HourPrediction(dt=now + timedelta(hours=h), predicted_load_kw=3.0,
+                            predicted_solar_kw=0.2 if h == 5 else 0.0, net_kw=-3.0, confidence="high")
+             for h in range(0, 6)]
+    return UsageForecast(hours=hours, total_load_kwh=18.0, total_solar_kwh=0.2,
+                         net_kwh=-17.8, peak_load_kw=3.0, confidence="high", data_days=30)
+
+
+def test_sundown_walk_stops_at_the_reserve_not_at_zero():
+    """The battery will not discharge below its reserve SoC (default 10%); the grid
+    carries the house. Walking on to 0% promised an empty battery that never happens."""
+    now = datetime(2026, 10, 26, 12, 0)
+    fc = _drain_forecast(now)
+    pct, _dt, _exp = alerts._predict_sundown_soc(fc, now, 15.0, 13.6)
+    assert pct == pytest.approx(10.0)
+    pct0, _dt, _exp = alerts._predict_sundown_soc(fc, now, 15.0, 13.6, floor_pct=0.0)
+    assert pct0 == 0.0
+    low, _dt, _exp = alerts._predict_sundown_soc(fc, now, 6.0, 13.6)   # already under the reserve: holds there
+    assert low == pytest.approx(6.0)
+
+
+def test_sundown_walk_honors_a_reserve_set_higher_for_the_night():
+    now = datetime(2026, 10, 26, 12, 0)
+    pct, _dt, _exp = alerts._predict_sundown_soc(_drain_forecast(now), now, 60.0, 13.6, floor_pct=40.0)
+    assert pct == pytest.approx(40.0)
+
+
+def test_overnight_prediction_holds_at_the_reserve():
+    now = datetime(2026, 10, 26, 21, 0)
+    sunrise = datetime(2026, 10, 27, 6, 55)
+    pct, _label = alerts._predict_overnight_soc_flat(now, 30.0, 13.6, 1.0, sunrise)
+    assert pct == pytest.approx(10.0)                                    # 30% - 7 pts/... would hit 0; reserve holds
+    pct, _label = alerts._predict_overnight_soc_flat(now, 6.0, 13.6, 1.0, sunrise)
+    assert pct == pytest.approx(6.0)
+    pct, _label = alerts._predict_overnight_soc_flat(now, 30.0, 13.6, 1.0, sunrise, floor_pct=0.0)
+    assert pct == 0.0
+
+
+def test_config_has_the_default_battery_reserve():
+    assert Config().battery_reserve_pct == 10.0
+
+
+# ── detecting the reserve SoC you set (the battery holds one level for hours) ──
+
+def _night_rows(levels, start="2026-10-09T21:00:00", step_min=5, batt=0.02, grid=1.0):
+    """(timestamp, soc, battery_use_kw, grid_use_kw) every `step_min` minutes."""
+    t0 = datetime.fromisoformat(start)
+    return [((t0 + timedelta(minutes=step_min * i)).isoformat(), lvl, batt, grid) for i, lvl in enumerate(levels)]
+
+
+def test_reserve_hold_finds_the_level_the_battery_sat_at():
+    from franklinwh_scraper.reservehold import detect_reserve_hold
+
+    levels = [60.0 - i for i in range(21)] + [40.0] * 96     # drains ~1h45 to 40%, then holds 8 h
+    hold = detect_reserve_hold(_night_rows(levels))
+    assert hold["level"] == 40
+    assert hold["minutes"] >= 450
+    assert hold["start"].startswith("2026-10-09T22")
+
+
+def test_reserve_hold_needs_the_battery_idle_and_the_grid_carrying_the_house():
+    from franklinwh_scraper.reservehold import detect_reserve_hold
+
+    flat = [40.0] * 100
+    assert detect_reserve_hold(_night_rows(flat, batt=0.4)) is None            # slowly discharging, not held
+    assert detect_reserve_hold(_night_rows(flat, grid=0.0)) is None            # grid not carrying the load
+    assert detect_reserve_hold(_night_rows([40.0] * 12)) is None               # an hour is not a night
+
+
+def test_reserve_hold_tolerates_one_point_of_rounding_but_not_a_slow_slide():
+    from franklinwh_scraper.reservehold import detect_reserve_hold
+
+    wobble = [40.0 if i % 7 else 41.0 for i in range(100)]
+    assert detect_reserve_hold(_night_rows(wobble))["level"] in (40, 41)
+    slide = [50.0 - i * 0.2 for i in range(100)]                              # 20 pts over the night
+    assert detect_reserve_hold(_night_rows(slide)) is None
+
+
+def test_reserve_hold_is_split_by_a_gap_in_the_data():
+    from franklinwh_scraper.reservehold import detect_reserve_hold
+
+    rows = _night_rows([40.0] * 40) + _night_rows([40.0] * 40, start="2026-10-10T03:00:00")
+    hold = detect_reserve_hold(rows)
+    assert hold["minutes"] < 250                                              # not stitched across the 5-hour gap
+
+
+def test_night_readings_returns_the_evening_through_morning(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    for ts, soc in (("2026-10-09T20:00:00", 80.0), ("2026-10-09T22:00:00", 60.0),
+                    ("2026-10-10T03:00:00", 40.0), ("2026-10-10T07:55:00", 40.0), ("2026-10-10T09:00:00", 55.0)):
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,solar_kw,battery_soc,"
+            "grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts, 0, int(ts[11:13]), 1.0, 0.0, soc, 1.0, "normal", 0.0, 0.0))
+    db._conn.commit()
+    rows = db.night_readings("2026-10-10")
+    assert [r[0][11:16] for r in rows] == ["22:00", "03:00", "07:55"]          # 9 PM the night before to 8 AM
+    assert rows[0][1] == 60.0
+    db.close()
+
+
+def test_effective_reserve_is_the_default_unless_a_higher_hold_is_in_progress():
+    now = datetime(2026, 10, 10, 7, 30)
+
+    class _Store:
+        def __init__(self, rows): self.rows = rows
+        def soc_flow_readings(self, start, end): return self.rows
+
+    cfg = Config()                                                    # default reserve 10%
+    held = _night_rows([40.0] * 40, start="2026-10-10T04:15:00")      # held at 40% until 07:25
+    assert alerts._effective_reserve_pct(cfg, _Store(held), now) == 40
+    assert alerts._effective_reserve_pct(cfg, None, now) == 10.0
+    assert alerts._effective_reserve_pct(cfg, _Store([]), now) == 10.0
+    ended = _night_rows([40.0] * 40, start="2026-10-10T01:00:00")     # hold ended hours ago
+    assert alerts._effective_reserve_pct(cfg, _Store(ended), now) == 10.0
+    default_hold = _night_rows([11.0] * 40, start="2026-10-10T04:15:00")
+    assert alerts._effective_reserve_pct(cfg, _Store(default_hold), now) == 10.0   # ~ the default: nothing special
+
+
+def test_effective_reserve_never_raises():
+    class _Broken:
+        def soc_flow_readings(self, a, b): raise RuntimeError("db locked")
+
+    assert alerts._effective_reserve_pct(Config(), _Broken(), datetime(2026, 10, 10, 7, 30)) == 10.0
+
+
+def test_send_reserve_shows_what_the_battery_held_at_recently(tmp_path):
+    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+    hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0})
+    fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
+
+    class _Store:
+        def night_readings(self, day):
+            # every night: drained to 40% and held there
+            return _night_rows([40.0] * 100, start=f"{day}T01:00:00")
+        def soc_flow_readings(self, a, b): return []
+
+    bot, sent = _bot_with(tmp_path, soc=30.0, forecast=fc, store=_Store())
+    bot._send_reserve("1")
+    assert "held at ~40%" in sent["text"]
+    assert "Recent nights" in sent["text"]
+
+
+def test_send_reserve_default_is_the_configured_reserve(tmp_path):
+    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+    hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0})
+    fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
+    bot, sent = _bot_with(tmp_path, soc=30.0, forecast=fc)
+    bot._cfg.battery_reserve_pct = 20.0
+    bot._send_reserve("1")
+    assert "20% reserve" in sent["text"] or "20% floor" in sent["text"]
+
+
+# ── Emergency Backup (grid charging) odds ───────────────────────────────
+
+def _eb_day_rows(day, sessions=()):
+    """A day of 5-minute readings (ts, soc, battery_use_kw, grid_use_kw). `sessions`
+    are (start_hour, polls): importing 2.5 kW while the battery charges at 5 kW."""
+    t0 = datetime.fromisoformat(f"{day}T00:00:00")
+    rows = []
+    for i in range(288):
+        t = t0 + timedelta(minutes=5 * i)
+        on = any(h * 12 <= i < h * 12 + n for h, n in sessions)
+        rows.append((t.isoformat(), 50.0, -5.0 if on else 0.3, 2.5 if on else 0.0))
+    return rows
+
+
+class _EbStore:
+    def __init__(self, with_sessions, hour=11, polls=12, n_days=30, today="2026-10-26"):
+        self.today = datetime.fromisoformat(today).date()
+        self.days = {(self.today - timedelta(days=i)).isoformat(): [(hour, polls)] if i in with_sessions else []
+                     for i in range(1, n_days + 1)}
+
+    def soc_flow_readings(self, start, end):
+        day = start[:10]
+        return _eb_day_rows(day, self.days.get(day, [])) if day in self.days else []
+
+
+def test_find_eb_sessions_needs_a_real_charge_not_a_blip():
+    from franklinwh_scraper.ebpattern import find_eb_sessions
+
+    rows = [(ts, grid, batt) for ts, _soc, batt, grid in _eb_day_rows("2026-10-23", [(11, 12), (15, 2)])]
+    sessions = find_eb_sessions(rows)
+    assert len(sessions) == 1                                   # the 2-poll blip is not a session
+    assert sessions[0]["start"] == datetime(2026, 10, 23, 11, 0)
+    assert sessions[0]["grid_kwh"] == pytest.approx(2.5 * 11 / 12, abs=0.3)   # ~1 h at 2.5 kW from the grid
+
+
+def test_eb_profile_gives_the_odds_and_size_for_the_rest_of_the_day():
+    from franklinwh_scraper.ebpattern import build_eb_profile
+
+    store = _EbStore(with_sessions={2, 5, 9, 13, 20, 26})          # 6 of 30 days
+    prof = build_eb_profile(store, datetime(2026, 10, 26, 9, 0))
+    assert prof.n_days == 30 and prof.n_with == 6
+    assert prof.p == pytest.approx(0.2)
+    assert 2.0 < prof.kwh < 3.0
+
+
+def test_eb_profile_leaves_out_days_where_it_already_happened_by_now():
+    from franklinwh_scraper.ebpattern import build_eb_profile
+
+    store = _EbStore(with_sessions={2, 5, 9, 13, 20, 26})
+    prof = build_eb_profile(store, datetime(2026, 10, 26, 12, 30))   # those days ran EB at 11:00, before now
+    assert prof.n_days == 24 and prof.n_with == 0 and prof.p == 0.0
+
+
+def test_eb_profile_needs_enough_history():
+    from franklinwh_scraper.ebpattern import build_eb_profile
+
+    assert build_eb_profile(_EbStore(with_sessions={2}, n_days=8), datetime(2026, 10, 26, 9, 0)) is None
+
+
+def _eb_profile(**kw):
+    from franklinwh_scraper.ebpattern import EbProfile
+    base = dict(n_days=30, n_with=6, p=0.2, k_weekday=2, n_weekday=4, weekday_name="Monday",
+                kwh=4.0, kwh_lo=2.0, kwh_hi=8.0)
+    base.update(kw)
+    return EbProfile(**base)
+
+
+def test_afternoon_scenarios_add_an_eb_case_with_its_own_range():
+    now = datetime(2026, 10, 9, 9, 0, 0)
+    fc = _scenario_forecast(now)
+    base = alerts._afternoon_scenarios(fc, now, soc=10.0, cap=40.0, profile=None, current_load_kw=0.5, floor_pct=0.0)
+    out = alerts._afternoon_scenarios(fc, now, soc=10.0, cap=40.0, profile=None, current_load_kw=0.5,
+                                      floor_pct=0.0, eb=_eb_profile())
+    assert base["with_eb"] is None
+    typical = out["with_eb"][0]
+    small, big = out["with_eb_range"]
+    assert typical == pytest.approx(out["quiet"][0] + 4.0 / 40.0 * 100)      # +4 kWh of a 40 kWh pack
+    assert small < typical < big                                              # 2 kWh < 4 kWh < 8 kWh
+
+
+def test_afternoon_scenarios_cap_the_eb_case_at_full():
+    now = datetime(2026, 10, 9, 9, 0, 0)
+    out = alerts._afternoon_scenarios(_scenario_forecast(now), now, soc=95.0, cap=40.0, profile=None,
+                                      current_load_kw=0.5, floor_pct=0.0, eb=_eb_profile(kwh=30.0))
+    assert out["with_eb"][0] <= 100.0
+
+
+def test_send_sundown_offers_the_emergency_backup_case_with_the_odds(tmp_path):
+    store = _EbStore(with_sessions={2, 4, 6, 8, 11, 14, 17, 20, 23, 26}, hour=13, today="2026-07-15")
+    text = _run_send_sundown(tmp_path, {"battery_soc_pct": 20.0}, store=store)
+    assert "Emergency Backup" in text
+    assert "10 of 30" in text                       # how often you have, on days like this one
+    assert "kWh" in text
+
+
+def test_send_sundown_leaves_out_the_eb_case_when_it_is_rare_or_already_happening(tmp_path):
+    rare = _EbStore(with_sessions={2}, hour=13, today="2026-07-15")                 # 1 of 30: under 10%
+    assert "Emergency Backup" not in _run_send_sundown(tmp_path, {"battery_soc_pct": 20.0}, store=rare)
+    often = _EbStore(with_sessions={2, 4, 6, 8, 11, 14, 17, 20, 23, 26}, hour=13, today="2026-07-15")
+    now_charging = {"battery_soc_pct": 20.0, "battery_use_kw": -5.0, "grid_use_kw": 2.6}
+    text = _run_send_sundown(tmp_path, now_charging, store=often)
+    assert "Charging from the grid" in text and "If you top up with Emergency Backup" not in text
+
+
+def test_outlook_knows_todays_sunset(monkeypatch):
+    from datetime import date
+
+    a = {"direct": [0, 100, 300], "diffuse": [0, 10, 30], "cloud": [10, 20, 30], "temp": [10.0, 12.0, 14.0], "wind": [1.0, 1.0, 1.0]}
+    out, seen = _fetch_with(monkeypatch, _multi_model_response(a, a))
+    assert "sunset" in seen["daily"]
+    assert out.sunset_on(date(2026, 10, 12)) == datetime(2026, 10, 12, 17, 58)      # first model's, like sunrise
+    assert out.sunset_on(date(2026, 10, 13)) is None
+
+
+def _sunset_forecast(now, sunny_hours=6):
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+    hours = [HourPrediction(dt=now + timedelta(hours=h), predicted_load_kw=1.0,
+                            predicted_solar_kw=3.0 if h < sunny_hours else 0.0, net_kw=2.0, confidence="high")
+             for h in range(0, 9)]
+    return UsageForecast(hours=hours, total_load_kwh=9.0, total_solar_kwh=18.0,
+                         net_kwh=9.0, peak_load_kw=1.0, confidence="high", data_days=30)
+
+
+def test_sundown_is_the_real_sunset_with_the_last_hour_cut_to_fit():
+    now = datetime(2026, 10, 26, 12, 14)
+    sunset = datetime(2026, 10, 26, 15, 44)                          # 3.5 h away
+    pct, dt, _exp = alerts._predict_sundown_soc(_sunset_forecast(now), now, 10.0, 40.0, floor_pct=0.0, sunset=sunset)
+    assert dt == sunset
+    # three whole hours of +2 kW and a half hour of +1 kW: 10% + (6 + 1) / 40 kWh
+    assert pct == pytest.approx(10.0 + 7.0 / 40.0 * 100)
+
+
+def test_sundown_falls_back_to_the_last_sunny_hour_without_a_sunset():
+    now = datetime(2026, 10, 26, 12, 14)
+    _pct, dt, _exp = alerts._predict_sundown_soc(_sunset_forecast(now), now, 10.0, 40.0, floor_pct=0.0)
+    assert dt == now + timedelta(hours=6)                            # last sunny entry (5) + 1 h
+    _pct, dt, _exp = alerts._predict_sundown_soc(_sunset_forecast(now), now, 10.0, 40.0, floor_pct=0.0,
+                                                 sunset=now - timedelta(hours=1))   # an old sunset is ignored
+    assert dt == now + timedelta(hours=6)
+
+
+def test_sunset_today_helper_reads_the_outlook_when_it_can():
+    now = datetime(2026, 10, 26, 12, 14)
+    sunset = datetime(2026, 10, 26, 17, 46)
+    outlook = type("O", (), {"sunset_on": lambda self, d: sunset})()
+    assert alerts._sunset_today(outlook, now) == sunset
+    assert alerts._sunset_today(None, now) is None
+    assert alerts._sunset_today(object(), now) is None               # an outlook without the method

@@ -49,7 +49,7 @@ def fetch_history_weather(lat: float, lon: float, first: str, last: str, timeout
     forecast uses. Returns {"hourly", "daily", "utc_offset_seconds"}."""
     end = (_RealDT.fromisoformat(last) + timedelta(days=2)).strftime("%Y-%m-%d")
     params = {"latitude": lat, "longitude": lon, "start_date": first, "end_date": end,
-              "hourly": _VARS, "daily": "sunrise", "models": ",".join(weather._FORECAST_MODELS),
+              "hourly": _VARS, "daily": "sunrise,sunset", "models": ",".join(weather._FORECAST_MODELS),
               "timezone": "auto"}
     # The archive sometimes answers HTTP 200 with a plain-text error ("Unexpected error
     # while streaming data: timeoutReached") instead of JSON; the same request works a
@@ -76,7 +76,9 @@ def fetch_history_weather(lat: float, lon: float, first: str, last: str, timeout
     daily_raw = js.get("daily", {})
     sunrise = daily_raw.get("sunrise") or next(
         (daily_raw[f"sunrise_{m}"] for m in weather._FORECAST_MODELS if daily_raw.get(f"sunrise_{m}")), [])
-    return {"hourly": hourly, "daily": {"time": daily_raw.get("time", []), "sunrise": sunrise},
+    sunset = daily_raw.get("sunset") or next(
+        (daily_raw[f"sunset_{m}"] for m in weather._FORECAST_MODELS if daily_raw.get(f"sunset_{m}")), [])
+    return {"hourly": hourly, "daily": {"time": daily_raw.get("time", []), "sunrise": sunrise, "sunset": sunset},
             "utc_offset_seconds": js.get("utc_offset_seconds", 0)}
 
 
@@ -127,6 +129,7 @@ def run_replay(db_path: Path, wx: dict, first: str, last: str) -> dict:
     H = wx["hourly"]
     idx = {t: i for i, t in enumerate(H["time"])}
     sunrise_by_day = dict(zip(wx["daily"]["time"], wx["daily"]["sunrise"]))
+    sunset_by_day = dict(zip(wx["daily"]["time"], wx["daily"].get("sunset", [])))
     store = HistoryStore(Path(db_path))
     conn = sqlite3.connect(str(db_path))
     rows = conn.execute(
@@ -145,7 +148,9 @@ def run_replay(db_path: Path, wx: dict, first: str, last: str) -> dict:
         i0 = idx[d0.strftime("%Y-%m-%dT00:00")]
         sl = slice(i0, i0 + 72)
         js = {"hourly": {k: H[k][sl] for k in H},
-              "daily": {"sunrise": [sunrise_by_day[(d0 + timedelta(days=n)).strftime("%Y-%m-%d")] for n in range(3)]},
+              "daily": {"sunrise": [sunrise_by_day[(d0 + timedelta(days=n)).strftime("%Y-%m-%d")] for n in range(3)],
+                        "sunset": [sunset_by_day[k] for k in (
+                            (d0 + timedelta(days=n)).strftime("%Y-%m-%d") for n in range(3)) if k in sunset_by_day]},
               "utc_offset_seconds": wx["utc_offset_seconds"]}
         if len(js["hourly"]["time"]) != 72:
             raise KeyError(day)

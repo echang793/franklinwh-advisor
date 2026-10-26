@@ -101,6 +101,17 @@ class SolarOutlook:
     # prediction / morning-preview window at real sunrise instead of a
     # fixed clock hour — DST-proof by construction (2026-08-17).
     sunrise_times: list[datetime] = field(default_factory=list)
+    # Same shape, for sunset: lets /sundown mean the real sunset instead of "an hour
+    # after the last forecast hour with sun".
+    sunset_times: list[datetime] = field(default_factory=list)
+
+    def sunset_on(self, d) -> datetime | None:
+        """Sunset datetime for date `d`, or None if outside the forecast window."""
+        target = d.date() if isinstance(d, datetime) else d
+        for t in self.sunset_times:
+            if t.date() == target:
+                return t
+        return None
 
     def sunrise_on(self, d) -> datetime | None:
         """Sunrise datetime for date `d` (a date or datetime), or None if
@@ -377,7 +388,7 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
                 "latitude": lat,
                 "longitude": lon,
                 "hourly": "direct_radiation,diffuse_radiation,cloud_cover,temperature_2m,wind_speed_10m",
-                "daily": "sunrise",
+                "daily": "sunrise,sunset",
                 "forecast_days": 3,  # today + tomorrow + day after (multi-day alerts)
                 "timezone": "auto",
                 "models": ",".join(_FORECAST_MODELS),
@@ -422,11 +433,14 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
     sunrise_raw = daily.get("sunrise") or next(
         (daily[f"sunrise_{m}"] for m in _FORECAST_MODELS if daily.get(f"sunrise_{m}")), [])
     sunrise_times = [datetime.fromisoformat(s) for s in sunrise_raw if s]
+    sunset_raw = daily.get("sunset") or next(
+        (daily[f"sunset_{m}"] for m in _FORECAST_MODELS if daily.get(f"sunset_{m}")), [])
+    sunset_times = [datetime.fromisoformat(s) for s in sunset_raw if s]
 
     logger.debug("Fetched %d hourly forecasts for %.4f, %.4f", len(hours), lat, lon)
     return SolarOutlook(
         hours=hours, utc_offset_seconds=js.get("utc_offset_seconds", 0),
-        sunrise_times=sunrise_times,
+        sunrise_times=sunrise_times, sunset_times=sunset_times,
     )
 
 

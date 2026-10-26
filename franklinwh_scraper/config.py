@@ -90,6 +90,11 @@ class Config:
     # home load alone would already drain below it, EV charging isn't the
     # variable, so "with EV" just matches the no-EV baseline.
     ev_charge_floor_soc: float = 10.0
+    # The battery's reserve SoC: the level it stops discharging at, with the grid
+    # carrying the house below it. The owner's default is 10% (2026-10-26); some
+    # nights it is set higher before charging (visible as the battery holding one
+    # level for hours). Projection walks stop here instead of at 0%.
+    battery_reserve_pct: float = 10.0
     # The car itself, for /evroom's home-kWh -> car-% conversion. Defaults fit
     # a 2023 Tesla Model Y dual motor charged to 80%:
     #   ev_pack_kwh 75 -- US Long Range AWD usable capacity (gross ~78-82; Tesla

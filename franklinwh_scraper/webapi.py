@@ -608,7 +608,7 @@ def api_ev():
                     checkpoint = _next_sunrise_after(now, outlook)
                     without_ov = _predict_overnight_soc_flat(
                         now, soc, _BAT_CAP, getattr(_cfg, "no_ev_baseline_load_kw", 0.4),
-                        checkpoint,
+                        checkpoint, getattr(_cfg, "battery_reserve_pct", 10.0),
                     )
                     # Charge-to-floor, not fixed-kW-all-night — same model
                     # and rationale as alerts.py's _alert_eod_digest.

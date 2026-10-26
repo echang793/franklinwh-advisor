@@ -321,6 +321,21 @@ class HistoryStore:
         ).fetchall()
         return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
 
+    def soc_flow_readings(self, start_iso: str, end_iso: str) -> list[tuple[str, float, float, float]]:
+        """(timestamp, battery_soc, battery_use_kw, grid_use_kw) in [start, end), oldest
+        first: what reservehold.detect_reserve_hold reads."""
+        rows = self._conn.execute(
+            "SELECT timestamp, battery_soc, battery_use_kw, grid_use_kw FROM readings "
+            "WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+            (start_iso, end_iso),
+        ).fetchall()
+        return [(r[0], float(r[1]), float(r[2]), float(r[3])) for r in rows]
+
+    def night_readings(self, day: str) -> list[tuple[str, float, float, float]]:
+        """The night that ends on `day`: 9 PM the evening before to 8 AM."""
+        prev = (datetime.fromisoformat(day) - timedelta(days=1)).strftime("%Y-%m-%d")
+        return self.soc_flow_readings(f"{prev}T21:00:00", f"{day}T08:00:00")
+
     def grid_charged_between(self, start_iso: str, end_iso: str, min_readings: int = 2) -> bool:
         """True if the battery charged FROM THE GRID in [start, end): at least
         `min_readings` polls (about 10 minutes at the 5-minute cadence) importing

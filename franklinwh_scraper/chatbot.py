@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _MAX_TURNS   = 10   # conversation turns kept per chat
 _MODEL       = "claude-haiku-4-5-20251001"
 _DAILY_CALL_CAP = 50  # max chatbot API calls per day (single-user home app)
+_EB_CASE_MIN_ODDS = 0.10  # /sundown offers the Emergency Backup case only when it happens on >=10% of days like this
 
 
 _soc_bar     = soc_bar
@@ -1078,9 +1079,10 @@ class TelegramChatBot:
             from pathlib import Path
 
             from .alerts import (_afternoon_profile, _afternoon_scenarios, _get_sundown_bias,
-                                 _live_anchored_forecast, _load_peak_state,
+                                 _effective_reserve_pct, _live_anchored_forecast, _load_peak_state,
                                  _save_peak_state, _spike_started_today, _state_lock,
-                                 _sundown_band, _zone_stats)
+                                 _sundown_band, _sunset_today, _zone_stats)
+            from .ebpattern import build_eb_profile
             from .tou import peak_export_hour
 
             out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
@@ -1103,8 +1105,17 @@ class TelegramChatBot:
             profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
             morning = _zone_stats(store, now.date(), (5, 11), state.get("load_labels"))
             morning_done = _spike_started_today(store, now, (5, 11))
+            # Emergency Backup is the owner's call, so it is offered as a case with its odds,
+            # not folded into the headline; and not while it is already running.
+            batt_kw = getattr(c, "battery_use_kw", 0.0) or 0.0
+            charging_from_grid = batt_kw <= -1.0 and (getattr(c, "grid_use_kw", 0.0) or 0.0) >= 0.5
+            eb_profile = None if charging_from_grid or now.hour >= 17 else build_eb_profile(store, now)
+            if eb_profile is not None and eb_profile.p < _EB_CASE_MIN_ODDS:
+                eb_profile = None
             sc = _afternoon_scenarios(live_forecast, now, soc, cap, profile, getattr(c, "home_load_kw", None),
-                                      morning=morning, morning_done=morning_done)
+                                      morning=morning, morning_done=morning_done,
+                                      floor_pct=_effective_reserve_pct(self._cfg, store, now), eb=eb_profile,
+                                      sunset=_sunset_today(outlook, now))
             projection = sc["quiet"]
             if projection is None:
                 self._send(chat_id, "☀️ Looks like solar generation for today is already done (or not enough forecast data left today).")
@@ -1179,12 +1190,20 @@ class TelegramChatBot:
                 car_str += (f"\n🌅 If you top off this morning ({morning.weekday_name}s {morning.k_weekday} of "
                             f"{morning.n_weekday}; {msize}): ~<b>{_pct(sc['with_morning'][0]):.0f}%</b>"
                             f"{_spread(sc['with_morning_range'])}")
+            if eb_profile is not None and sc["with_eb"] is not None:
+                size = f"typically ~{eb_profile.kwh:.1f} kWh from the grid"
+                if eb_profile.kwh_lo is not None:
+                    size += f", usually {eb_profile.kwh_lo:.1f}–{eb_profile.kwh_hi:.1f}"
+                wd = (f"; {eb_profile.weekday_name}s {eb_profile.k_weekday} of {eb_profile.n_weekday}"
+                      if eb_profile.n_weekday >= 3 else "")
+                car_str += (f"\n⚡ If you top up with Emergency Backup (you did on {eb_profile.n_with} of "
+                            f"{eb_profile.n_days} days like this{wd}; {size}): "
+                            f"~<b>{_pct(sc['with_eb'][0]):.0f}%</b>{_spread(sc['with_eb_range'])}")
             label = " (quiet afternoon)" if profile is not None else ""
             # Grid charging (Emergency Backup) isn't in the solar-minus-load walk.
             # Say so while it's happening, with what an hour of it is worth.
             eb_str = ""
-            batt_kw = getattr(c, "battery_use_kw", 0.0) or 0.0
-            if batt_kw <= -1.0 and (getattr(c, "grid_use_kw", 0.0) or 0.0) >= 0.5:
+            if charging_from_grid:
                 eb_str = (f"\n⚡ Charging from the grid right now (+{-batt_kw:.1f} kW into the battery). "
                           f"This projection leaves that out; each hour of it adds ~{-batt_kw / cap * 100:.0f}% (up to 100%).")
             # How far past projections landed from the number at this time of day.
@@ -1248,6 +1267,7 @@ class TelegramChatBot:
         """/reserve: what to charge the battery to overnight so the morning needs no grid."""
         try:
             from .alerts import _live_anchored_forecast, _reserve_plan
+            from .reservehold import detect_reserve_hold
             from .tou import rate_at
             stats, forecast, outlook, store, state = self._snapshot_for_report()
             if stats is None:
@@ -1258,7 +1278,7 @@ class TelegramChatBot:
                 return
             cfg = self._cfg
             cap = getattr(cfg, "battery_capacity_kwh", 13.6)
-            floor = getattr(cfg, "ev_charge_floor_soc", 10.0)
+            floor = getattr(cfg, "battery_reserve_pct", 10.0)
             c = stats.current
             now = datetime.now()
             live = _live_anchored_forecast(state, c, outlook, forecast, store)
@@ -1285,6 +1305,26 @@ class TelegramChatBot:
                              f"(~{plan['charge_kwh']:.1f} kWh from the grid, ~${cost:.2f} at the 1 AM rate).")
             lines.append(f"<i>That is the {floor:.0f}% floor + the {plan['morning_gap_kwh']:.1f} kWh the battery carries "
                          f"from 6 AM until solar takes over + a 0.5 kWh margin, rounded up to 5%.</i>")
+            # What the battery actually did: a long flat stretch at one SoC is the reserve setting.
+            if store is not None:
+                holds = []
+                for i in range(0 if now.hour >= 8 else 1, 6):
+                    day = now.date() - timedelta(days=i)
+                    try:
+                        hold = detect_reserve_hold(store.night_readings(day.isoformat()))
+                    except Exception:
+                        hold = None
+                    holds.append((day, hold))
+                if holds and holds[0][1] is not None:
+                    h = holds[0][1]
+                    kind = ("raised above your default" if h["level"] > floor + 2 else "your default reserve")
+                    lines.append(f"🕒 {'Last night' if holds[0][0] == now.date() else 'The night before'} the battery "
+                                 f"held at ~{h['level']}% from {datetime.fromisoformat(h['start']).strftime('%-I:%M %p')} to "
+                                 f"{datetime.fromisoformat(h['end']).strftime('%-I:%M %p')} ({kind}).")
+                if holds:
+                    recent = " · ".join(f"{d.strftime('%a')} {h['level']}%" if h else f"{d.strftime('%a')} –"
+                                        for d, h in holds)
+                    lines.append(f"Recent nights: {recent}")
             self._send(chat_id, "\n".join(lines))
         except Exception as e:
             logger.warning("_send_reserve error: %s", e)
@@ -1311,9 +1351,10 @@ class TelegramChatBot:
 
             from pathlib import Path
 
-            from .alerts import (_afternoon_profile, _afternoon_scenarios, _ev_car_gain_pct,
-                                 _ev_room_plan, _get_sundown_bias, _live_anchored_forecast,
-                                 _load_peak_state, _next_sunrise_after, _zone_stats)
+            from .alerts import (_afternoon_profile, _afternoon_scenarios, _effective_reserve_pct,
+                                 _ev_car_gain_pct, _ev_room_plan, _get_sundown_bias,
+                                 _live_anchored_forecast, _load_peak_state, _next_sunrise_after,
+                                 _sunset_today, _zone_stats)
 
             cfg = self._cfg
             cap = getattr(cfg, "battery_capacity_kwh", 13.6)
@@ -1325,7 +1366,9 @@ class TelegramChatBot:
             live = _live_anchored_forecast(state, c, outlook, forecast, store)
             profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
             projection = _afternoon_scenarios(live, now, c.battery_soc_pct, cap, profile,
-                                              getattr(c, "home_load_kw", None))["quiet"]
+                                              getattr(c, "home_load_kw", None),
+                                              floor_pct=_effective_reserve_pct(cfg, store, now),
+                                              sunset=_sunset_today(outlook, now))["quiet"]
             if projection is None:
                 self._send(chat_id, "☀️ Today's solar is already done, so there's no surplus to plan around. "
                                     "Ask again tomorrow morning, or use /sundown H for the next few hours.")

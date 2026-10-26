@@ -162,6 +162,9 @@ def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
         return max(_ewma(samples), 0.60)
 
 
+# The battery will not discharge below its reserve SoC (the owner's default is 10%);
+# below it the grid carries the house. Projection walks stop here, not at 0%.
+DEFAULT_RESERVE_PCT = 10.0
 _SUNDOWN_BIAS_CAP = 25  # ~a month of graded /sundown calls (not every day has one)
 _SUNDOWN_BIAS_MIN_SAMPLES = 5
 _SUNDOWN_BIAS_MAX_PTS = 10.0
@@ -217,6 +220,31 @@ def _record_sundown_bias(state: dict, delta: float) -> None:
     state["sundown_bias_epoch"] = SOLAR_MODEL_EPOCH
 
 
+_ACTIVE_HOLD_MINUTES = 45      # a hold in progress needs less proof than a finished night
+_ACTIVE_HOLD_FRESH = timedelta(minutes=20)
+
+
+def _effective_reserve_pct(cfg, store, now: datetime) -> float:
+    """The reserve the battery is honoring right now: the configured default (10%),
+    or a higher level if the battery has been holding one for the last stretch (the
+    reserve was raised for a night grid charge and not lowered yet). Walks floor
+    here, so a morning held at 40% is projected as held, not as draining to 10%.
+    Fail-open to the default."""
+    default = getattr(cfg, "battery_reserve_pct", DEFAULT_RESERVE_PCT)
+    if store is None:
+        return default
+    try:
+        from .reservehold import detect_reserve_hold
+        rows = store.soc_flow_readings((now - timedelta(hours=4)).isoformat(), now.isoformat())
+        hold = detect_reserve_hold(rows, min_minutes=_ACTIVE_HOLD_MINUTES) if rows else None
+    except Exception:
+        logger.debug("reserve hold detection unavailable", exc_info=True)
+        return default
+    if hold and now - datetime.fromisoformat(hold["end"]) <= _ACTIVE_HOLD_FRESH and hold["level"] > default + 2:
+        return float(hold["level"])
+    return default
+
+
 # ── /sundown tracker ─────────────────────────────────────────────────
 # /sundown used to be graded only on days it was asked for (one sample a day at
 # a random time). The tracker snapshots the same projection automatically at
@@ -252,7 +280,7 @@ def _record_sundown_resid(state: dict, entry: dict) -> None:
 
 
 def _snapshot_sundown(state: dict, today: str, now: datetime, c, outlook, usage_forecast, store,
-                      cap: float) -> None:
+                      cap: float, floor_pct: float = DEFAULT_RESERVE_PCT) -> None:
     for h, m in _SUNDOWN_SLOTS:
         slot_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
         key = _slot_key(h, m)
@@ -266,7 +294,8 @@ def _snapshot_sundown(state: dict, today: str, now: datetime, c, outlook, usage_
             return
         profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
         quiet = _afternoon_scenarios(live, now, c.battery_soc_pct, cap, profile,
-                                     getattr(c, "home_load_kw", None))["quiet"]
+                                     getattr(c, "home_load_kw", None), floor_pct=floor_pct,
+                                     sunset=_sunset_today(outlook, now))["quiet"]
         if quiet is None:
             if not shots:
                 state.pop(f"sundown_shadow_{today}", None)
@@ -305,12 +334,12 @@ def _grade_sundown_snapshots(state: dict, now: datetime, store) -> None:
 
 
 def _alert_sundown_tracker(state: dict, today: str, now: datetime, c, outlook, usage_forecast, store,
-                           cap: float | None = None) -> None:
+                           cap: float | None = None, floor_pct: float = DEFAULT_RESERVE_PCT) -> None:
     """Not an alert: runs every cycle to snapshot and grade /sundown. Never raises
     into the alert loop's other candidates (the loop isolates each, and a failure
     here only costs a data point)."""
     cap = cap or _BATTERY_CAPACITY_KWH
-    _snapshot_sundown(state, today, now, c, outlook, usage_forecast, store, cap)
+    _snapshot_sundown(state, today, now, c, outlook, usage_forecast, store, cap, floor_pct)
     _grade_sundown_snapshots(state, now, store)
     return None
 
@@ -2263,6 +2292,7 @@ _NO_EV_RANGE_HIGH_KW = 0.5   # more draw -> more discharge -> lower SoC bound
 
 def _predict_overnight_soc_flat(
     now: datetime, soc: float, bat_cap: float, baseline_kw: float, checkpoint: datetime,
+    floor_pct: float = DEFAULT_RESERVE_PCT,
 ) -> tuple[float, str]:
     """Predicted SoC at `checkpoint` (the next sunrise — see
     _next_sunrise_after) assuming a constant baseline_kw draw the whole
@@ -2280,12 +2310,26 @@ def _predict_overnight_soc_flat(
     apart within the same call.
     """
     hours = max(0.0, (checkpoint - now).total_seconds() / 3600.0)
-    pred_pct = max(0.0, min(100.0, soc - baseline_kw * hours / bat_cap * 100))
+    # The reserve is a floor: the battery holds there and the grid carries the house
+    # (a battery already below it just stays where it is).
+    pred_pct = max(min(soc, floor_pct), min(100.0, soc - baseline_kw * hours / bat_cap * 100))
     return pred_pct, checkpoint.strftime("%-I:%M %p")
+
+
+def _sunset_today(outlook, now: datetime) -> datetime | None:
+    """Today's sunset from the weather outlook, or None when it isn't available."""
+    fn = getattr(outlook, "sunset_on", None)
+    if fn is None:
+        return None
+    try:
+        return fn(now.date())
+    except Exception:
+        return None
 
 
 def _predict_sundown_soc(
     usage_forecast, now: datetime, soc: float, bat_cap: float,
+    floor_pct: float = DEFAULT_RESERVE_PCT, sunset: datetime | None = None,
 ) -> tuple[float, datetime, float] | None:
     """Raw predicted SoC at today's sundown (the forecast's last hour still
     expecting meaningful solar), or None if there's no solar hour left
@@ -2327,16 +2371,24 @@ def _predict_sundown_soc(
     # takes that whole interval, so naming its start (an hour early) would
     # also make the accuracy check compare against the battery too soon.
     sundown_dt = today_sun_hours[-1].dt + one_hour
+    # The real sunset, when the weather source gave one and it is still ahead: "sundown"
+    # then means the same moment every time it is asked, not the request time plus
+    # however many whole hours the forecast has sun. The hour that sunset cuts through
+    # counts only as far as sunset (below).
+    if sunset is not None and sunset > now:
+        sundown_dt = sunset
 
     kwh = soc / 100.0 * bat_cap
+    floor_kwh = min(kwh, floor_pct / 100.0 * bat_cap)   # the reserve: the grid carries the house below it
     export_kwh = 0.0
     for h in usage_forecast.hours:
         if h.dt + one_hour <= now or h.dt >= sundown_dt:
             continue
-        new_kwh = kwh + h.predicted_solar_kw - h.predicted_load_kw
+        frac = min(1.0, (sundown_dt - h.dt).total_seconds() / 3600.0)   # sunset cuts the last hour short
+        new_kwh = kwh + (h.predicted_solar_kw - h.predicted_load_kw) * frac
         if new_kwh > bat_cap:
             export_kwh += new_kwh - bat_cap
-        kwh = max(0.0, min(bat_cap, new_kwh))
+        kwh = max(floor_kwh, min(bat_cap, new_kwh))
 
     return kwh / bat_cap * 100.0, sundown_dt, export_kwh
 
@@ -2380,7 +2432,8 @@ def _add_session_load(hours: list, idx: list[int], sundown_dt: datetime, kw: flo
 
 def _afternoon_scenarios(
     live_forecast, now: datetime, soc: float, cap: float, profile, current_load_kw: float | None,
-    morning=None, morning_done: bool = False,
+    morning=None, morning_done: bool = False, floor_pct: float = DEFAULT_RESERVE_PCT, eb=None,
+    sunset: datetime | None = None,
 ) -> dict:
     """Today's sundown walk as outcomes instead of one blended guess.
 
@@ -2399,7 +2452,8 @@ def _afternoon_scenarios(
     import dataclasses
 
     empty = {"quiet": None, "with_car": None, "with_car_range": None,
-             "with_morning": None, "with_morning_range": None, "car_now": False}
+             "with_morning": None, "with_morning_range": None, "car_now": False,
+             "with_eb": None, "with_eb_range": None}
     if not live_forecast.hours:
         return empty
     one_hour = timedelta(hours=1)
@@ -2412,14 +2466,26 @@ def _afternoon_scenarios(
             if quiet is not None:
                 hours[i] = dataclasses.replace(hours[i], predicted_load_kw=quiet)
     quiet_fc = dataclasses.replace(live_forecast, hours=hours)
-    out = dict(empty, quiet=_predict_sundown_soc(quiet_fc, now, soc, cap))
+    out = dict(empty, quiet=_predict_sundown_soc(quiet_fc, now, soc, cap, floor_pct, sunset))
     if out["quiet"] is None:
         return out
     sundown_dt = out["quiet"][1]
 
+    if eb is not None and eb.kwh > 0:
+        # Emergency Backup tops the battery up from the grid: the same quiet walk from a
+        # higher start (the walk clips at full, so a full battery gains nothing).
+        def eb_walk(kwh: float):
+            return _predict_sundown_soc(quiet_fc, now, min(100.0, soc + kwh / cap * 100.0), cap, floor_pct, sunset)
+
+        out["with_eb"] = eb_walk(eb.kwh)
+        if out["with_eb"] and eb.kwh_lo is not None and eb.kwh_hi is not None:
+            small, big = eb_walk(eb.kwh_lo), eb_walk(eb.kwh_hi)
+            if small and big:
+                out["with_eb_range"] = (small[0], big[0])
+
     def walk(kw: float, duration_h: float):
         fc = dataclasses.replace(live_forecast, hours=_add_session_load(hours, today_idx, sundown_dt, kw, duration_h))
-        return _predict_sundown_soc(fc, now, soc, cap)
+        return _predict_sundown_soc(fc, now, soc, cap, floor_pct, sunset)
 
     def case(kw: float, duration_h: float, kwh: float, lo: float | None, hi: float | None):
         typical = walk(kw, duration_h)
@@ -2746,7 +2812,7 @@ def _sundown_projection_line(
     live_forecast = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
     if live_forecast is None:
         return ""
-    projection = _predict_sundown_soc(live_forecast, now, c.battery_soc_pct, cap)
+    projection = _predict_sundown_soc(live_forecast, now, c.battery_soc_pct, cap, sunset=_sunset_today(outlook, now))
     if projection is None:
         return ""
     raw_pct, sundown_dt, _export_kwh = projection
@@ -2855,8 +2921,9 @@ def _alert_eod_digest(
     # this line came back.
     soc_6am_str = ""
     checkpoint_dt = _next_sunrise_after(now, outlook)
+    reserve = getattr(cfg, "battery_reserve_pct", DEFAULT_RESERVE_PCT)
     overnight = _predict_overnight_soc_flat(
-        now, soc, bat_cap, getattr(cfg, "no_ev_baseline_load_kw", 0.4), checkpoint_dt,
+        now, soc, bat_cap, getattr(cfg, "no_ev_baseline_load_kw", 0.4), checkpoint_dt, reserve,
     )
     if overnight is not None:
         pred_soc_6am, hour_label = overnight
@@ -2868,9 +2935,9 @@ def _alert_eod_digest(
         # SoC accuracy" line can grade against a range instead of the single
         # 0.4 kW point, by request 2026-08-24.
         low_pct, _  = _predict_overnight_soc_flat(
-            now, soc, bat_cap, _NO_EV_RANGE_HIGH_KW, checkpoint_dt)  # more draw -> lower bound
+            now, soc, bat_cap, _NO_EV_RANGE_HIGH_KW, checkpoint_dt, reserve)  # more draw -> lower bound
         high_pct, _ = _predict_overnight_soc_flat(
-            now, soc, bat_cap, _NO_EV_RANGE_LOW_KW, checkpoint_dt)   # less draw -> upper bound
+            now, soc, bat_cap, _NO_EV_RANGE_LOW_KW, checkpoint_dt, reserve)   # less draw -> upper bound
         state[f"soc_7am_pred_{checkpoint_dt.strftime('%Y-%m-%d')}"] = {
             "pct": pred_soc_6am, "low_pct": low_pct, "high_pct": high_pct,
             "dt": checkpoint_dt.isoformat(), "made_at": now.isoformat(),
@@ -4736,7 +4803,8 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("car_charge_started",   lambda: _alert_car_charge_started(state, today, now, c, cfg, store)),
             ("solar_backtest",       lambda: _maybe_launch_monthly_backtest(state, now, cfg)),
             ("sundown_tracker",      lambda: _alert_sundown_tracker(state, today, now, c, outlook, usage_forecast, store,
-                                                                    cfg.battery_capacity_kwh)),
+                                                                    cfg.battery_capacity_kwh,
+                                                                    _effective_reserve_pct(cfg, store, now))),
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),
