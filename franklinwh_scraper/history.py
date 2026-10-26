@@ -321,6 +321,19 @@ class HistoryStore:
         ).fetchall()
         return {(int(r[0]), int(r[1])): float(r[2]) for r in rows}
 
+    def grid_charged_between(self, start_iso: str, end_iso: str, min_readings: int = 2) -> bool:
+        """True if the battery charged FROM THE GRID in [start, end): at least
+        `min_readings` polls (about 10 minutes at the 5-minute cadence) importing
+        over 0.5 kW while the battery was charging over 0.5 kW. That is Emergency
+        Backup / a grid top-off, as opposed to the house simply using grid power
+        (battery idle or discharging). A single poll is a blip, not a session."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM readings WHERE timestamp >= ? AND timestamp < ? "
+            "AND grid_use_kw > 0.5 AND battery_use_kw < -0.5",
+            (start_iso, end_iso),
+        ).fetchone()
+        return bool(row and row[0] >= min_readings)
+
     def readings_between(
         self, start_iso: str, end_iso: str
     ) -> list[tuple[str, float, float, float]]:

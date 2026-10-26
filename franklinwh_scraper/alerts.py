@@ -163,6 +163,8 @@ def _get_performance_ratio(state: dict, cloudy: bool = False) -> float:
 
 
 _SUNDOWN_BIAS_CAP = 25  # ~a month of graded /sundown calls (not every day has one)
+_SUNDOWN_BIAS_MIN_SAMPLES = 5
+_SUNDOWN_BIAS_MAX_PTS = 10.0
 
 
 def _get_sundown_bias(state: dict) -> float:
@@ -170,18 +172,23 @@ def _get_sundown_bias(state: dict) -> float:
     /sundown's raw projection, or 0.0 until enough graded samples exist.
 
     Additive, not the multiplicative-ratio EWMA `perf_ratio`/`hourly_bias`
-    use — those correct open-ended kWh values, this corrects a 0-100%
+    use -- those correct open-ended kWh values, this corrects a 0-100%
     quantity where a ratio breaks down near 0. Samples are `actual - raw`
     deltas recorded once per graded /sundown call (see `_alert_eod_digest`'s
-    sundown-accuracy block) — 6 real calls from 2026-07-26 to 08-15 averaged
-    -10.2pt, one-directional (4 of 5 comparable days over-predicted), which
-    is what motivated this fix. Same `_ewma`/`_PR_EWMA_ALPHA` weighting as
-    the other calibration layers.
+    sundown-accuracy block).
+
+    A MEDIAN of at least 5 samples, clamped to +-10 pts. This used to be an
+    EWMA over 3+, which one odd day could swing by ~8 pts (2026-10-23: a day the
+    owner grid-charged graded as +33). Replayed over 70 days, the projection has
+    no real bias once the forecast model is right (clean-day mean error +0.4 pts),
+    and no walk-forward correction beat it, so the correction is a small guard
+    against genuine model drift, not a routine adjustment.
     """
     samples = _current_sundown_samples(state)
-    if len(samples) < 3:
+    if len(samples) < _SUNDOWN_BIAS_MIN_SAMPLES:
         return 0.0
-    return _ewma(samples)
+    med = statistics.median(samples)
+    return max(-_SUNDOWN_BIAS_MAX_PTS, min(_SUNDOWN_BIAS_MAX_PTS, med))
 
 
 # Bump when the forecast model changes in a way that moves /sundown (solar
@@ -208,6 +215,281 @@ def _record_sundown_bias(state: dict, delta: float) -> None:
     samples.append(delta)
     state["sundown_bias_samples"] = samples[-_SUNDOWN_BIAS_CAP:]
     state["sundown_bias_epoch"] = SOLAR_MODEL_EPOCH
+
+
+# ── /sundown tracker ─────────────────────────────────────────────────
+# /sundown used to be graded only on days it was asked for (one sample a day at
+# a random time). The tracker snapshots the same projection automatically at
+# fixed times, grades each one against the real battery at sundown, and keeps the
+# misses. Those give /sundown an honest "likely range" and /accuracy a scoreboard.
+# Days the battery was grid-charged (Emergency Backup) are recorded but flagged:
+# that is the owner's decision, not a forecast miss.
+_SUNDOWN_SLOTS = ((9, 0), (11, 0), (12, 30), (14, 0), (15, 30))
+_SUNDOWN_SLOT_WINDOW = timedelta(minutes=40)   # a late snapshot would be graded at the wrong lead time
+_SUNDOWN_RESID_CAP = 400
+_SUNDOWN_BAND_MIN = 8
+_SUNDOWN_GRADE_DELAY = timedelta(minutes=30)   # soc_near needs a reading after sundown
+
+
+def _slot_key(h: int, m: int) -> str:
+    return f"{h:02d}:{m:02d}"
+
+
+def _current_sundown_resid(state: dict) -> list[dict]:
+    """Graded misses under the current forecast model (older ones measure a
+    different model, same rule as the bias samples)."""
+    epoch = state.get("sundown_resid_epoch")
+    if epoch is not None and epoch != SOLAR_MODEL_EPOCH:
+        return []
+    return state.get("sundown_resid", [])
+
+
+def _record_sundown_resid(state: dict, entry: dict) -> None:
+    resid = list(_current_sundown_resid(state))
+    resid.append(entry)
+    state["sundown_resid"] = resid[-_SUNDOWN_RESID_CAP:]
+    state["sundown_resid_epoch"] = SOLAR_MODEL_EPOCH
+
+
+def _snapshot_sundown(state: dict, today: str, now: datetime, c, outlook, usage_forecast, store,
+                      cap: float) -> None:
+    for h, m in _SUNDOWN_SLOTS:
+        slot_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        key = _slot_key(h, m)
+        if not (slot_dt <= now < slot_dt + _SUNDOWN_SLOT_WINDOW):
+            continue
+        shots = state.setdefault(f"sundown_shadow_{today}", {})
+        if key in shots:
+            continue
+        live = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
+        if live is None or not getattr(live, "hours", None):
+            return
+        profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
+        quiet = _afternoon_scenarios(live, now, c.battery_soc_pct, cap, profile,
+                                     getattr(c, "home_load_kw", None))["quiet"]
+        if quiet is None:
+            if not shots:
+                state.pop(f"sundown_shadow_{today}", None)
+            return
+        raw_pct, sundown_dt, _export = quiet
+        shots[key] = {"pct": round(raw_pct, 1), "dt": sundown_dt.isoformat(),
+                      "soc0": round(c.battery_soc_pct, 1), "at": now.isoformat()}
+        return
+
+
+def _grade_sundown_snapshots(state: dict, now: datetime, store) -> None:
+    if store is None:
+        return
+    for key in [k for k in state if k.startswith("sundown_shadow_")]:
+        day = key[len("sundown_shadow_"):]
+        for slot, shot in state[key].items():
+            if shot.get("graded"):
+                continue
+            try:
+                dt = datetime.fromisoformat(shot["dt"])
+            except (KeyError, ValueError):
+                shot["graded"] = True
+                continue
+            if now < dt + _SUNDOWN_GRADE_DELAY:
+                continue
+            shot["graded"] = True
+            actual = store.soc_near(shot["dt"])
+            if actual is None:
+                continue
+            try:
+                grid = bool(store.grid_charged_between(shot["at"], shot["dt"]))
+            except Exception:
+                grid = False
+            _record_sundown_resid(state, {"day": day, "slot": slot,
+                                          "err": round(actual - shot["pct"], 1), "grid": grid})
+
+
+def _alert_sundown_tracker(state: dict, today: str, now: datetime, c, outlook, usage_forecast, store,
+                           cap: float | None = None) -> None:
+    """Not an alert: runs every cycle to snapshot and grade /sundown. Never raises
+    into the alert loop's other candidates (the loop isolates each, and a failure
+    here only costs a data point)."""
+    cap = cap or _BATTERY_CAPACITY_KWH
+    _snapshot_sundown(state, today, now, c, outlook, usage_forecast, store, cap)
+    _grade_sundown_snapshots(state, now, store)
+    return None
+
+
+def _sundown_band(state: dict, now: datetime) -> tuple[float, float, int] | None:
+    """(low, high, n): the 10th and 90th percentile of past misses (actual - raw
+    projection, in points) for the latest snapshot slot at or before `now`, or None
+    until there is enough history. Grid-charged days are excluded."""
+    chosen = None
+    for h, m in _SUNDOWN_SLOTS:
+        if now.replace(hour=h, minute=m, second=0, microsecond=0) <= now:
+            chosen = _slot_key(h, m)
+    if chosen is None:
+        return None
+    errs = [r["err"] for r in _current_sundown_resid(state) if r.get("slot") == chosen and not r.get("grid")]
+    if len(errs) < _SUNDOWN_BAND_MIN:
+        return None
+    q = statistics.quantiles(errs, n=10, method="inclusive")
+    return q[0], q[-1], len(errs)
+
+
+def _accuracy_report(state: dict, now: datetime) -> str:
+    """Plain-text scoreboard for /accuracy: how far /sundown's projection has been
+    from the real battery %, by the time of day it was made, plus the whole-day
+    solar forecast. Left-aligned, no indent."""
+    resid = _current_sundown_resid(state)
+    clean = [r for r in resid if not r.get("grid")]
+    n_grid = len(resid) - len(clean)
+    lines = ["🎯 <b>How accurate the forecasts have been</b>"]
+    if not clean:
+        lines.append("No graded /sundown snapshots yet. They are taken at 9:00, 11:00, 12:30, 2:00 and 3:30 "
+                     "each day and graded after sundown.")
+    else:
+        rows = []
+        for h, m in _SUNDOWN_SLOTS:
+            key = _slot_key(h, m)
+            errs = [r["err"] for r in clean if r.get("slot") == key]
+            if not errs:
+                continue
+            label = datetime(2000, 1, 1, h, m).strftime("%-I:%M %p")
+            mae = sum(abs(e) for e in errs) / len(errs)
+            w5 = sum(abs(e) <= 5 for e in errs) / len(errs) * 100
+            w10 = sum(abs(e) <= 10 for e in errs) / len(errs) * 100
+            rows.append(f"{label:<8} n={len(errs):<3} miss {mae:4.1f} pts  ±5: {w5:3.0f}%  ±10: {w10:3.0f}%")
+        first = min(r["day"] for r in clean)
+        lines.append(f"🌇 Battery % at sundown, since {first} (projection made at each time of day):")
+        lines.append("<code>" + "\n".join(rows) + "</code>")
+        lines.append("<i>Later in the day is tighter: the unknowns left are your own loads.</i>")
+    cutoff = (now.date() - timedelta(days=14)).isoformat()
+    ratios = [r for k, v in state.items()
+              if k.startswith("daily_pr_") and k[len("daily_pr_"):] >= cutoff
+              and (r := _safe_float(v)) is not None]
+    if ratios:
+        errs = [(r - 1.0) * 100 for r in ratios]
+        mae = sum(abs(e) for e in errs) / len(errs)
+        bias = sum(errs) / len(errs)
+        lean = ("no consistent lean" if abs(bias) < 1.0
+                else f"actual ran {'above' if bias > 0 else 'below'} forecast by {abs(bias):.0f}% on average")
+        lines.append(f"☀️ Solar, whole-day total: typical miss ±{mae:.0f}% over the last {len(ratios)} days ({lean}).")
+    if n_grid:
+        lines.append(f"<i>Left out: {n_grid} snapshot{'s' if n_grid != 1 else ''} from grid-charged "
+                     f"(Emergency Backup) days: that was your decision, not a forecast miss.</i>")
+    return "\n".join(lines)
+
+
+_RESERVE_MARGIN_KWH = 0.5
+
+
+def _reserve_plan(now: datetime, soc: float, cap: float, hours: list, floor_pct: float) -> dict | None:
+    """What to charge the battery to overnight so tomorrow morning needs no grid.
+
+    Walks the hourly forecast from `now`, clipped at empty and full (a full
+    battery's surplus exports; an empty one is carried by the grid). `natural_6am_pct`
+    is where the battery would be at 6 AM with no grid charging, and `floor_at` when
+    it first reaches the floor. From 6 AM until solar first covers the house
+    (`solar_covers_at`) the battery carries the morning gap; the level needed at
+    6 AM is the floor + that gap + a small margin, rounded UP to the next 5%.
+    `charge_kwh` is the grid energy to add (0 when the battery gets there on its
+    own). None without a forecast."""
+    if not hours:
+        return None
+    one_hour = timedelta(hours=1)
+    six = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    if six <= now:
+        six += timedelta(days=1)
+    entries = [h for h in hours if h.dt + one_hour > now]
+    if not entries:
+        return None
+    floor_kwh = floor_pct / 100.0 * cap
+
+    def step(kwh: float, h) -> tuple[float, float]:
+        """(kwh after this entry, fraction of the entry that was walked)."""
+        start = max(h.dt, now)
+        frac = (h.dt + one_hour - start).total_seconds() / 3600.0
+        return max(0.0, min(cap, kwh + (h.predicted_solar_kw - h.predicted_load_kw) * frac)), frac
+
+    kwh = soc / 100.0 * cap
+    natural_6am, covers_at, floor_at = None, None, None
+    for h in entries:
+        if h.dt >= six and natural_6am is None:
+            natural_6am = kwh
+        if h.dt >= six and covers_at is None and h.predicted_solar_kw >= h.predicted_load_kw:
+            covers_at = h.dt
+            if natural_6am is None:
+                natural_6am = kwh
+        after, frac = step(kwh, h)
+        if floor_at is None and covers_at is None and kwh > floor_kwh >= after and after < kwh:
+            start = max(h.dt, now)
+            floor_at = start + timedelta(hours=frac * (kwh - floor_kwh) / (kwh - after))
+        kwh = after
+    if natural_6am is None:
+        natural_6am = kwh
+    if covers_at is None:
+        covers_at = entries[-1].dt
+    gap = sum(max(0.0, h.predicted_load_kw - h.predicted_solar_kw)
+              for h in entries if six <= h.dt < covers_at)
+    lowest, lowest_dt, run = natural_6am, six, natural_6am
+    for h in entries:
+        if six <= h.dt < covers_at:
+            run, _ = step(run, h)
+            if run < lowest:
+                lowest, lowest_dt = run, h.dt + one_hour
+    needed_kwh = floor_kwh + gap + _RESERVE_MARGIN_KWH
+    needed_pct = min(100, int(-(-(needed_kwh / cap * 100.0) // 5) * 5))
+    return {
+        "natural_6am_pct": natural_6am / cap * 100.0,
+        "morning_gap_kwh": gap,
+        "solar_covers_at": covers_at,
+        "needed_pct": needed_pct,
+        "charge_kwh": max(0.0, needed_pct / 100.0 * cap - natural_6am),
+        "lowest_pct": lowest / cap * 100.0,
+        "lowest_at": lowest_dt,
+        "floor_at": floor_at,
+    }
+
+
+
+
+
+def _today_report(state: dict, now: datetime, c, store, live_forecast) -> str:
+    """/today: the day so far (energy, grid cost) and what solar is still to come
+    against the forecast made at sunrise. Left-aligned."""
+    today = now.strftime("%Y-%m-%d")
+    lines = [f"📅 <b>Today so far</b> (as of {now.strftime('%-I:%M %p')})"]
+    if store is None:
+        lines.append("No usage history available yet.")
+        return "\n".join(lines)
+    solar = store.daily_solar_kwh_api(today) or store.daily_solar_kwh(today)
+    chg, dis = store.daily_battery_kwh(today)
+    grid_in = grid_out = home = cost_in = credit_out = 0.0
+    for dt, hours, grid_kw, home_kw, _solar_kw in integrate_intervals(store.weekly_readings(today, today)):
+        home += home_kw * hours
+        if grid_kw > 0:
+            grid_in += grid_kw * hours
+            cost_in += grid_kw * hours * rate_at(dt)
+        elif grid_kw < 0:
+            grid_out += -grid_kw * hours
+            credit_out += -grid_kw * hours * export_rate_at(dt)
+    lines.append(
+        "<code>"
+        f"Solar:    {solar:.1f} kWh\n"
+        f"Home:     {home:.1f} kWh\n"
+        f"Grid in:  {grid_in:.1f} kWh\n"
+        f"Grid out: {grid_out:.1f} kWh\n"
+        f"Batt chg: {chg:.1f} kWh\n"
+        f"Batt dis: {dis:.1f} kWh</code>"
+    )
+    lines.append(f"💰 Grid so far: ${cost_in:.2f} in  ·  ${credit_out:.2f} out")
+    one_hour = timedelta(hours=1)
+    to_come = 0.0
+    if live_forecast is not None and getattr(live_forecast, "hours", None):
+        for h in live_forecast.hours:
+            if h.dt.date() == now.date() and h.dt + one_hour > now:
+                to_come += h.predicted_solar_kw * min(1.0, (h.dt + one_hour - now).total_seconds() / 3600.0)
+        sunrise_fc = state.get(f"predicted_kwh_{today}")
+        cmp_str = f" (the sunrise forecast said {sunrise_fc:.1f})" if sunrise_fc else ""
+        lines.append(f"☀️ Still to come: ~{to_come:.1f} kWh, so ~{solar + to_come:.1f} kWh for the day{cmp_str}")
+    lines.append(f"🔋 Battery now {_soc_bar(c.battery_soc_pct)}")
+    return "\n".join(lines)
 
 
 # ── VPP (Virtual Power Plant) grid-support events ─────────────────────
@@ -892,7 +1174,7 @@ _DATE_KEYED_PREFIXES = (
     # by one key per day per prefix, forever, for the life of the install.
     "predicted_kwh_", "predicted_avg_ghi_", "predicted_cloudy_", "daily_import_cost_",
     "outages_", "sundown_pred_", "savings_daily_", "soc_7am_pred_",
-    "actual_bill_", "perf_ratio_used_",
+    "actual_bill_", "perf_ratio_used_", "sundown_shadow_",
 )
 
 
@@ -2437,6 +2719,17 @@ def _sundown_window_had_ev_load(store, sundown_pred: dict) -> bool:
     return max((r[2] for r in rows), default=0.0) >= _NO_EV_LOAD_SPIKE_KW
 
 
+def _sundown_window_had_grid_charge(store, sundown_pred: dict) -> bool:
+    """True if the battery was charged FROM THE GRID (Emergency Backup) between the
+    /sundown request and the predicted sundown. That is the owner's decision, not a
+    forecast miss: on 2026-10-23 an EB top-off (12% -> 71%) graded as a +33 pt
+    "bias" sample. Fails open (False) like the EV check."""
+    try:
+        return bool(store.grid_charged_between(sundown_pred["requested_at"], sundown_pred["dt"]))
+    except Exception:
+        return False
+
+
 def _sundown_projection_line(
     state: dict, now: datetime, c, cap: float,
     outlook=None, usage_forecast=None, store=None,
@@ -2546,6 +2839,9 @@ def _alert_eod_digest(
             raw_pct = sundown_pred.get("raw_pct", pred_pct)
             if _sundown_window_had_ev_load(store, sundown_pred):
                 logger.info("Sundown bias: EV-level load between request and sundown — "
+                            "not a model miss, sample skipped")
+            elif _sundown_window_had_grid_charge(store, sundown_pred):
+                logger.info("Sundown bias: battery grid-charged between request and sundown — "
                             "not a model miss, sample skipped")
             else:
                 _record_sundown_bias(state, actual_pct - raw_pct)
@@ -4439,6 +4735,8 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("load_question",        lambda: _alert_load_question(state, today, now, store)),
             ("car_charge_started",   lambda: _alert_car_charge_started(state, today, now, c, cfg, store)),
             ("solar_backtest",       lambda: _maybe_launch_monthly_backtest(state, now, cfg)),
+            ("sundown_tracker",      lambda: _alert_sundown_tracker(state, today, now, c, outlook, usage_forecast, store,
+                                                                    cfg.battery_capacity_kwh)),
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),

@@ -420,6 +420,9 @@ class TelegramChatBot:
                             "/sundown  — projected SoC when today's solar is done\n"
                             "/sundown H — projected SoC in H hours (1-24)\n"
                             "/evroom [car %] [to N%] — battery room for the car without grid import\n"
+                            "/today    — the day so far: solar, load, grid cost, what's still to come\n"
+                            "/reserve  — what to charge the battery to overnight\n"
+                            "/accuracy — how accurate /sundown and the solar forecast have been\n"
                             "/cardays  — label which recent afternoons were the car\n"
                             "/ebplan [kWh] [load kW] [from H] [to H] — EB charge needed for a grid-free window\n"
                             "/ebtarget — Emergency Backup charge target for today\n"
@@ -542,6 +545,12 @@ class TelegramChatBot:
                         continue
                     if text.lower().strip().split("@")[0] == "/cardays":
                         threading.Thread(target=self._send_cardays, args=(chat_id,), daemon=True).start()
+                        continue
+                    _cmd = text.lower().strip().split("@")[0]
+                    _simple = {"/accuracy": self._send_accuracy, "/today": self._send_today,
+                               "/reserve": self._send_reserve}.get(_cmd)
+                    if _simple is not None:
+                        threading.Thread(target=_simple, args=(chat_id,), daemon=True).start()
                         continue
                     _ebp = _parse_ebplan(text)
                     if _ebp is not None:
@@ -1071,7 +1080,7 @@ class TelegramChatBot:
             from .alerts import (_afternoon_profile, _afternoon_scenarios, _get_sundown_bias,
                                  _live_anchored_forecast, _load_peak_state,
                                  _save_peak_state, _spike_started_today, _state_lock,
-                                 _zone_stats)
+                                 _sundown_band, _zone_stats)
             from .tou import peak_export_hour
 
             out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
@@ -1171,9 +1180,25 @@ class TelegramChatBot:
                             f"{morning.n_weekday}; {msize}): ~<b>{_pct(sc['with_morning'][0]):.0f}%</b>"
                             f"{_spread(sc['with_morning_range'])}")
             label = " (quiet afternoon)" if profile is not None else ""
+            # Grid charging (Emergency Backup) isn't in the solar-minus-load walk.
+            # Say so while it's happening, with what an hour of it is worth.
+            eb_str = ""
+            batt_kw = getattr(c, "battery_use_kw", 0.0) or 0.0
+            if batt_kw <= -1.0 and (getattr(c, "grid_use_kw", 0.0) or 0.0) >= 0.5:
+                eb_str = (f"\n⚡ Charging from the grid right now (+{-batt_kw:.1f} kW into the battery). "
+                          f"This projection leaves that out; each hour of it adds ~{-batt_kw / cap * 100:.0f}% (up to 100%).")
+            # How far past projections landed from the number at this time of day.
+            band_str = ""
+            band = _sundown_band(state, now)
+            if band is not None:
+                lo, hi, n = band
+                band_str = (f"\n📏 Likely range <b>{max(0.0, min(100.0, raw_pct + lo)):.0f}–"
+                            f"{max(0.0, min(100.0, raw_pct + hi)):.0f}%</b> "
+                            f"(80% of {n} past projections at this time of day ended up here).")
             self._send(chat_id,
                 f"🌇 Projected SoC at sundown (~{sundown_dt.strftime('%-I:%M %p')}, using solar+load forecast)\n"
                 f"Now: <b>{soc:.0f}%</b>  →  Sundown: ~<b>{end_pct:.0f}%</b>{label}"
+                f"{band_str}{eb_str}"
                 f"{car_str}"
                 f"{export_str}\n"
                 f"<i>{live_forecast.confidence.title()} confidence, {live_forecast.data_days}d data — actual weather/load will vary.</i>"
@@ -1181,6 +1206,88 @@ class TelegramChatBot:
             )
         except Exception as e:
             logger.warning("_send_sundown error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
+    def _snapshot_for_report(self):
+        """(stats, forecast, outlook, store, state) under the lock, plus the loaded
+        peak state; used by the read-only report commands."""
+        from pathlib import Path
+
+        from .alerts import _load_peak_state
+        with self._lock:
+            stats, forecast = self._stats, self._usage_forecast
+            outlook, store = self._outlook, self._hist_store
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        return stats, forecast, outlook, store, _load_peak_state(out)
+
+    def _send_accuracy(self, chat_id: str) -> None:
+        """/accuracy: how far /sundown and the solar forecast have actually been off."""
+        try:
+            from .alerts import _accuracy_report
+            _stats, _fc, _ol, _store, state = self._snapshot_for_report()
+            self._send(chat_id, _accuracy_report(state, datetime.now()))
+        except Exception as e:
+            logger.warning("_send_accuracy error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
+    def _send_today(self, chat_id: str) -> None:
+        """/today: the day so far and what solar is still to come."""
+        try:
+            from .alerts import _live_anchored_forecast, _today_report
+            stats, forecast, outlook, store, state = self._snapshot_for_report()
+            if stats is None:
+                self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+                return
+            live = _live_anchored_forecast(state, stats.current, outlook, forecast, store)
+            self._send(chat_id, _today_report(state, datetime.now(), stats.current, store, live))
+        except Exception as e:
+            logger.warning("_send_today error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
+    def _send_reserve(self, chat_id: str) -> None:
+        """/reserve: what to charge the battery to overnight so the morning needs no grid."""
+        try:
+            from .alerts import _live_anchored_forecast, _reserve_plan
+            from .tou import rate_at
+            stats, forecast, outlook, store, state = self._snapshot_for_report()
+            if stats is None:
+                self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+                return
+            if forecast is None or forecast.confidence == "none":
+                self._send(chat_id, "Not enough usage history yet for an overnight plan.")
+                return
+            cfg = self._cfg
+            cap = getattr(cfg, "battery_capacity_kwh", 13.6)
+            floor = getattr(cfg, "ev_charge_floor_soc", 10.0)
+            c = stats.current
+            now = datetime.now()
+            live = _live_anchored_forecast(state, c, outlook, forecast, store)
+            plan = _reserve_plan(now, c.battery_soc_pct, cap, live.hours, floor)
+            if plan is None:
+                self._send(chat_id, "Not enough forecast to plan the night.")
+                return
+            covers = plan["solar_covers_at"].strftime("%-I:%M %p")
+            lines = [
+                "🌙 <b>Tonight's battery plan</b>",
+                f"With no grid charging the battery is ~{plan['natural_6am_pct']:.0f}% at 6 AM; "
+                f"solar covers the house again from ~{covers}.",
+            ]
+            if plan["floor_at"] is not None:
+                lines.append(f"It reaches the {floor:.0f}% floor around {plan['floor_at'].strftime('%-I:%M %p')}, "
+                             "and the grid carries the house after that.")
+            if plan["charge_kwh"] <= 0.05:
+                lines.append(f"✅ No grid charge needed: ~{plan['natural_6am_pct']:.0f}% already covers the morning "
+                             f"(you only need ~{plan['needed_pct']}%).")
+            else:
+                tonight_1am = (now + timedelta(days=1 if now.hour >= 1 else 0)).replace(hour=1, minute=0, second=0, microsecond=0)
+                cost = plan["charge_kwh"] * rate_at(tonight_1am)
+                lines.append(f"⚡ <b>Charge to ~{plan['needed_pct']}%</b> overnight "
+                             f"(~{plan['charge_kwh']:.1f} kWh from the grid, ~${cost:.2f} at the 1 AM rate).")
+            lines.append(f"<i>That is the {floor:.0f}% floor + the {plan['morning_gap_kwh']:.1f} kWh the battery carries "
+                         f"from 6 AM until solar takes over + a 0.5 kWh margin, rounded up to 5%.</i>")
+            self._send(chat_id, "\n".join(lines))
+        except Exception as e:
+            logger.warning("_send_reserve error: %s", e)
             self._send(chat_id, f"Error: {e}")
 
     def _send_evroom(self, chat_id: str, car_soc: float | None = None,

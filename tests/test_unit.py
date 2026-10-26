@@ -1541,8 +1541,40 @@ def test_eod_digest_no_sundown_bias_sample_on_not_directly_comparable():
     assert "sundown_bias_samples" not in state
 
 
-def _sundown_grading_store(load_kw_by_reading):
+def _insert_flow_readings(db, rows):
+    """rows: (timestamp, grid_use_kw, battery_use_kw); battery_use_kw < 0 = charging."""
+    for ts, grid, batt in rows:
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,"
+            "solar_kw,battery_soc,grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts, 0, int(ts[11:13]), 0.5, 2.0, 50.0, grid, "normal", 0.0, batt),
+        )
+    db._conn.commit()
+
+
+def test_grid_charged_between_detects_battery_charging_from_the_grid(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    # 12:00-12:20 importing 2.5 kW while the battery charges at 5 kW: Emergency Backup.
+    _insert_flow_readings(db, [(f"2026-10-23T12:{m:02d}:00", 2.5, -5.0) for m in range(0, 25, 5)])
+    assert db.grid_charged_between("2026-10-23T11:00:00", "2026-10-23T17:00:00") is True
+    assert db.grid_charged_between("2026-10-23T14:00:00", "2026-10-23T17:00:00") is False
+    db.close()
+
+
+def test_grid_charged_between_ignores_a_single_blip_and_plain_grid_import(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    # grid import with the battery DISCHARGING is just the house using the grid
+    _insert_flow_readings(db, [(f"2026-10-23T19:{m:02d}:00", 1.5, 1.0) for m in range(0, 30, 5)])
+    # one charging-from-grid poll (a 5-minute blip) is not an EB session
+    _insert_flow_readings(db, [("2026-10-23T13:00:00", 2.0, -3.0)])
+    assert db.grid_charged_between("2026-10-23T00:00:00", "2026-10-24T00:00:00") is False
+    db.close()
+
+
+def _sundown_grading_store(load_kw_by_reading, grid_charged=False):
     class _Store:
+        def grid_charged_between(self, start, end): return grid_charged
         def daily_solar_kwh_api(self, d): return 0.0
         def daily_solar_kwh(self, d): return 0.0
         def daily_battery_kwh(self, d): return (0.0, 0.0)
@@ -1581,6 +1613,15 @@ def test_eod_digest_sundown_bias_skips_days_with_ev_level_load():
     all. An EV session between the request and sundown is unforecastable
     noise, not a bias signal, so that day must not feed the EWMA."""
     state = _grade_sundown(_sundown_grading_store([0.5, 4.3, 0.6, 4.4]))
+    assert "sundown_bias_samples" not in state
+
+
+def test_eod_digest_sundown_bias_skips_days_the_battery_was_grid_charged():
+    """Regression for 2026-10-23: the owner turned Emergency Backup on at noon and
+    the battery charged from the grid (12% -> 71%). Graded as model error that
+    day was a +33 pt sample. Grid charging is a user decision, not a forecast
+    miss, so that day must not feed the correction."""
+    state = _grade_sundown(_sundown_grading_store([0.5, 0.6, 0.4, 0.5], grid_charged=True))
     assert "sundown_bias_samples" not in state
 
 
@@ -2075,7 +2116,7 @@ def test_send_sundown_applies_learned_bias_correction(tmp_path):
     from pathlib import Path
 
     from franklinwh_scraper import chatbot as chatbot_mod
-    from franklinwh_scraper.alerts import _ewma, _load_peak_state, _save_peak_state
+    from franklinwh_scraper.alerts import _get_sundown_bias, _load_peak_state, _save_peak_state
     from franklinwh_scraper.predictor import HourPrediction, UsageForecast
 
     # Must be near-present, not a fixed historical date — this test reads
@@ -2093,7 +2134,7 @@ def test_send_sundown_applies_learned_bias_correction(tmp_path):
     forecast = UsageForecast(hours=hours, total_load_kwh=24.0, total_solar_kwh=18.0,
                              net_kwh=-6.0, peak_load_kw=1.0, confidence="high", data_days=30)
 
-    samples = [-2.0, -4.0, -6.0]  # consistent over-prediction, like the real data
+    samples = [-2.0, -4.0, -6.0, -4.0, -5.0]  # consistent over-prediction, like the real data
     _save_peak_state(Path(tmp_path), {"sundown_bias_samples": samples})
 
     bot = TelegramChatBot(Config(battery_capacity_kwh=13.6, output_dir=str(tmp_path)), api_key="x")
@@ -2117,7 +2158,8 @@ def test_send_sundown_applies_learned_bias_correction(tmp_path):
         chatbot_mod.datetime = real_datetime
 
     # Raw projection clamps to 100% (same math as test_send_sundown_projects_soc_to_last_solar_hour).
-    bias = _ewma(samples)
+    bias = _get_sundown_bias({"sundown_bias_samples": samples})
+    assert bias == -4.0
     expected_corrected = round(max(0.0, min(100.0, 100.0 + bias)))
     assert "text" in sent
     assert f"{expected_corrected}%" in sent["text"]
@@ -4180,22 +4222,31 @@ def test_hourly_bias_matches_perf_ratio_weighting():
     assert _get_hourly_bias(state)[11] == _ewma(samples)
 
 
-def test_sundown_bias_needs_3_samples():
+def test_sundown_bias_needs_5_samples():
     from franklinwh_scraper.alerts import _get_sundown_bias
 
     assert _get_sundown_bias({}) == 0.0
-    assert _get_sundown_bias({"sundown_bias_samples": [-5.0, -3.0]}) == 0.0
+    assert _get_sundown_bias({"sundown_bias_samples": [-5.0, -3.0, -4.0, -4.0]}) == 0.0
+    assert _get_sundown_bias({"sundown_bias_samples": [-5.0, -3.0, -4.0, -4.0, -4.0]}) == -4.0
 
 
-def test_sundown_bias_uses_ewma():
-    """Same EWMA weighting as the other calibration layers — additive
-    (percentage points), not multiplicative like perf_ratio/hourly_bias,
-    since a ratio breaks down near a 0% SoC value."""
-    from franklinwh_scraper.alerts import _ewma, _get_sundown_bias
+def test_sundown_bias_is_the_median_so_one_odd_day_cannot_move_it():
+    """Regression for 2026-10-23: one day the owner grid-charged (EB) graded as a
+    +33 pt "miss", and the EWMA of [1.7, -4.0, 33.2, -0.5] then added about +8
+    pts to every projection, turning a correct 80% into a displayed 92%
+    (actual 80%). Backtested over 70 days the raw projection has no real bias,
+    so one outlier must not move the correction."""
+    from franklinwh_scraper.alerts import _get_sundown_bias
 
-    samples = [-2.0, -4.0, -6.0]  # one-directional over-prediction, matches the real data
-    state = {"sundown_bias_samples": samples}
-    assert _get_sundown_bias(state) == _ewma(samples)
+    state = {"sundown_bias_samples": [1.7, -4.0, 33.2, -0.5, 0.3]}
+    assert _get_sundown_bias(state) == pytest.approx(0.3)
+
+
+def test_sundown_bias_is_clamped():
+    from franklinwh_scraper.alerts import _SUNDOWN_BIAS_MAX_PTS, _get_sundown_bias
+
+    assert _get_sundown_bias({"sundown_bias_samples": [-30.0] * 5}) == -_SUNDOWN_BIAS_MAX_PTS
+    assert _get_sundown_bias({"sundown_bias_samples": [30.0] * 5}) == _SUNDOWN_BIAS_MAX_PTS
 
 
 # ── No-EV night classification (ground truth beats percentile guessing) ──
@@ -4532,7 +4583,7 @@ def test_low_soc_1pm_sundown_projection_applies_learned_bias(monkeypatch):
     monkeypatch.setattr(alerts, "predict", lambda *a, **kw: forecast)
 
     state_no_bias = {}
-    state_biased   = {"sundown_bias_samples": [-10.0, -10.0, -10.0]}
+    state_biased   = {"sundown_bias_samples": [-10.0] * 5}
 
     msg_no_bias = alerts._alert_low_soc_1pm(state_no_bias, "2026-07-02", now, c, Config(),
                                             outlook=None, usage_forecast=forecast, store=object())
@@ -10068,12 +10119,12 @@ def test_forecast_uses_the_other_model_when_one_is_missing_or_null(monkeypatch):
 # model epoch they were graded under; bumping SOLAR_MODEL_EPOCH invalidates them.
 
 def test_sundown_bias_ignores_samples_graded_under_an_older_model():
-    old = {"sundown_bias_samples": [-20.0, -20.0, -20.0], "sundown_bias_epoch": "an-older-model"}
+    old = {"sundown_bias_samples": [-8.0] * 5, "sundown_bias_epoch": "an-older-model"}
     assert alerts._get_sundown_bias(old) == 0.0
-    current = {"sundown_bias_samples": [-20.0, -20.0, -20.0], "sundown_bias_epoch": alerts.SOLAR_MODEL_EPOCH}
-    assert alerts._get_sundown_bias(current) == pytest.approx(-20.0)
-    legacy = {"sundown_bias_samples": [-20.0, -20.0, -20.0]}               # state written before epochs existed
-    assert alerts._get_sundown_bias(legacy) == pytest.approx(-20.0)
+    current = {"sundown_bias_samples": [-8.0] * 5, "sundown_bias_epoch": alerts.SOLAR_MODEL_EPOCH}
+    assert alerts._get_sundown_bias(current) == pytest.approx(-8.0)
+    legacy = {"sundown_bias_samples": [-8.0] * 5}                          # state written before epochs existed
+    assert alerts._get_sundown_bias(legacy) == pytest.approx(-8.0)
 
 
 def test_recording_a_sundown_grade_under_a_new_epoch_starts_a_fresh_list():
@@ -10491,3 +10542,362 @@ def test_fetch_history_weather_gives_a_clear_error_when_every_attempt_fails(monk
     monkeypatch.setattr(backtest.requests, "get", lambda *a, **k: _Bad())
     with pytest.raises(RuntimeError, match="weather archive"):
         backtest.fetch_history_weather(32.9, -117.1, "2026-09-01", "2026-09-01")
+
+
+# ── /sundown tracker: automatic snapshots, grading, error range ──────────
+
+def _tracker_c(soc=40.0):
+    import types
+    return types.SimpleNamespace(battery_soc_pct=soc, solar_production_kw=2.0,
+                                 home_load_kw=0.6, battery_use_kw=-1.0)
+
+
+def test_sundown_tracker_snapshots_each_slot_once(monkeypatch):
+    now = datetime(2026, 10, 26, 12, 35, 0)
+    forecast = _sundown_forecast(now)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **kw: forecast)
+    state: dict = {}
+    for _ in range(2):  # a second cycle in the same slot must not re-snapshot
+        alerts._alert_sundown_tracker(state, "2026-10-26", now, _tracker_c(), None, forecast, object())
+    shots = state["sundown_shadow_2026-10-26"]
+    assert list(shots) == ["12:30"]                     # 11:00 / 14:00 not yet reached or missed
+    assert shots["12:30"]["soc0"] == 40.0
+    assert 0.0 <= shots["12:30"]["pct"] <= 100.0
+    assert shots["12:30"]["dt"] > now.isoformat()
+
+
+def test_sundown_tracker_skips_a_slot_it_missed(monkeypatch):
+    """The advisor was down at 12:30: a 2 PM-ish cycle must not file a late
+    prediction under the 12:30 label (it would be graded against the wrong lead time)."""
+    now = datetime(2026, 10, 26, 13, 30, 0)
+    forecast = _sundown_forecast(now)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **kw: forecast)
+    state: dict = {}
+    alerts._alert_sundown_tracker(state, "2026-10-26", now, _tracker_c(), None, forecast, object())
+    assert "sundown_shadow_2026-10-26" not in state
+
+
+def _graded_store(act=70.0, grid_charged=False):
+    class _S:
+        def soc_near(self, ts): return act
+        def grid_charged_between(self, a, b): return grid_charged
+    return _S()
+
+
+def _shadow_state(day="2026-10-25"):
+    return {f"sundown_shadow_{day}": {
+        "12:30": {"pct": 80.0, "dt": f"{day}T17:40:00", "soc0": 50.0, "at": f"{day}T12:35:00"}}}
+
+
+def test_sundown_tracker_grades_a_finished_day(monkeypatch):
+    now = datetime(2026, 10, 25, 21, 5, 0)
+    monkeypatch.setattr(alerts, "predict", lambda *a, **kw: _sundown_forecast(now))
+    state = _shadow_state()
+    alerts._alert_sundown_tracker(state, "2026-10-25", now, _tracker_c(), None, None, _graded_store(act=74.0))
+    assert state["sundown_resid"] == [{"day": "2026-10-25", "slot": "12:30", "err": -6.0, "grid": False}]
+    alerts._alert_sundown_tracker(state, "2026-10-25", now, _tracker_c(), None, None, _graded_store(act=10.0))
+    assert len(state["sundown_resid"]) == 1                      # graded once, never re-graded
+
+
+def test_sundown_tracker_flags_grid_charged_days(monkeypatch):
+    now = datetime(2026, 10, 25, 21, 5, 0)
+    state = _shadow_state()
+    alerts._alert_sundown_tracker(state, "2026-10-25", now, _tracker_c(), None, None,
+                                  _graded_store(act=100.0, grid_charged=True))
+    assert state["sundown_resid"][0]["grid"] is True
+
+
+def test_sundown_tracker_waits_until_sundown_has_passed():
+    now = datetime(2026, 10, 25, 17, 0, 0)                       # shadow's sundown is 17:40
+    state = _shadow_state()
+    alerts._alert_sundown_tracker(state, "2026-10-25", now, _tracker_c(), None, None, _graded_store())
+    assert "sundown_resid" not in state
+
+
+def _resid_state(errs, slot="12:30", grid=False, epoch=None):
+    return {"sundown_resid": [{"day": f"2026-10-{i + 1:02d}", "slot": slot, "err": e, "grid": grid}
+                              for i, e in enumerate(errs)],
+            "sundown_resid_epoch": epoch or alerts.SOLAR_MODEL_EPOCH}
+
+
+def test_sundown_band_is_the_10th_to_90th_percentile_of_past_misses():
+    errs = [float(e) for e in range(-20, 21, 2)]                 # 21 misses, -20..+20
+    lo, hi, n = alerts._sundown_band(_resid_state(errs), datetime(2026, 10, 26, 12, 40))
+    assert n == 21
+    assert -17.0 <= lo <= -15.0 and 15.0 <= hi <= 17.0
+
+
+def test_sundown_band_needs_enough_history_and_ignores_grid_charged_days():
+    now = datetime(2026, 10, 26, 12, 40)
+    assert alerts._sundown_band(_resid_state([1.0] * 5), now) is None                # too few
+    assert alerts._sundown_band(_resid_state([30.0] * 12, grid=True), now) is None   # EB days are not model misses
+    assert alerts._sundown_band({}, now) is None
+
+
+def test_sundown_band_uses_the_matching_slot_and_current_model_only():
+    now = datetime(2026, 10, 26, 15, 40)                         # latest slot at or before now: 15:30
+    s = _resid_state([2.0] * 10, slot="15:30")
+    s["sundown_resid"] += [{"day": "2026-10-20", "slot": "09:00", "err": 40.0, "grid": False}] * 10
+    lo, hi, n = alerts._sundown_band(s, now)
+    assert (lo, hi, n) == (2.0, 2.0, 10)
+    assert alerts._sundown_band(_resid_state([2.0] * 10, slot="15:30", epoch="an-older-model"), now) is None
+    assert alerts._sundown_band(_resid_state([2.0] * 10, slot="15:30"), datetime(2026, 10, 26, 8, 0)) is None  # before the first slot
+
+
+def test_sundown_shadow_state_is_pruned_with_the_other_date_keyed_entries():
+    assert "sundown_shadow_" in alerts._DATE_KEYED_PREFIXES
+    old = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
+    new = datetime.now().strftime("%Y-%m-%d")
+    kept = alerts._prune_old_state({f"sundown_shadow_{old}": {}, f"sundown_shadow_{new}": {}})
+    assert list(kept) == [f"sundown_shadow_{new}"]
+
+
+def _run_send_sundown(tmp_path, current, saved_state=None, hour=12, minute=40):
+    """Drive /sundown against a canned forecast; returns the message text."""
+    import types
+    from pathlib import Path
+
+    from franklinwh_scraper import chatbot as chatbot_mod
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime(2026, 7, 15, hour, minute, 0)
+    hours, t = [], now.replace(hour=12, minute=0)
+    while t.date() == now.date():
+        solar = 3.0 if 12 <= t.hour < 18 else 0.0
+        hours.append(HourPrediction(dt=t, predicted_load_kw=1.0, predicted_solar_kw=solar,
+                                    net_kw=solar - 1.0, confidence="high"))
+        t += timedelta(hours=1)
+    forecast = UsageForecast(hours=hours, total_load_kwh=24.0, total_solar_kwh=18.0,
+                             net_kwh=-6.0, peak_load_kw=1.0, confidence="high", data_days=30)
+    if saved_state:
+        alerts._save_peak_state(Path(tmp_path), saved_state)
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._outdir = tmp_path
+    bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(**current))
+    bot._usage_forecast = forecast
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    real = chatbot_mod.datetime
+
+    class _FakeDatetime(real):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    chatbot_mod.datetime = _FakeDatetime
+    try:
+        bot._send_sundown("123")
+    finally:
+        chatbot_mod.datetime = real
+    return sent["text"]
+
+
+def test_send_sundown_shows_the_likely_range_from_past_misses(tmp_path):
+    resid = [{"day": f"2026-07-{i + 1:02d}", "slot": "12:30", "err": float(e), "grid": False}
+             for i, e in enumerate(range(-20, 22, 2))]
+    text = _run_send_sundown(tmp_path, {"battery_soc_pct": 5.0},
+                             {"sundown_resid": resid, "sundown_resid_epoch": alerts.SOLAR_MODEL_EPOCH})
+    assert "Likely range" in text
+    assert "21 " in text                               # how many past projections it rests on
+
+
+def test_send_sundown_omits_the_range_without_history(tmp_path):
+    assert "Likely range" not in _run_send_sundown(tmp_path, {"battery_soc_pct": 5.0})
+
+
+def test_send_sundown_flags_grid_charging_in_progress(tmp_path):
+    """EB charging from the grid is not in the solar-minus-load walk; say so, and say
+    what an hour of it is worth (5 kW into a 13.6 kWh pack is ~37 pts/hour)."""
+    text = _run_send_sundown(tmp_path, {"battery_soc_pct": 30.0, "battery_use_kw": -5.0, "grid_use_kw": 2.6})
+    assert "Charging from the grid" in text
+    assert "37%" in text
+
+
+def test_send_sundown_no_grid_charging_note_when_just_discharging(tmp_path):
+    text = _run_send_sundown(tmp_path, {"battery_soc_pct": 30.0, "battery_use_kw": 1.2, "grid_use_kw": 0.0})
+    assert "Charging from the grid" not in text
+
+
+# ── /accuracy ────────────────────────────────────────────────────────────
+
+def test_accuracy_report_scores_each_snapshot_time_and_leaves_out_grid_days():
+    resid = ([{"day": f"2026-10-{i + 1:02d}", "slot": "15:30", "err": e, "grid": False}
+              for i, e in enumerate([1.0, -2.0, 3.0, -4.0, 12.0])]
+             + [{"day": "2026-10-09", "slot": "15:30", "err": 33.0, "grid": True}])
+    state = {"sundown_resid": resid, "sundown_resid_epoch": alerts.SOLAR_MODEL_EPOCH}
+    text = alerts._accuracy_report(state, datetime(2026, 10, 26, 9, 0))
+    assert "3:30 PM" in text
+    assert "n=5" in text                         # the EB day is not counted ...
+    assert "grid-charged" in text and "1" in text  # ... but it is mentioned
+    assert "4.4" in text                         # mean |miss| = (1+2+3+4+12)/5 = 4.4... shown as typical miss
+    assert "80%" in text                         # share within +-5: 4 of 5
+
+
+def test_accuracy_report_includes_the_daily_solar_scoreboard():
+    state = {f"daily_pr_2026-10-{d:02d}": r for d, r in ((20, 0.94), (21, 1.03), (22, 0.82), (23, 1.10))}
+    text = alerts._accuracy_report(state, datetime(2026, 10, 26, 9, 0))
+    assert "Solar" in text and "4 days" in text
+
+
+def test_accuracy_report_with_no_history_says_so():
+    text = alerts._accuracy_report({}, datetime(2026, 10, 26, 9, 0))
+    assert "No graded" in text
+
+
+def test_accuracy_report_is_left_aligned():
+    resid = [{"day": f"2026-10-{i + 1:02d}", "slot": "15:30", "err": 1.0, "grid": False} for i in range(9)]
+    text = alerts._accuracy_report({"sundown_resid": resid, "sundown_resid_epoch": alerts.SOLAR_MODEL_EPOCH},
+                                   datetime(2026, 10, 26, 9, 0))
+    _assert_left_aligned(text)
+
+
+# ── /reserve (overnight charge target) and /today ────────────────────────
+
+def _night_hours(start, n_hours, load=0.5, solar_by_hour=None):
+    from franklinwh_scraper.predictor import HourPrediction
+    solar_by_hour = solar_by_hour or {}
+    out = []
+    for i in range(n_hours):
+        t = start + timedelta(hours=i)
+        s = solar_by_hour.get(t.hour, 0.0)
+        out.append(HourPrediction(dt=t, predicted_load_kw=load, predicted_solar_kw=s,
+                                  net_kw=s - load, confidence="high"))
+    return out
+
+
+def test_reserve_plan_sizes_the_overnight_charge_to_cover_the_morning_gap():
+    now = datetime(2026, 10, 26, 21, 0)
+    hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0, 10: 3.0, 11: 3.0, 12: 3.0})
+    plan = alerts._reserve_plan(now, 50.0, 13.6, hours, floor_pct=10.0)
+    assert plan["solar_covers_at"] == datetime(2026, 10, 27, 8, 0)
+    assert plan["natural_6am_pct"] == pytest.approx((6.8 - 0.5 * 9) / 13.6 * 100)
+    # 6 AM -> 8 AM the battery carries the house: 2 x 0.5 kW = 1.0 kWh, on top of the 10% floor + a 0.5 kWh margin
+    assert plan["needed_pct"] == 25
+    assert plan["charge_kwh"] == pytest.approx((25 - plan["natural_6am_pct"]) / 100 * 13.6)
+
+
+def test_reserve_plan_needs_no_charge_when_the_battery_already_gets_there():
+    now = datetime(2026, 10, 26, 21, 0)
+    hours = _night_hours(now, 24, load=0.4, solar_by_hour={8: 1.0, 9: 2.0})
+    plan = alerts._reserve_plan(now, 90.0, 13.6, hours, floor_pct=10.0)
+    assert plan["charge_kwh"] == 0.0
+
+
+def test_reserve_plan_cloudy_morning_raises_the_target():
+    now = datetime(2026, 10, 26, 21, 0)
+    sunny = alerts._reserve_plan(now, 30.0, 13.6, _night_hours(now, 24, solar_by_hour={8: 1.0, 9: 2.0}), 10.0)
+    gloomy = alerts._reserve_plan(now, 30.0, 13.6, _night_hours(now, 24, solar_by_hour={11: 0.8, 12: 1.2}), 10.0)
+    assert gloomy["needed_pct"] > sunny["needed_pct"]
+
+
+def test_reserve_plan_without_a_forecast_returns_none():
+    assert alerts._reserve_plan(datetime(2026, 10, 26, 21, 0), 50.0, 13.6, [], 10.0) is None
+
+
+def _today_store():
+    class _S:
+        def daily_solar_kwh_api(self, d): return 0.0
+        def daily_solar_kwh(self, d): return 9.0
+        def daily_battery_kwh(self, d): return (4.0, 1.5)
+        def weekly_readings(self, s, e):
+            # 06:00-12:00 every 5 min: importing 1 kW, house 2 kW, solar 3 kW
+            return [(f"2026-10-26T{6 + m // 60:02d}:{m % 60:02d}:00", 1.0, 2.0, 3.0) for m in range(0, 360, 5)]
+    return _S()
+
+
+def test_today_report_totals_so_far_and_what_is_left():
+    now = datetime(2026, 10, 26, 12, 10)
+    hours = _night_hours(now.replace(minute=0), 5, load=0.5, solar_by_hour={12: 2.0, 13: 2.0, 14: 2.0, 15: 2.0, 16: 2.0})
+    live = type("F", (), {"hours": hours, "confidence": "high"})()
+    state = {"predicted_kwh_2026-10-26": 20.5}
+    text = alerts._today_report(state, now, _tracker_c(55.0), _today_store(), live)
+    assert "9.0 kWh" in text                       # solar so far
+    assert "11.8 kWh" in text                      # house so far: 2 kW over the 355 minutes between 72 readings
+    assert "Grid in" in text and "$" in text
+    assert "18.7" in text                          # 9.0 so far + (2 x 5/6 + 4 x 2) still to come
+    assert "20.5" in text                          # the sunrise forecast it is compared with
+    _assert_left_aligned(text)
+
+
+def test_today_report_without_a_store_says_so():
+    text = alerts._today_report({}, datetime(2026, 10, 26, 12, 10), _tracker_c(), None, None)
+    assert "history" in text.lower()
+
+
+def _bot_with(tmp_path, soc=50.0, forecast=None, store=None, saved_state=None):
+    import types
+    from pathlib import Path
+
+    if saved_state:
+        alerts._save_peak_state(Path(tmp_path), saved_state)
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6, output_dir=str(tmp_path)), api_key="x")
+    bot._outdir = tmp_path
+    bot._stats = types.SimpleNamespace(current=_tracker_c(soc))
+    bot._usage_forecast = forecast
+    bot._hist_store = store
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    return bot, sent
+
+
+def test_send_accuracy_replies_with_the_scoreboard(tmp_path):
+    resid = [{"day": f"2026-10-{i + 1:02d}", "slot": "15:30", "err": 2.0, "grid": False} for i in range(9)]
+    bot, sent = _bot_with(tmp_path, saved_state={"sundown_resid": resid,
+                                                 "sundown_resid_epoch": alerts.SOLAR_MODEL_EPOCH})
+    bot._send_accuracy("1")
+    assert "How accurate" in sent["text"] and "3:30 PM" in sent["text"]
+
+
+def test_send_reserve_recommends_a_charge_level(tmp_path):
+    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+    hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0})
+    fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
+    bot, sent = _bot_with(tmp_path, soc=30.0, forecast=fc)
+    bot._send_reserve("1")
+    assert "Charge to" in sent["text"]
+    assert "floor around" in sent["text"]             # 30% and 0.5 kW all night reaches the floor
+    assert "%" in sent["text"]
+    _assert_left_aligned(sent["text"])
+
+
+def test_send_reserve_says_when_no_charge_is_needed(tmp_path):
+    now = datetime.now().replace(hour=21, minute=0, second=0, microsecond=0)
+    hours = _night_hours(now, 24, load=0.3, solar_by_hour={8: 1.0, 9: 2.0})
+    fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
+    bot, sent = _bot_with(tmp_path, soc=95.0, forecast=fc)
+    bot._send_reserve("1")
+    assert "No grid charge needed" in sent["text"]
+
+
+def test_send_today_replies_with_the_day_so_far(tmp_path):
+    now = datetime.now().replace(hour=12, minute=10, second=0, microsecond=0)
+    hours = _night_hours(now.replace(minute=0), 5, load=0.5, solar_by_hour={12: 2.0, 13: 2.0, 14: 2.0})
+    fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
+    bot, sent = _bot_with(tmp_path, forecast=fc, store=_today_store())
+    bot._send_today("1")
+    assert "Today so far" in sent["text"]
+    assert "Still to come" in sent["text"]
+
+
+def test_reserve_plan_clips_the_walk_at_empty_and_full():
+    """Regression (live check 2026-10-26, 2:14 PM): the walk ran on past 0% to
+    "-49% at 6 AM" and past 100% on sunny afternoons. A battery can't go below empty
+    or above full (surplus exports)."""
+    now = datetime(2026, 10, 26, 14, 0)
+    sun = {14: 4.0, 15: 4.0, 16: 3.0, 17: 1.0}
+    hours = _night_hours(now, 24, load=1.2, solar_by_hour=sun)
+    plan = alerts._reserve_plan(now, 90.0, 13.6, hours, floor_pct=10.0)
+    assert 0.0 <= plan["natural_6am_pct"] <= 100.0
+    assert plan["natural_6am_pct"] == 0.0           # full at sundown, then 1.2 kW x 12 h = 14.4 kWh to 6 AM: empty
+    assert plan["charge_kwh"] >= 0.0
+
+
+def test_reserve_plan_says_when_the_battery_reaches_the_floor_tonight():
+    now = datetime(2026, 10, 26, 21, 0)
+    hours = _night_hours(now, 24, load=1.0, solar_by_hour={9: 2.0, 10: 3.0})
+    plan = alerts._reserve_plan(now, 50.0, 13.6, hours, floor_pct=10.0)
+    # 50% = 6.8 kWh; floor 1.36 kWh; 1 kW load -> crosses after 5.44 h of walk = ~2:26 AM
+    assert plan["floor_at"].date() == datetime(2026, 10, 27).date()
+    assert 2 <= plan["floor_at"].hour <= 3
+    full = alerts._reserve_plan(now, 100.0, 13.6, _night_hours(now, 24, load=0.1, solar_by_hour={8: 1.0}), 10.0)
+    assert full["floor_at"] is None
