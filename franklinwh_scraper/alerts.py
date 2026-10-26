@@ -2758,7 +2758,7 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
             f"daily_import_cost_{(now.date() - timedelta(days=i)).strftime('%Y-%m-%d')}"
         ))) is not None
     ]
-    avg_cost_str = f"  Avg daily import: ${sum(daily_costs) / len(daily_costs):.2f}\n" if daily_costs else ""
+    avg_cost_str = f"Avg daily import: ${sum(daily_costs) / len(daily_costs):.2f}\n" if daily_costs else ""
 
     # Solar prediction accuracy (±% avg error vs actual)
     cutoff = (now.date() - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -2855,17 +2855,17 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
     return (
         f"📊 FranklinWH Weekly Summary — {week_label}\n\n"
         f"Grid cost (EV-TOU-5 rates):\n"
-        f"<code>  Imported:     ${import_cost:.2f}\n"
-        f"  Exported:     ${export_credit:.2f} (est.)\n"
-        f"  Base service: ${base_fee:.2f}\n"
-        f"  Net cost:     ${net_cost:.2f}</code>\n"
+        f"<code>Imported:     ${import_cost:.2f}\n"
+        f"Exported:     ${export_credit:.2f} (est.)\n"
+        f"Base service: ${base_fee:.2f}\n"
+        f"Net cost:     ${net_cost:.2f}</code>\n"
         f"{avg_cost_str}"
         f"\nEst. savings from battery + solar:\n"
-        f"<code>  Peak (4–9 pm):    ${peak_saved:.2f}\n"
-        f"  Off-peak:         ${offpeak_saved:.2f}\n"
-        f"  Super off-peak:   ${sop_saved:.2f}\n"
-        f"  Export credit:    ${export_credit:.2f}\n"
-        f"  Total saved:      ${total_saved:.2f}</code>{stale_note}"
+        f"<code>Peak (4–9 pm):    ${peak_saved:.2f}\n"
+        f"Off-peak:         ${offpeak_saved:.2f}\n"
+        f"Super off-peak:   ${sop_saved:.2f}\n"
+        f"Export credit:    ${export_credit:.2f}\n"
+        f"Total saved:      ${total_saved:.2f}</code>{stale_note}"
         f"{accuracy_str}{cycle_str}"
     )
 
@@ -2931,11 +2931,11 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
 
     trueup_str = (
         f"\n\nNEM true-up (est.):\n"
-        f"<code>  Import:       ${import_cost:.2f}\n"
-        f"  Export:       ${export_credit:.2f}\n"
-        f"  Base service: ${base_fee:.2f}\n"
-        f"  Net:          ${net_cycle:+.2f} this cycle\n"
-        f"  ~${annual:+.0f}/yr at this rate — {direction}</code>"
+        f"<code>Import:       ${import_cost:.2f}\n"
+        f"Export:       ${export_credit:.2f}\n"
+        f"Base service: ${base_fee:.2f}\n"
+        f"Net:          ${net_cycle:+.2f} this cycle\n"
+        f"~${annual:+.0f}/yr at this rate — {direction}</code>"
     )
 
     # $ driver line — the kWh breakdown above already shows *what* changed,
@@ -2983,7 +2983,7 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
     if isinstance(_cum, dict) and _cum.get("days"):
         lifetime_str = (
             f"\n\n💰 Saved vs. no battery/solar:\n"
-            f"<code>  ${_cum.get('vs_grid', 0.0):.2f} over {_cum['days']} days"
+            f"<code>${_cum.get('vs_grid', 0.0):.2f} over {_cum['days']} days"
             f"  (~${_cum.get('vs_grid', 0.0) / max(1, _cum['days']):.2f}/day)</code>\n"
             f"<i>At current rates, excluding the base service charge.</i>"
         )
@@ -3005,10 +3005,10 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
             yoy_label = f"{yoy_start.strftime('%b %-d')} – {yoy_end.strftime('%b %-d, %Y')}"
             yoy_str = (
                 f"\n\nYear-over-year ({yoy_label}):\n"
-                f"<code>  Solar:  {cur.solar_kwh:.1f} kWh{_mdelta(cur.solar_kwh, yoy.solar_kwh)}\n"
-                f"  Import: {cur.grid_import_kwh:.1f} kWh{_mdelta(cur.grid_import_kwh, yoy.grid_import_kwh)}\n"
-                f"  Export: {cur.grid_export_kwh:.1f} kWh{_mdelta(cur.grid_export_kwh, yoy.grid_export_kwh)}\n"
-                f"  Home:   {cur.home_load_kwh:.1f} kWh{_mdelta(cur.home_load_kwh, yoy.home_load_kwh)}</code>"
+                f"<code>Solar:  {cur.solar_kwh:.1f} kWh{_mdelta(cur.solar_kwh, yoy.solar_kwh)}\n"
+                f"Import: {cur.grid_import_kwh:.1f} kWh{_mdelta(cur.grid_import_kwh, yoy.grid_import_kwh)}\n"
+                f"Export: {cur.grid_export_kwh:.1f} kWh{_mdelta(cur.grid_export_kwh, yoy.grid_export_kwh)}\n"
+                f"Home:   {cur.home_load_kwh:.1f} kWh{_mdelta(cur.home_load_kwh, yoy.home_load_kwh)}</code>"
             )
     except (ValueError, AttributeError):
         pass
@@ -3019,17 +3019,17 @@ def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: C
         f"📅 FranklinWH Billing Cycle — {cur_label}\n"
         f"vs prior cycle ({prev_label})\n\n"
         f"Solar generated:\n"
-        f"<code>  This:  {cur.solar_kwh:.1f} kWh{_mdelta(cur.solar_kwh, prev.solar_kwh)}\n"
-        f"  Prior: {prev.solar_kwh:.1f} kWh</code>\n\n"
+        f"<code>This:  {cur.solar_kwh:.1f} kWh{_mdelta(cur.solar_kwh, prev.solar_kwh)}\n"
+        f"Prior: {prev.solar_kwh:.1f} kWh</code>\n\n"
         f"Grid imported:\n"
-        f"<code>  This:  {cur.grid_import_kwh:.1f} kWh{_mdelta(cur.grid_import_kwh, prev.grid_import_kwh)}\n"
-        f"  Prior: {prev.grid_import_kwh:.1f} kWh</code>\n\n"
+        f"<code>This:  {cur.grid_import_kwh:.1f} kWh{_mdelta(cur.grid_import_kwh, prev.grid_import_kwh)}\n"
+        f"Prior: {prev.grid_import_kwh:.1f} kWh</code>\n\n"
         f"Grid exported:\n"
-        f"<code>  This:  {cur.grid_export_kwh:.1f} kWh{_mdelta(cur.grid_export_kwh, prev.grid_export_kwh)}\n"
-        f"  Prior: {prev.grid_export_kwh:.1f} kWh</code>\n\n"
+        f"<code>This:  {cur.grid_export_kwh:.1f} kWh{_mdelta(cur.grid_export_kwh, prev.grid_export_kwh)}\n"
+        f"Prior: {prev.grid_export_kwh:.1f} kWh</code>\n\n"
         f"Home used:\n"
-        f"<code>  This:  {cur.home_load_kwh:.1f} kWh{_mdelta(cur.home_load_kwh, prev.home_load_kwh)}\n"
-        f"  Prior: {prev.home_load_kwh:.1f} kWh</code>{sparse_note}"
+        f"<code>This:  {cur.home_load_kwh:.1f} kWh{_mdelta(cur.home_load_kwh, prev.home_load_kwh)}\n"
+        f"Prior: {prev.home_load_kwh:.1f} kWh</code>{sparse_note}"
         f"{trueup_str}{driver_str}{flip_str}{yoy_str}{lifetime_str}"
     )
 
@@ -3081,8 +3081,8 @@ def _alert_rate_plan_optimality(state: dict, today: str, now: datetime, store) -
     return (
         f"💡 <b>FranklinWH: DR-SES may beat your current EV-TOU-5 plan</b>\n"
         f"Over the last {cmp.days} days ({cmp.import_kwh:.0f} kWh imported):\n"
-        f"<code>  EV-TOU-5: ${cmp.evtou5_import_cost:.2f}\n"
-        f"  DR-SES:   ${cmp.drses_import_cost:.2f}</code>\n"
+        f"<code>EV-TOU-5: ${cmp.evtou5_import_cost:.2f}\n"
+        f"DR-SES:   ${cmp.drses_import_cost:.2f}</code>\n"
         f"Projected ~${cmp.monthly_savings:.2f}/month cheaper on DR-SES, based on grid-import "
         f"pattern only (export credit and base service charge are the same under either plan). "
         f"DR-SES has no EV-specific incentive and a 12-month lock-in before switching back — "
@@ -3753,15 +3753,15 @@ def _alert_bill_projection(
     return (
         f"💡 FranklinWH: Billing cycle projection\n"
         f"Cycle so far ({cycle_label}, {days_so_far} days):\n"
-        f"<code>  Grid import:  ${import_cost:.2f}\n"
-        f"  Grid export:  ${export_credit:.2f}\n"
-        f"  Base service: ${base_actual:.2f}\n"
-        f"  Net cost:     ${net_actual:.2f}</code>\n\n"
+        f"<code>Grid import:  ${import_cost:.2f}\n"
+        f"Grid export:  ${export_credit:.2f}\n"
+        f"Base service: ${base_actual:.2f}\n"
+        f"Net cost:     ${net_actual:.2f}</code>\n\n"
         f"Projected full cycle ({cycle_days} days):\n"
-        f"<code>  Import:  ${projected_imp:.2f}\n"
-        f"  Export:  ${projected_exp:.2f}\n"
-        f"  Base:    ${projected_base:.2f}\n"
-        f"  Net:     ${projected_net:.2f}  (${daily_net:.2f}/day avg)</code>"
+        f"<code>Import:  ${projected_imp:.2f}\n"
+        f"Export:  ${projected_exp:.2f}\n"
+        f"Base:    ${projected_base:.2f}\n"
+        f"Net:     ${projected_net:.2f}  (${daily_net:.2f}/day avg)</code>"
     )
 
 

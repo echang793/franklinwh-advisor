@@ -17,6 +17,14 @@ from franklinwh_scraper.config import Config
 from franklinwh_scraper.predictor import predict
 
 
+def _assert_left_aligned(msg: str) -> None:
+    """No line of an alert starts with whitespace (tags ignored), including
+    lines inside <code> blocks."""
+    import re
+    plain = re.sub(r"</?(?:b|i|code)>", "", msg)
+    assert [ln for ln in plain.splitlines() if ln[:1].isspace()] == []
+
+
 @pytest.fixture(autouse=True)
 def _isolate_login_token_cache(tmp_path_factory, monkeypatch):
     """AccountClient caches its login token on disk. Point that at a per-test
@@ -1298,6 +1306,7 @@ def test_alert_monthly_summary_includes_dollar_driver_line(tmp_path):
     assert body is not None
     assert "more than prior cycle" in body
     assert "grid import running up" in body
+    _assert_left_aligned(body)
     # No 2025 data in this DB at all -> YoY block must be silently omitted,
     # not a "not enough data" nag (this fires every cycle for a full year).
     assert "Year-over-year" not in body
@@ -1338,6 +1347,7 @@ def test_alert_monthly_summary_includes_year_over_year(tmp_path):
 
     assert body is not None
     assert "Year-over-year (Aug 1 – Aug 31, 2025)" in body
+    _assert_left_aligned(body)
     db.close()
 
 
@@ -2293,6 +2303,7 @@ def test_bill_projection_uses_real_cycle_length_not_30(tmp_path):
     assert msg is not None
     assert "Projected full cycle (31 days)" in msg
     assert "~30 days" not in msg
+    _assert_left_aligned(msg)
 
 
 def _insert_cycle_readings(db, start_day: int, month: str, days: range):
@@ -3195,6 +3206,7 @@ def test_weekly_summary_includes_warranty_cycle_eta(tmp_path):
     assert "Battery cycles" in msg
     assert "rated cycles reached" in msg
     assert "years out" in msg
+    _assert_left_aligned(msg)
 
 
 def _frozen_dt(fixed):
