@@ -11761,7 +11761,7 @@ def test_mode_probe_never_raises(tmp_path):
     assert alerts.maybe_probe_mode(_Broken(), "gw1", tmp_path, datetime(2026, 10, 26, 10, 0)) is False
 
 
-# ── a steady draw during on-peak (the car left charging at 10 A) ─────────
+# ── the car charging by accident during on-peak (left on at 10 A) ──────
 
 class _DrawStore:
     """readings_between gives (ts, grid_kw, home_kw, solar_kw); soc_near the battery %."""
@@ -11777,52 +11777,105 @@ class _DrawStore:
         return self.soc_at_start
 
 
-def _draw_alert(loads, now, state=None, soc=62.0, start="2026-10-26T17:00:00"):
+# 5:00 and 5:05 quiet, then 10 A of car (about 2.4 kW) on top of the house from 5:10
+_CAR_10A = [0.4, 0.4, 2.8, 2.78, 2.81]
+
+
+def _car_alert(loads, now, state=None, soc=62.0, start="2026-10-26T17:00:00", cfg=None, outlook=None):
     st = {} if state is None else state
     c = _tracker_c(soc)
     c.home_load_kw, c.solar_production_kw = loads[-1], 0.0
-    return alerts._alert_peak_draw(st, "2026-10-26", now, c, Config(battery_capacity_kwh=13.6),
-                                   _DrawStore(loads, start=start)), st
+    return alerts._alert_car_on_peak(st, "2026-10-26", now, c, cfg or Config(battery_capacity_kwh=13.6),
+                                     _DrawStore(loads, start=start), outlook), st
 
 
-def test_peak_draw_alert_fires_on_a_steady_2_8_kw_draw_in_the_first_minutes():
-    # 5:00 and 5:05 quiet, then the car at 10 A (about 2.4 kW on top of the house) from 5:10
-    msg, state = _draw_alert([0.4, 0.4, 2.8, 2.8], datetime(2026, 10, 26, 17, 16))
+def test_car_on_peak_alert_fires_on_the_signature_of_a_10_amp_charge(monkeypatch):
+    monkeypatch.setattr(alerts, "_tesla_charge_state", lambda cfg: ("unknown", None))
+    msg, state = _car_alert(_CAR_10A, datetime(2026, 10, 26, 17, 21))
     assert msg is not None
-    assert "since 5:10 PM" in msg and "2.8 kW" in msg and "on-peak" in msg.lower()
-    assert "Tesla" in msg and "71%" in msg                      # where the battery was when it began
-    assert state["peak_draw_key"] == "2026-10-26T17:10"
+    assert "Tesla" in msg and "since 5:10 PM" in msg and "10 A" in msg and "2.8 kW" in msg
+    assert "71%" in msg and "stop it in the Tesla app" in msg
+    assert state["car_peak_key"] == "2026-10-26T17:10"
     _assert_left_aligned(msg)
 
 
-def test_peak_draw_alert_says_what_it_costs_if_left_running():
-    msg, _ = _draw_alert([0.4, 2.8, 2.8, 2.8], datetime(2026, 10, 26, 17, 16), soc=14.0)
+def test_car_on_peak_alert_says_what_finishing_would_cost(monkeypatch):
+    monkeypatch.setattr(alerts, "_tesla_charge_state", lambda cfg: ("unknown", None))
+    msg, _ = _car_alert(_CAR_10A, datetime(2026, 10, 26, 17, 21), soc=14.0)
     assert "grid" in msg.lower() and "$" in msg
 
 
-def test_peak_draw_alert_ignores_off_peak_blips_and_ended_runs():
-    assert _draw_alert([0.4, 2.8, 2.8, 2.8], datetime(2026, 10, 26, 12, 16), start="2026-10-26T12:00:00")[0] is None  # not on-peak
-    assert _draw_alert([0.4, 0.4, 2.8, 0.4], datetime(2026, 10, 26, 17, 16))[0] is None                          # one reading
-    assert _draw_alert([0.4, 2.8, 2.8, 0.4, 0.4], datetime(2026, 10, 26, 17, 22))[0] is None                     # already over
-    assert _draw_alert([0.4, 0.4, 0.4, 0.4], datetime(2026, 10, 26, 17, 16))[0] is None                          # nothing big
+def test_car_on_peak_alert_ignores_what_does_not_look_like_a_car(monkeypatch):
+    monkeypatch.setattr(alerts, "_tesla_charge_state", lambda cfg: ("unknown", None))
+    now = datetime(2026, 10, 26, 17, 21)
+    assert _car_alert(_CAR_10A, datetime(2026, 10, 26, 12, 21), start="2026-10-26T12:00:00")[0] is None   # not on-peak
+    assert _car_alert([0.4, 0.4, 2.8, 2.8], datetime(2026, 10, 26, 17, 16))[0] is None                    # only 2 readings so far
+    assert _car_alert([0.4, 0.4, 2.8, 2.8, 2.8, 0.4, 0.4], datetime(2026, 10, 26, 17, 31))[0] is None     # already over
+    assert _car_alert([0.4] * 5, now)[0] is None                                                          # nothing big
+    assert _car_alert([0.4, 0.4, 3.2, 2.6, 2.9], now)[0] is None                                          # wobbly: a dryer or stove
+    assert _car_alert([0.4, 1.7, 4.2, 1.8, 4.1], now)[0] is None                                          # an oven cycling
+    assert _car_alert([1.5, 1.5, 1.7, 1.7, 1.7], now)[0] is None                                          # a flat 1.7 kW that was 1.5 kW already
 
 
-def test_peak_draw_alert_ignores_unsteady_loads():
-    assert _draw_alert([0.4, 1.7, 4.2, 1.8, 4.1, 1.9], datetime(2026, 10, 26, 17, 26))[0] is None               # an oven cycling
+def test_car_on_peak_alert_asks_the_tesla_when_it_is_set_up(monkeypatch):
+    cs = type("CS", (), {"charging": True, "actual_current_a": 10.0, "vehicle_soc_pct": 62.0, "charge_limit_pct": 80.0})()
+    monkeypatch.setattr(alerts, "_tesla_charge_state", lambda cfg: ("charging", cs))
+    msg, _ = _car_alert(_CAR_10A, datetime(2026, 10, 26, 17, 21))
+    assert "Tesla confirms it is charging at 10 A" in msg and "62%" in msg and "80%" in msg
 
 
-def test_peak_draw_alert_fires_once_per_run_and_at_most_three_a_day():
+def test_car_on_peak_alert_stays_silent_when_the_tesla_says_it_is_not_charging(monkeypatch):
+    calls = []
+    monkeypatch.setattr(alerts, "_tesla_charge_state", lambda cfg: (calls.append(1), ("not_charging", None))[1])
     state: dict = {}
-    loads = [0.4, 2.8, 2.8, 2.8]
-    assert _draw_alert(loads, datetime(2026, 10, 26, 17, 16), state)[0] is not None
-    assert _draw_alert(loads, datetime(2026, 10, 26, 17, 21), state)[0] is None          # same run, already told
-    assert alerts._alert_peak_draw(state, "2026-10-26", datetime(2026, 10, 26, 18, 16), _tracker_c(50.0),
-                                   Config(), _DrawStore([0.4, 2.8, 2.8, 2.8], start="2026-10-26T18:00:00")) is not None
-    assert alerts._alert_peak_draw(state, "2026-10-26", datetime(2026, 10, 26, 19, 16), _tracker_c(40.0),
-                                   Config(), _DrawStore([0.4, 2.8, 2.8, 2.8], start="2026-10-26T19:00:00")) is not None
-    assert alerts._alert_peak_draw(state, "2026-10-26", datetime(2026, 10, 26, 20, 16), _tracker_c(30.0),
-                                   Config(), _DrawStore([0.4, 2.8, 2.8, 2.8], start="2026-10-26T20:00:00")) is None   # 4th
+    assert _car_alert(_CAR_10A, datetime(2026, 10, 26, 17, 21), state)[0] is None       # a dryer, not the car
+    assert _car_alert(_CAR_10A, datetime(2026, 10, 26, 17, 26), state)[0] is None
+    assert len(calls) == 1                                                                # asked once per run, not every poll
 
 
-def test_peak_draw_alert_without_a_store_is_silent():
-    assert alerts._alert_peak_draw({}, "2026-10-26", datetime(2026, 10, 26, 17, 16), _tracker_c(), Config(), None) is None
+def test_car_on_peak_alert_falls_back_to_the_signature_when_the_tesla_cannot_be_reached(monkeypatch):
+    monkeypatch.setattr(alerts, "_tesla_charge_state", lambda cfg: ("unknown", None))
+    assert _car_alert(_CAR_10A, datetime(2026, 10, 26, 17, 21))[0] is not None
+
+
+def test_tesla_charge_state_is_unknown_without_setup_and_never_raises(monkeypatch):
+    assert alerts._tesla_charge_state(Config()) == ("unknown", None)                      # no VIN / client id
+    cfg = Config(tesla_vin="VIN", tesla_client_id="id")
+
+    class _Boom:
+        def __init__(self, *a): pass
+        def get_charge_state(self): raise RuntimeError("network down")
+
+    from franklinwh_scraper import tesla
+    monkeypatch.setattr(tesla, "TeslaClient", _Boom)
+    assert alerts._tesla_charge_state(cfg) == ("unknown", None)
+
+    class _Asleep(_Boom):
+        def get_charge_state(self): raise tesla.VehicleAsleep("asleep")
+
+    monkeypatch.setattr(tesla, "TeslaClient", _Asleep)
+    assert alerts._tesla_charge_state(cfg) == ("not_charging", None)                      # a sleeping car is not charging
+
+
+def test_car_on_peak_alert_warns_that_the_ac_can_look_the_same_on_a_hot_day(monkeypatch):
+    monkeypatch.setattr(alerts, "_tesla_charge_state", lambda cfg: ("unknown", None))
+
+    class _Hot:
+        hours = [type("H", (), {"time": datetime(2026, 10, 26, h), "temp_c": 36.0})() for h in range(8, 18)]
+
+    msg, _ = _car_alert(_CAR_10A, datetime(2026, 10, 26, 17, 21), outlook=_Hot())
+    assert "AC" in msg
+
+
+def test_car_on_peak_alert_fires_once_per_run_and_at_most_three_a_day(monkeypatch):
+    monkeypatch.setattr(alerts, "_tesla_charge_state", lambda cfg: ("unknown", None))
+    state: dict = {}
+    assert _car_alert(_CAR_10A, datetime(2026, 10, 26, 17, 21), state)[0] is not None
+    assert _car_alert(_CAR_10A, datetime(2026, 10, 26, 17, 21), state)[0] is None          # same run, already told
+    for hour in (18, 19):
+        assert _car_alert(_CAR_10A, datetime(2026, 10, 26, hour, 21), state, start=f"2026-10-26T{hour}:00:00")[0] is not None
+    assert _car_alert(_CAR_10A, datetime(2026, 10, 26, 20, 21), state, start="2026-10-26T20:00:00")[0] is None    # 4th
+
+
+def test_car_on_peak_alert_without_a_store_is_silent():
+    assert alerts._alert_car_on_peak({}, "2026-10-26", datetime(2026, 10, 26, 17, 21), _tracker_c(), Config(), None) is None

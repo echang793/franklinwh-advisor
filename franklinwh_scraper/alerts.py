@@ -3068,49 +3068,91 @@ def _alert_load_question(state: dict, today: str, now: datetime, store) -> str |
     return None
 
 
-_PEAK_DRAW_KW = 1.6                         # steady house load above this, during on-peak, is worth a message
-_PEAK_DRAW_CV = 0.35                        # std/mean of the run: an oven cycling is not "steady"
-_PEAK_DRAW_MIN_SPAN = timedelta(minutes=4, seconds=30)
-_PEAK_DRAW_MAX_AGE = timedelta(minutes=7)   # the last reading must be this recent: it is still running
-_PEAK_DRAW_MAX_PER_DAY = 3
+_CAR_PEAK_MIN_KW = 1.6                      # a car on a 240 V circuit draws 1.4 kW (6 A) and up
+_CAR_PEAK_MAX_CV = 0.06                     # fixed-amp charging is dead flat; ovens, dryers and stoves cycle (cv 0.2+)
+_CAR_PEAK_MIN_READINGS = 3                  # ~10 minutes at the 5-minute cadence: enough to judge flatness
+_CAR_PEAK_MIN_SPAN = timedelta(minutes=9, seconds=30)
+_CAR_PEAK_MAX_AGE = timedelta(minutes=7)    # the last reading must be this recent: it is still running
+_CAR_PEAK_MAX_PER_DAY = 3
+_CAR_VOLTS_PER_AMP_KW = 0.24                # 240 V
+_CAR_PEAK_MIN_AMPS = 4.5                    # the Tesla's floor is 5 A (about 1.2 kW)
 
 
-def _alert_peak_draw(state: dict, today: str, now: datetime, c, cfg: Config, store) -> str | None:
-    """A steady big load while it is expensive: during on-peak (4-9 PM) the house has been
-    drawing 1.6+ kW, steadily, for 5+ minutes and still is. The 2026-10-26 case: the car left
-    charging at 10 A from 5:10 PM, ~2.4 kW on top of the house, which the 3 kW big-draw alert
-    never saw and the owner only noticed 45 minutes later (71% -> 47%). Says what it is
-    costing and how to stop it. Once per run, at most 3 a day."""
+def _tesla_charge_state(cfg) -> tuple[str, object | None]:
+    """Ask the car directly when the Tesla Fleet API is set up: ("charging" | "not_charging" |
+    "unknown", state). "unknown" when it is not configured or the call fails; a sleeping car
+    is not charging. One billable poll ($0.002), so callers cache the answer per run."""
+    if not (getattr(cfg, "tesla_vin", "") and getattr(cfg, "tesla_client_id", "")):
+        return "unknown", None
+    try:
+        from .tesla import TeslaClient, VehicleAsleep
+        try:
+            cs = TeslaClient(cfg.tesla_vin, cfg.tesla_client_id).get_charge_state()
+        except VehicleAsleep:
+            return "not_charging", None
+        return ("charging" if cs.charging else "not_charging"), cs
+    except Exception:
+        logger.debug("Tesla charge state unavailable", exc_info=True)
+        return "unknown", None
+
+
+def _alert_car_on_peak(state: dict, today: str, now: datetime, c, cfg: Config, store, outlook=None) -> str | None:
+    """The car charging by accident during on-peak (4-9 PM), when every kWh is the most
+    expensive of the day (the app's own EV policy is "on-peak: never charge"). The 2026-10-26
+    case: left charging at 10 A from 5:10 PM, ~2.4 kW on top of the house, noticed 45 minutes
+    later with the battery at 47%, when the 3 kW big-draw alert had stayed silent.
+
+    Recognised by its signature: a steady load (std/mean <= 6%) of 1.6+ kW for 10+ minutes that
+    is still running, which fixed-amp car charging produces and cycling appliances do not. When
+    the Tesla API is set up the car is asked too: not charging means it was something else and
+    nothing is sent. Once per run, at most 3 a day."""
     if store is None or period_at(now) != TouPeriod.ON_PEAK:
         return None
     try:
         readings = store.readings_between((now - timedelta(hours=4)).isoformat(),
                                           (now + timedelta(minutes=1)).isoformat())
     except Exception:
-        logger.debug("peak draw check unavailable", exc_info=True)
+        logger.debug("car on-peak check unavailable", exc_info=True)
         return None
     run: list[tuple[datetime, float]] = []
     for ts, _grid, home, _solar in reversed(readings):
         t = datetime.fromisoformat(ts)
-        if home < _PEAK_DRAW_KW or (run and run[-1][0] - t > _PEAK_DRAW_MAX_AGE):
+        if home < _CAR_PEAK_MIN_KW or (run and run[-1][0] - t > _CAR_PEAK_MAX_AGE):
             break
         run.append((t, home))
     run.reverse()
-    if len(run) < 2 or now - run[-1][0] > _PEAK_DRAW_MAX_AGE or run[-1][0] - run[0][0] < _PEAK_DRAW_MIN_SPAN:
+    if (len(run) < _CAR_PEAK_MIN_READINGS or now - run[-1][0] > _CAR_PEAK_MAX_AGE
+            or run[-1][0] - run[0][0] < _CAR_PEAK_MIN_SPAN):
         return None
     loads = [kw for _t, kw in run]
     mean = statistics.mean(loads)
-    if statistics.pstdev(loads) / mean > _PEAK_DRAW_CV:
+    if statistics.pstdev(loads) / mean > _CAR_PEAK_MAX_CV:
         return None
     start = run[0][0]
     key = start.strftime("%Y-%m-%dT%H:%M")
-    if state.get("peak_draw_key") == key:
+    # A car adds at least ~1.2 kW (5 A) on top of the house. A flat 1.7 kW that was already 1.5 kW
+    # before it "started" is just the house, not a charge.
+    before = [home for ts, _g, home, _s in readings if start - timedelta(minutes=30) <= datetime.fromisoformat(ts) < start]
+    base = statistics.median(before) if before else 0.4
+    amps = (mean - base) / _CAR_VOLTS_PER_AMP_KW
+    if amps < _CAR_PEAK_MIN_AMPS:
         return None
-    count = state.get("peak_draw_count") or {}
-    if count.get("day") == today and count.get("n", 0) >= _PEAK_DRAW_MAX_PER_DAY:
+    if state.get("car_peak_key") == key:
         return None
-    state["peak_draw_key"] = key
-    state["peak_draw_count"] = {"day": today, "n": (count.get("n", 0) + 1) if count.get("day") == today else 1}
+    count = state.get("car_peak_count") or {}
+    if count.get("day") == today and count.get("n", 0) >= _CAR_PEAK_MAX_PER_DAY:
+        return None
+
+    status, car = ("unknown", None)
+    if state.get("car_peak_checked") != key:           # ask the car once per run
+        status, car = _tesla_charge_state(cfg)
+        if status == "not_charging":
+            state["car_peak_checked"] = key
+            state["car_peak_key"] = key                # something else (a dryer...): don't ask again for this run
+            return None
+
+    state["car_peak_key"] = key
+    state["car_peak_count"] = {"day": today, "n": (count.get("n", 0) + 1) if count.get("day") == today else 1}
 
     reserve = getattr(cfg, "battery_reserve_pct", DEFAULT_RESERVE_PCT)
     cap = getattr(cfg, "battery_capacity_kwh", None) or _BATTERY_CAPACITY_KWH
@@ -3124,16 +3166,24 @@ def _alert_peak_draw(state: dict, today: str, now: datetime, c, cfg: Config, sto
     rate = rate_at(now)
     minutes = (now - start).total_seconds() / 60.0
     was = f" (it was {soc_then:.0f}% when this began)" if soc_then is not None else ""
+    if car is not None and getattr(car, "charging", False):
+        what = (f"The Tesla confirms it is charging at {car.actual_current_a:.0f} A "
+                f"({car.vehicle_soc_pct:.0f}% of its {car.charge_limit_pct:.0f}% limit).")
+    else:
+        what = f"A steady ~{mean:.1f} kW, about {amps:.0f} A at 240 V: what car charging looks like."
+        temps = [h.temp_c for h in getattr(outlook, "hours", []) if h.time.date() == now.date()]
+        if temps and max(temps) >= _HOT_DAY_C:
+            what += " (On a hot day the AC can look the same.)"
     msg = (
-        f"⚡ <b>FranklinWH: Big steady draw during on-peak</b>\n"
-        f"~{mean:.1f} kW since {start.strftime('%-I:%M %p')} ({minutes:.0f} min). The car? A dryer? AC?\n"
+        f"🚗⚡ <b>FranklinWH: Is the Tesla charging during on-peak?</b>\n"
+        f"{what} Running since {start.strftime('%-I:%M %p')} ({minutes:.0f} min).\n"
         f"🔋 {c.battery_soc_pct:.0f}% now{was}.\n"
         f"Left running until {end_h.strftime('%-I %p')} that is ~{need:.1f} kWh: the battery covers "
         f"{min(room, need):.1f} kWh down to your {reserve:.0f}% reserve"
     )
     msg += (f", the other ~{shortfall:.1f} kWh comes from the grid at ${rate:.2f}/kWh (~${shortfall * rate:.2f})."
             if shortfall > 0.05 else ".")
-    return msg + "\nIf it's the car and you didn't mean it, stop it in the Tesla app."
+    return msg + "\nIf you didn't mean to charge, stop it in the Tesla app."
 
 
 def _alert_car_charge_started(state: dict, today: str, now: datetime, c, cfg: Config, store) -> str | None:
@@ -5317,7 +5367,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("car_question",         lambda: _alert_car_question(state, today, now, store)),
             ("load_question",        lambda: _alert_load_question(state, today, now, store)),
             ("car_charge_started",   lambda: _alert_car_charge_started(state, today, now, c, cfg, store)),
-            ("peak_draw",            lambda: _alert_peak_draw(state, today, now, c, cfg, store)),
+            ("car_on_peak",          lambda: _alert_car_on_peak(state, today, now, c, cfg, store, outlook)),
             ("solar_backtest",       lambda: _maybe_launch_monthly_backtest(state, now, cfg)),
             ("sundown_drift",        lambda: _alert_sundown_drift(state, today, now)),
             ("miss_question",        lambda: _alert_miss_question(state, today, now)),
