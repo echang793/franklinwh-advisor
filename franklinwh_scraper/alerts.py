@@ -3068,6 +3068,74 @@ def _alert_load_question(state: dict, today: str, now: datetime, store) -> str |
     return None
 
 
+_PEAK_DRAW_KW = 1.6                         # steady house load above this, during on-peak, is worth a message
+_PEAK_DRAW_CV = 0.35                        # std/mean of the run: an oven cycling is not "steady"
+_PEAK_DRAW_MIN_SPAN = timedelta(minutes=4, seconds=30)
+_PEAK_DRAW_MAX_AGE = timedelta(minutes=7)   # the last reading must be this recent: it is still running
+_PEAK_DRAW_MAX_PER_DAY = 3
+
+
+def _alert_peak_draw(state: dict, today: str, now: datetime, c, cfg: Config, store) -> str | None:
+    """A steady big load while it is expensive: during on-peak (4-9 PM) the house has been
+    drawing 1.6+ kW, steadily, for 5+ minutes and still is. The 2026-10-26 case: the car left
+    charging at 10 A from 5:10 PM, ~2.4 kW on top of the house, which the 3 kW big-draw alert
+    never saw and the owner only noticed 45 minutes later (71% -> 47%). Says what it is
+    costing and how to stop it. Once per run, at most 3 a day."""
+    if store is None or period_at(now) != TouPeriod.ON_PEAK:
+        return None
+    try:
+        readings = store.readings_between((now - timedelta(hours=4)).isoformat(),
+                                          (now + timedelta(minutes=1)).isoformat())
+    except Exception:
+        logger.debug("peak draw check unavailable", exc_info=True)
+        return None
+    run: list[tuple[datetime, float]] = []
+    for ts, _grid, home, _solar in reversed(readings):
+        t = datetime.fromisoformat(ts)
+        if home < _PEAK_DRAW_KW or (run and run[-1][0] - t > _PEAK_DRAW_MAX_AGE):
+            break
+        run.append((t, home))
+    run.reverse()
+    if len(run) < 2 or now - run[-1][0] > _PEAK_DRAW_MAX_AGE or run[-1][0] - run[0][0] < _PEAK_DRAW_MIN_SPAN:
+        return None
+    loads = [kw for _t, kw in run]
+    mean = statistics.mean(loads)
+    if statistics.pstdev(loads) / mean > _PEAK_DRAW_CV:
+        return None
+    start = run[0][0]
+    key = start.strftime("%Y-%m-%dT%H:%M")
+    if state.get("peak_draw_key") == key:
+        return None
+    count = state.get("peak_draw_count") or {}
+    if count.get("day") == today and count.get("n", 0) >= _PEAK_DRAW_MAX_PER_DAY:
+        return None
+    state["peak_draw_key"] = key
+    state["peak_draw_count"] = {"day": today, "n": (count.get("n", 0) + 1) if count.get("day") == today else 1}
+
+    reserve = getattr(cfg, "battery_reserve_pct", DEFAULT_RESERVE_PCT)
+    cap = getattr(cfg, "battery_capacity_kwh", None) or _BATTERY_CAPACITY_KWH
+    soc_then = store.soc_near(start.isoformat())
+    net = max(0.1, c.home_load_kw - c.solar_production_kw)
+    end_h = on_peak_window(now)[1]
+    hours_left = max(0.0, (end_h - now).total_seconds() / 3600.0)
+    room = max(0.0, c.battery_soc_pct - reserve) / 100.0 * cap
+    need = net * hours_left
+    shortfall = max(0.0, need - room)
+    rate = rate_at(now)
+    minutes = (now - start).total_seconds() / 60.0
+    was = f" (it was {soc_then:.0f}% when this began)" if soc_then is not None else ""
+    msg = (
+        f"⚡ <b>FranklinWH: Big steady draw during on-peak</b>\n"
+        f"~{mean:.1f} kW since {start.strftime('%-I:%M %p')} ({minutes:.0f} min). The car? A dryer? AC?\n"
+        f"🔋 {c.battery_soc_pct:.0f}% now{was}.\n"
+        f"Left running until {end_h.strftime('%-I %p')} that is ~{need:.1f} kWh: the battery covers "
+        f"{min(room, need):.1f} kWh down to your {reserve:.0f}% reserve"
+    )
+    msg += (f", the other ~{shortfall:.1f} kWh comes from the grid at ${rate:.2f}/kWh (~${shortfall * rate:.2f})."
+            if shortfall > 0.05 else ".")
+    return msg + "\nIf it's the car and you didn't mean it, stop it in the Tesla app."
+
+
 def _alert_car_charge_started(state: dict, today: str, now: datetime, c, cfg: Config, store) -> str | None:
     """"Warn me before I top off": when a big steady draw (>= 3 kW) has just begun
     (10-40 minutes ago) and is still running, say how much battery there is
@@ -5249,6 +5317,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("car_question",         lambda: _alert_car_question(state, today, now, store)),
             ("load_question",        lambda: _alert_load_question(state, today, now, store)),
             ("car_charge_started",   lambda: _alert_car_charge_started(state, today, now, c, cfg, store)),
+            ("peak_draw",            lambda: _alert_peak_draw(state, today, now, c, cfg, store)),
             ("solar_backtest",       lambda: _maybe_launch_monthly_backtest(state, now, cfg)),
             ("sundown_drift",        lambda: _alert_sundown_drift(state, today, now)),
             ("miss_question",        lambda: _alert_miss_question(state, today, now)),

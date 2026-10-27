@@ -11759,3 +11759,70 @@ def test_mode_probe_never_raises(tmp_path):
         def get_mode_status(self, gw): raise ConnectionError("gateway offline")
 
     assert alerts.maybe_probe_mode(_Broken(), "gw1", tmp_path, datetime(2026, 10, 26, 10, 0)) is False
+
+
+# ── a steady draw during on-peak (the car left charging at 10 A) ─────────
+
+class _DrawStore:
+    """readings_between gives (ts, grid_kw, home_kw, solar_kw); soc_near the battery %."""
+    def __init__(self, loads, start="2026-10-26T17:00:00", step=5, soc_at_start=71.0):
+        t0 = datetime.fromisoformat(start)
+        self.rows = [((t0 + timedelta(minutes=step * i)).isoformat(), 0.0, kw, 0.0) for i, kw in enumerate(loads)]
+        self.soc_at_start = soc_at_start
+
+    def readings_between(self, a, b):
+        return [r for r in self.rows if a <= r[0] < b]
+
+    def soc_near(self, ts):
+        return self.soc_at_start
+
+
+def _draw_alert(loads, now, state=None, soc=62.0, start="2026-10-26T17:00:00"):
+    st = {} if state is None else state
+    c = _tracker_c(soc)
+    c.home_load_kw, c.solar_production_kw = loads[-1], 0.0
+    return alerts._alert_peak_draw(st, "2026-10-26", now, c, Config(battery_capacity_kwh=13.6),
+                                   _DrawStore(loads, start=start)), st
+
+
+def test_peak_draw_alert_fires_on_a_steady_2_8_kw_draw_in_the_first_minutes():
+    # 5:00 and 5:05 quiet, then the car at 10 A (about 2.4 kW on top of the house) from 5:10
+    msg, state = _draw_alert([0.4, 0.4, 2.8, 2.8], datetime(2026, 10, 26, 17, 16))
+    assert msg is not None
+    assert "since 5:10 PM" in msg and "2.8 kW" in msg and "on-peak" in msg.lower()
+    assert "Tesla" in msg and "71%" in msg                      # where the battery was when it began
+    assert state["peak_draw_key"] == "2026-10-26T17:10"
+    _assert_left_aligned(msg)
+
+
+def test_peak_draw_alert_says_what_it_costs_if_left_running():
+    msg, _ = _draw_alert([0.4, 2.8, 2.8, 2.8], datetime(2026, 10, 26, 17, 16), soc=14.0)
+    assert "grid" in msg.lower() and "$" in msg
+
+
+def test_peak_draw_alert_ignores_off_peak_blips_and_ended_runs():
+    assert _draw_alert([0.4, 2.8, 2.8, 2.8], datetime(2026, 10, 26, 12, 16), start="2026-10-26T12:00:00")[0] is None  # not on-peak
+    assert _draw_alert([0.4, 0.4, 2.8, 0.4], datetime(2026, 10, 26, 17, 16))[0] is None                          # one reading
+    assert _draw_alert([0.4, 2.8, 2.8, 0.4, 0.4], datetime(2026, 10, 26, 17, 22))[0] is None                     # already over
+    assert _draw_alert([0.4, 0.4, 0.4, 0.4], datetime(2026, 10, 26, 17, 16))[0] is None                          # nothing big
+
+
+def test_peak_draw_alert_ignores_unsteady_loads():
+    assert _draw_alert([0.4, 1.7, 4.2, 1.8, 4.1, 1.9], datetime(2026, 10, 26, 17, 26))[0] is None               # an oven cycling
+
+
+def test_peak_draw_alert_fires_once_per_run_and_at_most_three_a_day():
+    state: dict = {}
+    loads = [0.4, 2.8, 2.8, 2.8]
+    assert _draw_alert(loads, datetime(2026, 10, 26, 17, 16), state)[0] is not None
+    assert _draw_alert(loads, datetime(2026, 10, 26, 17, 21), state)[0] is None          # same run, already told
+    assert alerts._alert_peak_draw(state, "2026-10-26", datetime(2026, 10, 26, 18, 16), _tracker_c(50.0),
+                                   Config(), _DrawStore([0.4, 2.8, 2.8, 2.8], start="2026-10-26T18:00:00")) is not None
+    assert alerts._alert_peak_draw(state, "2026-10-26", datetime(2026, 10, 26, 19, 16), _tracker_c(40.0),
+                                   Config(), _DrawStore([0.4, 2.8, 2.8, 2.8], start="2026-10-26T19:00:00")) is not None
+    assert alerts._alert_peak_draw(state, "2026-10-26", datetime(2026, 10, 26, 20, 16), _tracker_c(30.0),
+                                   Config(), _DrawStore([0.4, 2.8, 2.8, 2.8], start="2026-10-26T20:00:00")) is None   # 4th
+
+
+def test_peak_draw_alert_without_a_store_is_silent():
+    assert alerts._alert_peak_draw({}, "2026-10-26", datetime(2026, 10, 26, 17, 16), _tracker_c(), Config(), None) is None
