@@ -11340,11 +11340,11 @@ def test_plan_scorecard_when_eb_was_not_needed_and_not_run():
     assert "not needed" in text and "you ran none" in text
 
 
-def test_plan_scorecard_includes_the_reserve_you_set():
+def test_plan_scorecard_keeps_the_reserve_out_of_the_morning_text_but_still_learns_from_it():
     state = {"reserve_plan_2026-10-25": {"needed_pct": 25, "charge_kwh": 1.5}}
     text = alerts._plan_scorecard(state, _ScoreStore(hold_level=30), "2026-10-26", datetime(2026, 10, 26, 7, 30))
-    assert "suggested 25%" in text and "held 30%" in text
-    assert state["plan_log"][-1]["reserve_held"] == 30
+    assert "eserve" not in text and "suggested" not in text
+    assert state["plan_log"][-1]["reserve_suggested"] == 25 and state["plan_log"][-1]["reserve_held"] == 30
 
 
 def test_plan_scorecard_is_empty_with_no_plan_and_idempotent_in_the_log():

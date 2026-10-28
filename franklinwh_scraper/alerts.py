@@ -1843,8 +1843,7 @@ def _plan_scorecard(state: dict, store, today: str, now: datetime) -> str:
             from .reservehold import detect_reserve_hold
             hold = detect_reserve_hold(store.night_readings(today))
             held = hold["level"] if hold else None
-            lines.append(f"🌙 Reserve: suggested {rplan['needed_pct']}%, "
-                         + (f"held {held}%." if held is not None else "no steady hold found."))
+            # Logged (it feeds the learned margin) but not shown in the morning alert.
             entry.update(reserve_suggested=rplan["needed_pct"], reserve_held=held)
     except Exception:
         logger.exception("Plan scorecard failed")
