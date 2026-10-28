@@ -11377,13 +11377,13 @@ def test_reserve_plan_applies_the_learned_offset():
     assert more["needed_pct"] == base["needed_pct"] + 10
 
 
-def test_eod_digest_says_what_to_set_the_reserve_to_tonight():
+def test_eod_digest_keeps_the_reserve_suggestion_out_of_the_text_but_still_records_it():
     now = datetime(2026, 10, 26, 21, 30)
     hours = _night_hours(now, 24, load=0.5, solar_by_hour={8: 1.0, 9: 2.0})
     fc = type("F", (), {"hours": hours, "confidence": "high", "data_days": 30})()
     state: dict = {}
     text = alerts._alert_eod_digest(state, "2026-10-26", now, _digest_stats(soc=30.0), Config(), None, fc, None)
-    assert "Tonight" in text and "reserve" in text.lower()
+    assert "Tonight" not in text and "reserve" not in text.lower()
     assert state["reserve_plan_2026-10-26"]["needed_pct"] > 10
 
 

@@ -3496,9 +3496,8 @@ def _alert_eod_digest(
             tmrw_solar_str = f"\n☀️ Tomorrow's solar: ~{tmrw_kwh:.1f} kWh ({'cloudy' if cloudy else 'sunny'})"
 
     # Tonight's reserve: what to charge to so the morning needs no grid, with the margin
-    # you have usually added on top. Recorded so the next morning's alert can show how
-    # it compared with what you set.
-    reserve_str = ""
+    # you have usually added on top. Recorded (it feeds the learned margin and /accuracy)
+    # but not shown in the digest, by request 2026-10-28; /reserve still shows it.
     try:
         live_fc = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
         if live_fc is not None and getattr(live_fc, "hours", None):
@@ -3508,14 +3507,6 @@ def _alert_eod_digest(
                 state[f"reserve_plan_{today}"] = {"needed_pct": rp["needed_pct"],
                                                   "charge_kwh": round(rp["charge_kwh"], 2),
                                                   "natural_6am_pct": round(rp["natural_6am_pct"], 1)}
-                if rp["charge_kwh"] <= 0.05:
-                    reserve_str = (f"\n🌙 Tonight: no grid charge needed (~{rp['natural_6am_pct']:.0f}% at 6 AM "
-                                   "covers the morning).")
-                else:
-                    cost = rp["charge_kwh"] * rate_at((now + timedelta(days=1 if now.hour >= 1 else 0)).replace(
-                        hour=1, minute=0, second=0, microsecond=0))
-                    reserve_str = (f"\n🌙 Tonight: set the reserve to ~{rp['needed_pct']}% "
-                                   f"(grid +{rp['charge_kwh']:.1f} kWh, ~${cost:.2f}).")
     except Exception:
         logger.exception("Tonight's reserve suggestion failed; digest sent without it")
 
@@ -3641,7 +3632,7 @@ def _alert_eod_digest(
         f"Batt dis: {batt_dis_kwh:.1f} kWh\n"
         f"Home:     {home_kwh:.1f} kWh</code>{attribution_str}{self_suff_str}{peak_cov_str}{tou_str}{outage_str}\n"
         f"<code>─────────────────────</code>\n"
-        f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{precharge_str}{reserve_str}"
+        f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{precharge_str}"
     )
 
 
