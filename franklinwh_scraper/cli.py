@@ -2296,6 +2296,14 @@ def cmd_advise(
         if _bot_ready:
             import threading as _threading
             _chatbot = TelegramChatBot(cfg, getattr(cfg, "anthropic_api_key", ""), outdir)
+            if getattr(cfg, "mode_switch_enabled", False):
+                from .modeswitch import switch as _switch_mode
+                _mode_lock = _threading.Lock()
+
+                def _mode_controller(mode, _client=client, _gw=gateway, _cfg=cfg):
+                    with _mode_lock:
+                        return _switch_mode(_client, _gw, mode, dry_run=getattr(_cfg, "mode_switch_dry_run", True))
+                _chatbot.mode_controller = _mode_controller
             _bot_thread = _threading.Thread(target=_chatbot.run, daemon=True, name="tg-chatbot")
             _bot_thread.start()
             _info("Telegram AI chatbot started — message the bot to ask energy questions")

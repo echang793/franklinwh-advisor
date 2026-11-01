@@ -12093,3 +12093,325 @@ def test_daily_plan_counts_the_typical_day_and_says_so(monkeypatch):
     monkeypatch.setattr(typicalload, "typical_hourly_load", lambda *a, **k: _typical(h14=3.0, h15=3.0, h19=2.0))
     text, state = _daily_plan_for(soc=30.0, solar=_SUNNY, store=object())
     assert "typical Sunday" in text or "typical" in text.lower()
+
+
+# ── EB planning only on cloudy days with a big drop in sun ───────────────
+
+class _GateOutlook:
+    hours: list = []
+
+    def __init__(self, cloudy, kwh):
+        self._c, self._k = cloudy, kwh
+
+    def is_cloudy(self, hours, thr):
+        return self._c
+
+    def today_generation_kwh(self, peak, pr, bias):
+        return self._k
+
+    def sunset_on(self, d):
+        return None
+
+    def sunrise_on(self, d):
+        return None
+
+
+class _GateStore:
+    """Thirty good days at 30 kWh (all recorded through the afternoon)."""
+    def daily_solar_kwh(self, d):
+        return 30.0
+
+    def day_has_solar_coverage(self, d, end_hour=17):
+        return True
+
+
+def _gated_plan(cloudy, kwh, solar, soc=30.0, state=None):
+    now = datetime(2026, 11, 2, 7, 30)
+    st = {"solar_cal_samples": [4.0, 4.2, 3.9]} if state is None else state
+    fc = _day_forecast(now.date(), solar, load=0.8, start_hour=7)
+    text = alerts._daily_plan(st, "2026-11-02", now, _tracker_c(soc), Config(battery_capacity_kwh=13.6),
+                              _GateOutlook(cloudy, kwh), fc, _GateStore())
+    return text, st
+
+
+def test_daily_plan_has_no_eb_line_on_a_clear_day():
+    text, st = _gated_plan(cloudy=False, kwh=28.0, solar=_SUNNY)
+    assert "Today's plan" in text and "EB" not in text
+    assert st["daily_plan_2026-11-02"]["gate"]["needed"] is False
+
+
+def test_daily_plan_has_no_eb_line_on_a_cloudy_day_with_a_small_drop():
+    text, _st = _gated_plan(cloudy=True, kwh=25.0, solar=_SUNNY)        # 83% of a good day
+    assert "EB" not in text
+
+
+def test_daily_plan_plans_eb_on_a_cloudy_day_with_a_big_drop():
+    text, st = _gated_plan(cloudy=True, kwh=9.0, solar=_GLOOM)          # 30% of a good day
+    assert "Cloudy day" in text and "30%" in text
+    assert "EB" in text and "start by" in text
+    assert st["daily_plan_2026-11-02"]["eb_kwh"] > 1.0
+    assert st["eb_gate_2026-11-02"]["needed"] is True                    # kept for the timer and /ebplan
+    _assert_left_aligned(text)
+
+
+def test_daily_plan_uses_the_learned_margin():
+    short = {"planned_eb_kwh": 3.0, "ran_eb_kwh": 3.0, "grid_kwh": 2.0}
+    base, _ = _gated_plan(cloudy=True, kwh=9.0, solar=_GLOOM)
+    wider, st = _gated_plan(cloudy=True, kwh=9.0, solar=_GLOOM,
+                            state={"solar_cal_samples": [4.0, 4.2, 3.9], "plan_log": [short] * 6})
+    assert st["daily_plan_2026-11-02"]["eb_kwh"] > _gated_plan(cloudy=True, kwh=9.0, solar=_GLOOM)[1][
+        "daily_plan_2026-11-02"]["eb_kwh"]
+
+
+# ── the EB start/stop timer ──────────────────────────────────────────────
+
+def _timer_c(soc, grid=0.0, batt=-0.5, load=0.8):
+    import types
+    return types.SimpleNamespace(battery_soc_pct=soc, solar_production_kw=0.5, home_load_kw=load,
+                                 battery_use_kw=batt, grid_use_kw=grid)
+
+
+def _timer(hour, minute, c, state=None, store=None, cfg=None, needed=True):
+    now = datetime(2026, 11, 2, hour, minute)
+    st = {} if state is None else state
+    st.setdefault("eb_gate_2026-11-02", {"known": True, "needed": needed, "cloudy": needed,
+                                          "forecast_kwh": 9.0, "baseline_kwh": 30.0, "ratio": 0.3})
+    fc = _day_forecast(now.date(), _GLOOM, load=0.8, start_hour=7)
+    msg = alerts._alert_eb_timer(st, "2026-11-02", now, c, cfg or Config(battery_capacity_kwh=13.6),
+                                 _GateOutlook(True, 9.0), fc, store)
+    return msg, st
+
+
+def test_eb_timer_is_silent_on_a_clear_day():
+    assert _timer(13, 30, _timer_c(30.0), needed=False)[0] is None
+
+
+def test_eb_timer_waits_until_it_is_time():
+    assert _timer(8, 0, _timer_c(30.0))[0] is None
+
+
+def test_eb_timer_says_start_once_when_it_is_time():
+    msg, st = _timer(13, 40, _timer_c(30.0))
+    assert msg and "Start EB" in msg and "2 PM" in msg
+    _assert_left_aligned(msg)
+    assert alerts._alert_eb_timer(st, "2026-11-02", datetime(2026, 11, 2, 13, 50), _timer_c(30.0),
+                                  Config(battery_capacity_kwh=13.6), _GateOutlook(True, 9.0),
+                                  _day_forecast(datetime(2026, 11, 2).date(), _GLOOM, load=0.8, start_hour=7),
+                                  None) is None
+
+
+def test_eb_timer_says_stop_when_the_target_is_reached():
+    msg, st = _timer(13, 20, _timer_c(95.0, grid=5.0, batt=-5.0))
+    assert msg and "Switch EB off" in msg
+    assert _timer(13, 40, _timer_c(96.0, grid=5.0, batt=-5.0), state=st)[0] is None        # said once
+
+
+def test_eb_timer_says_stop_at_two_pm_even_if_short():
+    msg, _st = _timer(14, 0, _timer_c(40.0, grid=5.0, batt=-5.0))
+    assert msg and "Switch EB off" in msg and "2 PM" in msg
+
+
+def test_eb_timer_does_not_nag_when_eb_is_not_running_after_two():
+    assert _timer(14, 30, _timer_c(40.0))[0] is None
+
+
+def test_eb_timer_warns_when_the_house_is_running_heavy(monkeypatch):
+    class _Profile:
+        quiet_by_hour = {h: 0.6 for h in range(24)}
+        session_kwh = 0.0
+        session_kwh_hi = None
+
+    class _Heavy:
+        def recent_avg_load(self, hours=2):
+            return 2.4
+
+    monkeypatch.setattr(alerts, "_afternoon_profile", lambda *a, **k: _Profile())
+    msg, _st = _timer(13, 40, _timer_c(30.0, load=2.4), store=_Heavy())
+    assert msg and "heavier than usual" in msg
+
+
+def test_eb_timer_buttons_only_when_mode_switching_is_on():
+    assert alerts._eb_timer_buttons(Config(), "start") == []
+    on = Config(mode_switch_enabled=True)
+    assert [b["callback_data"] for b in alerts._eb_timer_buttons(on, "start")] == ["ebm:eb"]
+    assert [b["callback_data"] for b in alerts._eb_timer_buttons(on, "stop")] == ["ebm:home"]
+
+
+# ── switching the battery's mode from a button ───────────────────────────
+
+class _ModeClient:
+    def __init__(self, status=None, fail=False):
+        self.status, self.fail, self.calls = status or {}, fail, []
+
+    def get_mode_status(self, gw):
+        return self.status
+
+    def set_mode(self, gw, mode, soc):
+        self.calls.append((gw, mode, soc))
+        if self.fail:
+            raise ConnectionError("gateway said no")
+
+
+def test_mode_payload_uses_the_library_ids():
+    from franklinwh_scraper import modeswitch
+
+    p = modeswitch.mode_payload("GW1", "eb", 100)
+    assert p["currendId"] == "9324" and p["workMode"] == "3" and p["soc"] == "100" and p["gatewayId"] == "GW1"
+    assert modeswitch.mode_payload("GW1", "tou", 50)["currendId"] == "9322"
+    assert modeswitch.mode_payload("GW1", "self", 10)["currendId"] == "9323"
+    with pytest.raises(ValueError):
+        modeswitch.mode_payload("GW1", "turbo", 10)
+
+
+def test_mode_switch_dry_run_sends_nothing():
+    from franklinwh_scraper import modeswitch
+
+    client = _ModeClient({"selfMinSoc": 10, "touMinSoc": 50, "backupMaxSoc": 100})
+    ok, text = modeswitch.switch(client, "GW1", "eb", dry_run=True)
+    assert ok and "dry run" in text.lower() and client.calls == []
+
+
+def test_mode_switch_live_sends_the_mode_with_the_gateways_own_soc():
+    from franklinwh_scraper import modeswitch
+
+    client = _ModeClient({"selfMinSoc": 10, "touMinSoc": 50, "backupMaxSoc": 100})
+    ok, _text = modeswitch.switch(client, "GW1", "self", dry_run=False)
+    assert ok and client.calls == [("GW1", "self", 10)]
+    modeswitch.switch(client, "GW1", "eb", dry_run=False)
+    assert client.calls[-1] == ("GW1", "eb", 100)
+
+
+def test_mode_switch_reports_a_failure_instead_of_raising():
+    from franklinwh_scraper import modeswitch
+
+    ok, text = modeswitch.switch(_ModeClient(fail=True), "GW1", "eb", dry_run=False)
+    assert not ok and "gateway said no" in text
+
+
+def test_mode_switch_refuses_an_unknown_mode():
+    from franklinwh_scraper import modeswitch
+
+    ok, text = modeswitch.switch(_ModeClient(), "GW1", "turbo", dry_run=False)
+    assert not ok and "turbo" in text
+
+
+def _mode_button(bot, data):
+    sent, answered = [], []
+    bot._send = lambda chat_id, text, reply_markup=None: sent.append(text)
+    bot._answer_callback_query = lambda cq_id, text="": answered.append(text)
+    bot._handle_callback_query({"id": "q", "message": {"chat": {"id": 1}}, "data": data})
+    return sent, answered
+
+
+def test_mode_button_is_refused_when_switching_is_off():
+    bot = TelegramChatBot(Config(telegram_chat_id=""), api_key="x")
+    bot.mode_controller = lambda mode: (_ for _ in ()).throw(AssertionError("must not switch"))
+    sent, _ = _mode_button(bot, "ebm:eb")
+    assert "off" in sent[0].lower()
+
+
+def test_mode_button_switches_through_the_controller():
+    bot = TelegramChatBot(Config(telegram_chat_id="", mode_switch_enabled=True, mode_switch_home="tou"), api_key="x")
+    seen = []
+    bot.mode_controller = lambda mode: (seen.append(mode), (True, f"Set {mode}"))[1]
+    sent, _ = _mode_button(bot, "ebm:eb")
+    _mode_button(bot, "ebm:home")
+    assert seen == ["eb", "tou"]                 # "home" means the configured normal mode
+    assert sent == ["Set eb"]
+
+
+def test_mode_button_without_a_controller_says_so():
+    bot = TelegramChatBot(Config(telegram_chat_id="", mode_switch_enabled=True), api_key="x")
+    sent, _ = _mode_button(bot, "ebm:eb")
+    assert "can't reach" in sent[0].lower() or "not connected" in sent[0].lower()
+
+
+# ── /sundown counts a typical day of the week ────────────────────────────
+
+def test_sundown_scenarios_include_a_typical_weekday_case():
+    now = datetime(2026, 11, 1, 10, 0)
+    fc = _day_forecast(now.date(), _GLOOM, load=0.4, start_hour=10)
+    sc = alerts._afternoon_scenarios(fc, now, 50.0, 13.6, None, None, floor_pct=10.0,
+                                     typical=_typical(h14=3.0, h15=3.0, h16=2.0))
+    assert sc["typical"] is not None and sc["quiet"] is not None
+    assert sc["typical"][0] < sc["quiet"][0] - 5.0                  # a dryer afternoon costs real battery
+
+
+def test_sundown_scenarios_without_a_typical_day_have_no_typical_case():
+    now = datetime(2026, 11, 1, 10, 0)
+    fc = _day_forecast(now.date(), _SUNNY, load=0.4, start_hour=10)
+    assert alerts._afternoon_scenarios(fc, now, 50.0, 13.6, None, None, floor_pct=10.0)["typical"] is None
+
+
+def test_sundown_command_shows_the_typical_weekday_when_it_differs(tmp_path, monkeypatch):
+    from franklinwh_scraper import typicalload
+
+    now = datetime(2026, 11, 1, 10, 0)                              # Sunday
+    _freeze_chatbot_clock(monkeypatch, now)
+    monkeypatch.setattr(typicalload, "typical_hourly_load", lambda *a, **k: _typical(h14=3.0, h15=3.0, h16=2.0))
+    fc = _day_forecast(now.date(), _GLOOM, load=0.4, start_hour=10)
+    bot, sent = _bot_with(tmp_path, soc=50.0, forecast=fc, store=object())
+    bot._send_sundown("1")
+    assert "typical Sunday" in sent["text"]
+    _assert_left_aligned(sent["text"])
+
+
+def _sky(bot, monkeypatch, cloudy, kwh, baseline=30.0):
+    import types
+
+    from franklinwh_scraper import ebguide
+
+    monkeypatch.setattr(ebguide, "good_day_baseline_kwh", lambda store, today: baseline)
+    bot._outlook = types.SimpleNamespace(effective_ghi_at=lambda dt: 500.0 if 9 <= dt.hour < 16 else 0.0,
+                                         is_cloudy=lambda h, t: cloudy, today_generation_kwh=lambda p, r, b: kwh)
+
+
+def test_ebplan_command_says_when_the_sky_makes_eb_unnecessary(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 12, 11, 16)
+    bot, sent = _ebplan_bot(tmp_path, now)
+    _sky(bot, monkeypatch, cloudy=False, kwh=28.0)
+    _run_at(now, bot._send_ebplan, "123", {})
+    assert "Not a cloudy day" in sent["text"] and "93%" in sent["text"]
+    assert "EB plan" in sent["text"]                       # still answers: you asked
+    _assert_left_aligned(sent["text"])
+
+
+def test_ebplan_command_names_the_cloudy_day_that_calls_for_eb(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 12, 11, 16)
+    bot, sent = _ebplan_bot(tmp_path, now)
+    _sky(bot, monkeypatch, cloudy=True, kwh=9.0)
+    _run_at(now, bot._send_ebplan, "123", {})
+    assert "Cloudy day" in sent["text"] and "30%" in sent["text"]
+    assert "Not a cloudy day" not in sent["text"]
+
+
+def test_ebplan_command_uses_the_learned_margin(tmp_path, monkeypatch):
+    import json
+
+    now = datetime(2026, 10, 12, 11, 16)
+    bot, sent = _ebplan_bot(tmp_path, now)
+    short = {"planned_eb_kwh": 3.0, "ran_eb_kwh": 3.0, "grid_kwh": 2.0}
+    (tmp_path / ".peak_alert_state.json").write_text(json.dumps({"solar_cal_samples": [4.0] * 5, "plan_log": [short] * 6}))
+    _run_at(now, bot._send_ebplan, "123", {})
+    assert "10-pt margin" in sent["text"]
+
+
+# ── what the week's EB cost ──────────────────────────────────────────────
+
+def test_eb_week_line_totals_the_days_you_ran_eb():
+    state = {"plan_log": [
+        {"day": "2026-10-27", "planned_eb_kwh": 3.0, "ran_eb_kwh": 3.0, "grid_kwh": 0.0, "grid_cost": 0.0},
+        {"day": "2026-10-29", "planned_eb_kwh": 2.0, "ran_eb_kwh": 2.5, "grid_kwh": 1.0, "grid_cost": 0.40},
+        {"day": "2026-10-30", "planned_eb_kwh": 0.0, "ran_eb_kwh": 0.0, "grid_kwh": 0.5, "grid_cost": 0.20},
+        {"day": "2026-09-01", "planned_eb_kwh": 3.0, "ran_eb_kwh": 3.0, "grid_kwh": 0.0, "grid_cost": 0.0},   # old
+    ]}
+    line = alerts._eb_week_line(state, datetime(2026, 11, 1, 20, 0))
+    assert "2 days" in line and "5.5 kWh" in line and "$" in line
+    assert "1.0 kWh" in line                                      # grid 2-11 PM on the days you ran EB
+    _assert_left_aligned(line.strip())
+
+
+def test_eb_week_line_is_empty_when_no_eb_was_run():
+    state = {"plan_log": [{"day": "2026-10-29", "planned_eb_kwh": 0.0, "ran_eb_kwh": 0.0, "grid_kwh": 0.0, "grid_cost": 0.0}]}
+    assert alerts._eb_week_line(state, datetime(2026, 11, 1, 20, 0)) == ""
+    assert alerts._eb_week_line({}, datetime(2026, 11, 1, 20, 0)) == ""

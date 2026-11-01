@@ -1393,7 +1393,8 @@ _DATE_KEYED_PREFIXES = (
     # by one key per day per prefix, forever, for the life of the install.
     "predicted_kwh_", "predicted_avg_ghi_", "predicted_cloudy_", "daily_import_cost_",
     "outages_", "sundown_pred_", "savings_daily_", "soc_7am_pred_",
-    "actual_bill_", "perf_ratio_used_", "sundown_shadow_", "daily_plan_", "reserve_plan_",
+    "actual_bill_", "perf_ratio_used_", "sundown_shadow_", "daily_plan_", "reserve_plan_", "eb_gate_",
+    "eb_timer_",
 )
 
 
@@ -1810,6 +1811,22 @@ def _reserve_offset(state: dict) -> float:
     return max(-_RESERVE_OFFSET_MAX, min(_RESERVE_OFFSET_MAX, float(statistics.median(diffs))))
 
 
+def _eb_week_line(state: dict, now: datetime) -> str:
+    """The last seven days of Emergency Backup in one line for the weekly summary: days run, kWh
+    from the grid, its cost at the super-off-peak rate, and what the grid still supplied 2-11 PM
+    on those days. "" when none was run. Reads state["plan_log"] (see _plan_scorecard)."""
+    cutoff = (now.date() - timedelta(days=7)).isoformat()
+    days = [e for e in state.get("plan_log", []) if e.get("day", "") >= cutoff and (e.get("ran_eb_kwh") or 0) > 0.05]
+    if not days:
+        return ""
+    kwh = sum(e["ran_eb_kwh"] for e in days)
+    cost = sum(e["ran_eb_kwh"] * rate_at(datetime.fromisoformat(e["day"] + "T13:00:00")) for e in days)
+    grid = sum(e.get("grid_kwh") or 0.0 for e in days)
+    grid_cost = sum(e.get("grid_cost") or 0.0 for e in days)
+    return (f"\n⚡ EB this week: {len(days)} day{'s' if len(days) != 1 else ''}, {kwh:.1f} kWh from the grid "
+            f"(~${cost:.2f}). The grid still supplied {grid:.1f} kWh (${grid_cost:.2f}) from 2 to 11 PM on those days.")
+
+
 def _plan_scorecard(state: dict, store, today: str, now: datetime) -> str:
     """Yesterday's plan against what happened: the EB the plan asked for vs the EB you ran,
     the grid import 2-11 PM that resulted, and the reserve suggested the night before vs
@@ -1882,6 +1899,35 @@ def _what_if_sundown(live, now: datetime, soc: float, cap: float, profile, extra
     return base[0], (with_load[0] if with_load else base[0]), base[1]
 
 
+def _eb_gate_today(state: dict, today: str, now: datetime, outlook, store) -> dict:
+    """Is today a cloudy day with a big drop in generation (ebguide.eb_day_gate)? Computed once a
+    day and kept in state["eb_gate_<today>"] so the morning plan, the start/stop timer and
+    /ebplan all agree. An unknown gate (no forecast yet) is not stored, so it is retried."""
+    from . import ebguide
+    key = f"eb_gate_{today}"
+    if isinstance(state.get(key), dict):
+        return state[key]
+    try:
+        cloudy = bool(outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
+    except Exception:
+        cloudy = False
+    gate = ebguide.eb_day_gate(outlook, store, now.date(), _GHI_CLOUDY_THRESHOLD,
+                               peak_kw=_get_system_peak_kw(state),
+                               perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
+                               hourly_bias=_get_hourly_bias(state))
+    if gate["known"]:
+        state[key] = gate
+    return gate
+
+
+def _gate_line(gate: dict) -> str:
+    """One line on why EB is in play today."""
+    if gate.get("ratio") is not None:
+        return (f"☁️ Cloudy day: sun forecast ~{gate['forecast_kwh']:.0f} kWh, "
+                f"{gate['ratio'] * 100:.0f}% of a good day (~{gate['baseline_kwh']:.0f} kWh).")
+    return "☁️ Cloudy day: the sun is forecast well under normal."
+
+
 def _daily_plan(state: dict, today: str, now: datetime, c, cfg, outlook, usage_forecast, store) -> str:
     """The morning alert's "Today's plan": where the battery should end the day, whether
     Emergency Backup is worth running (how much, start by when, and what skipping it
@@ -1919,12 +1965,19 @@ def _daily_plan(state: dict, today: str, now: datetime, c, cfg, outlook, usage_f
                          f"to midnight; yours have run {typical.low_kwh:.0f}–{typical.high_kwh:.0f}).")
 
         # Emergency Backup for the grid-free window
+        # Only on a cloudy day with a big drop in sun; on a clear day the battery refills itself and
+        # the plan says nothing about EB (an unknown gate, no forecast, plans as before).
+        from . import ebguide
+        gate = _eb_gate_today(state, today, now, outlook, store)
+        record["gate"] = gate
         start_h, end_h = _PLAN_WINDOW
-        if now.hour < end_h:
+        if now.hour < end_h and (gate["needed"] or not gate["known"]):
             from .advisor import _EB_CHARGE_KW
             solar, load = _plan_curves(live, now, profile, typical)
-            eb = _eb_plan(now, c.battery_soc_pct, cap, reserve, _PLAN_MARGIN_PCT, solar, load, 0.0, 15, 3,
-                          _PLAN_WINDOW, _EB_CHARGE_KW)
+            if gate["needed"]:
+                lines.append(_gate_line(gate))
+            eb = _eb_plan(now, c.battery_soc_pct, cap, reserve, ebguide.plan_margin(state.get("plan_log", [])),
+                          solar, load, 0.0, 15, 3, _PLAN_WINDOW, _EB_CHARGE_KW)
             w = f"{_clock_str(start_h)}–{_clock_str(end_h)}"
             imp_kwh, imp_cost = _window_grid_import(eb["soc_at_start"], cap, reserve, solar, load, _PLAN_WINDOW, now)
             record.update(eb_kwh=round(float(eb["eb_kwh"]), 2), start_by=round(float(eb["start_by"]), 2),
@@ -1981,6 +2034,72 @@ def _daily_plan(state: dict, today: str, now: datetime, c, cfg, outlook, usage_f
     except Exception:
         logger.exception("Daily plan failed; sending the alert without it")
         return ""
+
+
+def _eb_timer_buttons(cfg, kind: str) -> list[dict]:
+    """The one-tap mode buttons for the EB timer: only when mode switching is switched on."""
+    if not getattr(cfg, "mode_switch_enabled", False):
+        return []
+    if kind == "start":
+        return [{"text": "⚡ Switch to EB", "callback_data": "ebm:eb"}]
+    return [{"text": "↩️ Back to normal", "callback_data": "ebm:home"}]
+
+
+def _alert_eb_timer(state: dict, today: str, now: datetime, c, cfg, outlook, usage_forecast, store) -> str | None:
+    """On a cloudy day with a big drop in sun (ebguide gate): say when to switch to Emergency
+    Backup, once, and when to switch it off, once (target reached, or 2 PM when super-off-peak
+    ends). The plan is re-run live every cycle, so it follows the battery and the house: a heavy
+    morning moves the start earlier. Records what it said in state["eb_timer_<today>"]."""
+    from . import ebguide, ebpattern, typicalload
+    if not 8 <= now.hour < 15:
+        return None
+    gate = _eb_gate_today(state, today, now, outlook, store)
+    if not gate["needed"]:
+        return None
+    live = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
+    if live is None or not getattr(live, "hours", None):
+        return None
+    from .advisor import _EB_CHARGE_KW
+    key = f"eb_timer_{today}"
+    rec = state.get(key, {})
+    cap = getattr(cfg, "battery_capacity_kwh", None) or _BATTERY_CAPACITY_KWH
+    reserve = _effective_reserve_pct(cfg, store, now)
+    profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
+    typical = typicalload.typical_hourly_load(store, now.date(), state.get("car_day_labels"))
+    solar, load = _plan_curves(live, now, profile, typical)
+    eb = _eb_plan(now, c.battery_soc_pct, cap, reserve, ebguide.plan_margin(state.get("plan_log", [])),
+                  solar, load, 0.0, 15, 3, _PLAN_WINDOW, _EB_CHARGE_KW)
+    running = c.grid_use_kw > ebpattern.GRID_KW and c.battery_use_kw < -ebpattern.BATT_KW
+    action = ebguide.timer_decision(running=running, now_dec=now.hour + now.minute / 60.0,
+                                    start_by=eb["start_by"], eb_kwh=eb["eb_kwh"],
+                                    started=bool(rec.get("start")), stopped=bool(rec.get("stop")))
+    if action is None:
+        return None
+    soc = c.battery_soc_pct
+    if action == "start":
+        target = eb["need_at_start"]
+        heavy = ""
+        try:
+            quiet = [v for h in range(max(0, now.hour - 3), now.hour)
+                     if (v := (profile.quiet_by_hour.get(h) if profile else None)) is not None]
+            if store is not None and quiet and ebguide.is_heavy(store.recent_avg_load(3), sum(quiet) / len(quiet)):
+                heavy = "\nThe house is running heavier than usual today, so this is a bigger top-off than a normal day."
+        except Exception:
+            logger.debug("Heavy-day check failed", exc_info=True)
+        state[key] = {**rec, "start": True, "target": round(float(target), 1)}
+        late = "" if eb["in_time"] else " That is later than ideal, so start right away."
+        return (f"⚡ <b>Start EB now</b>\n"
+                f"Battery {soc:.0f}%. Charge to ~{target:.0f}% by 2 PM: about {eb['eb_minutes']:.0f} min "
+                f"(~{eb['eb_kwh']:.1f} kWh).{late}\n"
+                f"{_gate_line(gate)}{heavy}\n"
+                f"I'll tell you when to switch it off.")
+    state[key] = {**rec, "stop": True}
+    target = rec.get("target")
+    if now.hour >= 14 and eb["eb_kwh"] >= 0.1:
+        why = f"It's 2 PM; grid power costs more from here. Battery {soc:.0f}%" + (f" (aimed for ~{target:.0f}%)" if target else "") + "."
+    else:
+        why = f"Target reached: battery {soc:.0f}%" + (f" (aimed for ~{target:.0f}%)" if target else "") + "."
+    return f"↩️ <b>Switch EB off</b>\n{why}\nBack to your normal mode."
 
 
 def _alert_morning_preview(
@@ -2866,9 +2985,13 @@ def _add_session_load(hours: list, idx: list[int], sundown_dt: datetime, kw: flo
 def _afternoon_scenarios(
     live_forecast, now: datetime, soc: float, cap: float, profile, current_load_kw: float | None,
     morning=None, morning_done: bool = False, floor_pct: float = DEFAULT_RESERVE_PCT, eb=None,
-    sunset: datetime | None = None,
+    sunset: datetime | None = None, typical=None,
 ) -> dict:
     """Today's sundown walk as outcomes instead of one blended guess.
+
+    "typical": the rest of the day at what this weekday usually looks like (typicalload), when
+    that has been learned: the quiet walk, but with the dryer-and-cooking afternoon you
+    normally have.
 
     "quiet": the rest of the day at the house's quiet load (days without a car
     session; the entry covering `now` keeps its live-anchored value).
@@ -2886,7 +3009,7 @@ def _afternoon_scenarios(
 
     empty = {"quiet": None, "with_car": None, "with_car_range": None,
              "with_morning": None, "with_morning_range": None, "car_now": False,
-             "with_eb": None, "with_eb_range": None}
+             "with_eb": None, "with_eb_range": None, "typical": None}
     if not live_forecast.hours:
         return empty
     one_hour = timedelta(hours=1)
@@ -2903,6 +3026,15 @@ def _afternoon_scenarios(
     if out["quiet"] is None:
         return out
     sundown_dt = out["quiet"][1]
+
+    if typical is not None:
+        typ_hours = list(hours)
+        for i in today_idx[1:]:
+            v = typical.by_hour.get(typ_hours[i].dt.hour)
+            if v is not None:
+                typ_hours[i] = dataclasses.replace(typ_hours[i], predicted_load_kw=v)
+        out["typical"] = _predict_sundown_soc(dataclasses.replace(live_forecast, hours=typ_hours), now, soc, cap,
+                                              floor_pct, sunset)
 
     if eb is not None and eb.kwh > 0:
         # Emergency Backup tops the battery up from the grid: the same quiet walk from a
@@ -3736,6 +3868,7 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
     if len(week_prs) >= 3:
         avg_err = sum(abs(1.0 - pr) * 100 for pr in week_prs) / len(week_prs)
         accuracy_str = f"\n🎯 Solar forecast accuracy: ±{avg_err:.1f}% avg ({len(week_prs)} days)"
+    accuracy_str += _eb_week_line(state, now)
 
     # Battery cycle count — computed from discharge throughput in the history DB,
     # more accurate than the SOC-trough method which only fires when SOC drops below 20%.
@@ -5404,6 +5537,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("load_question",        lambda: _alert_load_question(state, today, now, store)),
             ("car_charge_started",   lambda: _alert_car_charge_started(state, today, now, c, cfg, store)),
             ("car_on_peak",          lambda: _alert_car_on_peak(state, today, now, c, cfg, store, outlook)),
+            ("eb_timer",             lambda: _alert_eb_timer(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("solar_backtest",       lambda: _maybe_launch_monthly_backtest(state, now, cfg)),
             ("sundown_drift",        lambda: _alert_sundown_drift(state, today, now)),
             ("miss_question",        lambda: _alert_miss_question(state, today, now)),
@@ -5438,6 +5572,9 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
         extra = {}
         if name == "car_question":
             extra = {"extra_buttons": _car_question_buttons(today)}
+        elif name == "eb_timer":
+            btns = _eb_timer_buttons(cfg, "stop" if state.get(f"eb_timer_{today}", {}).get("stop") else "start")
+            extra = {"extra_buttons": btns} if btns else {}
         elif name == "miss_question" and state.get("miss_question_day"):
             extra = {"extra_buttons": _miss_question_buttons(state["miss_question_day"])}
         elif name == "load_question" and state.get("load_question_key"):

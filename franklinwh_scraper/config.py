@@ -139,6 +139,15 @@ class Config:
     # (name, start HH:MM, hours, kW).
     habit_loads: dict = field(default_factory=dict)
 
+    # Switching the battery's mode from a Telegram button (the EB timer's "Switch to EB" /
+    # "Back to normal"). Off by default. The cloud call that does it comes from the community
+    # client library and has NOT been confirmed against this gateway, so dry_run stays on (the
+    # button says what it would do and sends nothing) until you have watched it work once.
+    # mode_switch_home: the mode "Back to normal" returns to: "tou", "self" or "eb".
+    mode_switch_enabled: bool = False
+    mode_switch_dry_run: bool = True
+    mode_switch_home: str = "self"
+
     # Optional shared-secret for the web dashboard (webapi.py). Empty = no
     # auth required (fine for the default 127.0.0.1-only LaunchAgent binding;
     # set this if the dashboard is ever reachable beyond localhost).

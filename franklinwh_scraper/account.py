@@ -372,6 +372,27 @@ class AccountClient:
             return {}
         return {k: data[k] for k in self._MODE_FIELDS if k in data}
 
+    def set_mode(self, gateway: str, mode: str, soc: float, _retried: bool = False) -> None:
+        """Switch the gateway to "tou", "self" or "eb" (see modeswitch). Raises ConnectionError
+        if the API refuses. The request shape comes from the community client library and is
+        unconfirmed on this gateway; callers keep it behind Config.mode_switch_dry_run."""
+        from .modeswitch import mode_payload
+        self._ensure_token()
+        resp = self.session.post(
+            API_BASE + "hes-gateway/terminal/tou/updateTouMode",
+            headers={"loginToken": self._token},
+            data=mode_payload(gateway, mode, soc),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        js = _safe_json(resp)
+        if js.get("code") == 401 and not _retried:
+            self._forget_token()
+            self.login()
+            return self.set_mode(gateway, mode, soc, _retried=True)
+        if js.get("code") not in (200, None):
+            raise ConnectionError(f"mode change refused (code {js.get('code')}): {js.get('message')}")
+
     def get_stats(self, gateway: str, _empty_retries: int = 2) -> Stats:
         """Get instantaneous + daily total stats for a gateway."""
         info = self.get_composite_info(gateway)

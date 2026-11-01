@@ -410,6 +410,7 @@ class TelegramChatBot:
         # While a chat tool runs a command's code, that thread's _send() collects the text
         # for the model instead of sending it (per thread: other chats are unaffected).
         self._tls = threading.local()
+        self.mode_controller = None   # set by the advisor: (mode) -> (ok, message); see _switch_mode
 
     def _is_authorized(self, chat_id: str) -> bool:
         """True if chat_id is the configured owner, or no owner is configured."""
@@ -1252,10 +1253,15 @@ class TelegramChatBot:
             eb_profile = None if charging_from_grid or now.hour >= 17 else build_eb_profile(store, now)
             if eb_profile is not None and eb_profile.p < _EB_CASE_MIN_ODDS:
                 eb_profile = None
+            try:
+                from . import typicalload
+                typical = typicalload.typical_hourly_load(store, now.date(), state.get("car_day_labels"))
+            except Exception:
+                typical = None
             sc = _afternoon_scenarios(live_forecast, now, soc, cap, profile, getattr(c, "home_load_kw", None),
                                       morning=morning, morning_done=morning_done,
                                       floor_pct=_effective_reserve_pct(self._cfg, store, now), eb=eb_profile,
-                                      sunset=_sunset_today(outlook, now))
+                                      sunset=_sunset_today(outlook, now), typical=typical)
             projection = sc["quiet"]
             if projection is None:
                 self._send(chat_id, "☀️ Looks like solar generation for today is already done (or not enough forecast data left today).")
@@ -1330,6 +1336,9 @@ class TelegramChatBot:
                 car_str += (f"\n🌅 If you top off this morning ({morning.weekday_name}s {morning.k_weekday} of "
                             f"{morning.n_weekday}; {msize}): ~<b>{_pct(sc['with_morning'][0]):.0f}%</b>"
                             f"{_spread(sc['with_morning_range'])}")
+            if typical is not None and sc["typical"] is not None and abs(sc["typical"][0] - raw_pct) >= 1.5:
+                car_str += (f"\n📊 Counting a typical {typical.weekday_name} afternoon (dryer, cooking): "
+                            f"~<b>{_pct(sc['typical'][0]):.0f}%</b>")
             if eb_profile is not None and sc["with_eb"] is not None:
                 size = f"typically ~{eb_profile.kwh:.1f} kWh from the grid"
                 if eb_profile.kwh_lo is not None:
@@ -1634,6 +1643,10 @@ class TelegramChatBot:
             if peak is None:
                 self._send(chat_id, "Solar calibration isn't ready yet, so I can't plan around it.")
                 return
+            from . import ebguide
+            from .alerts import _eb_gate_today, _gate_line
+            margin = ebguide.plan_margin(state.get("plan_log", []))
+            gate = _eb_gate_today(state, now.strftime("%Y-%m-%d"), now, outlook, store)
             pr = _get_performance_ratio(state, cloudy=outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
             hb = _get_hourly_bias(state)
             nc = predictor.solar_nowcast_factor(store, outlook, peak, pr, hb, now)
@@ -1686,6 +1699,11 @@ class TelegramChatBot:
                 return datetime(2000, 1, 1, (total // 60) % 24, total % 60).strftime("%-I:%M %p")
 
             lines = [f"🔋 <b>EB plan — grid-free {fmt(start_h)}–{fmt(end_h)}</b>"]
+            if gate["needed"]:
+                lines.append(_gate_line(gate))
+            elif gate["known"]:
+                share = f" ({gate['ratio'] * 100:.0f}% of a good day)" if gate["ratio"] is not None else ""
+                lines.append(f"☀️ Not a cloudy day{share}, so EB usually isn't worth it. Here is the plan anyway.")
             if typical is not None:
                 lines.append(f"Counting a typical {typical.weekday_name} (average of your last {typical.n_same}, "
                              f"{fmt(14)}–{fmt(24)} ≈ {typical.evening_kwh:.1f} kWh; yours have run "
@@ -1696,7 +1714,7 @@ class TelegramChatBot:
                                          f"({ld['kw']:g} kW)" for ld in loads))
             plans = []
             for label, kwh in cases:
-                plan = _eb_plan(now, c.battery_soc_pct, cap, floor, 5.0, solar, load, kwh, car_start, 3,
+                plan = _eb_plan(now, c.battery_soc_pct, cap, floor, margin, solar, load, kwh, car_start, 3,
                                 (start_h, end_h), _EB_CHARGE_KW)
                 plans.append(plan)
             in_window = plans[0]["in_window"]
@@ -1718,7 +1736,7 @@ class TelegramChatBot:
                         f"(~{plan['eb_kwh']:.1f} kWh), start by <b>{fmt(max(now.hour + now.minute / 60.0, plan['start_by']))}</b>."
                         + ("" if plan["in_time"] else " ⚠️ That is more time than is left: start now and expect to fall short."))
             # How the answer moves if the sun disappoints (the first case, with 60% of the forecast sun).
-            weak = _eb_plan(now, c.battery_soc_pct, cap, floor, 5.0, lambda h: solar(h) * 0.6, load, cases[0][1],
+            weak = _eb_plan(now, c.battery_soc_pct, cap, floor, margin, lambda h: solar(h) * 0.6, load, cases[0][1],
                             car_start, 3, (start_h, end_h), _EB_CHARGE_KW)
             if weak["eb_kwh"] >= 0.1 or not weak["feasible"]:
                 lines.append(f"If the sun is only 60% of forecast: EB ~<b>{weak['eb_minutes']:.0f} min</b>, start by "
@@ -1727,7 +1745,7 @@ class TelegramChatBot:
             else:
                 lines.append("Even with only 60% of the forecast sun, no EB is needed.")
             rate = rate_at(now)
-            lines.append(f"<i>Floor {floor:.0f}% + 5-pt margin; EB charges ~{_EB_CHARGE_KW:.0f} kW in total, so the minutes "
+            lines.append(f"<i>Floor {floor:.0f}% + {margin:.0f}-pt margin; EB charges ~{_EB_CHARGE_KW:.0f} kW in total, so the minutes "
                          f"allow for the sun already charging; grid rate now "
                          f"${rate:.3f}/kWh."
                          + ("" if in_window else f" Stop EB by {fmt(start_h)} — it gets pricier after.") + "</i>")
@@ -1854,6 +1872,11 @@ class TelegramChatBot:
             if ok:
                 self._send(chat_id, reply)
             return
+        if data.startswith("ebm:"):
+            ok, reply = self._switch_mode(data[4:])
+            self._answer_callback_query(cq_id, "Done" if ok else "Not done")
+            self._send(chat_id, reply)
+            return
         if data.startswith("spk:"):
             key, _, code = data[4:].rpartition(":")
             ok, reply = self._set_spike_label(key, code)
@@ -1862,6 +1885,19 @@ class TelegramChatBot:
                 self._send(chat_id, reply)
             return
         self._answer_callback_query(cq_id)
+
+    def _switch_mode(self, which: str) -> tuple[bool, str]:
+        """The EB timer's buttons: "eb" or "home" (the normal mode in Config.mode_switch_home).
+        The advisor hands the bot `mode_controller(mode) -> (ok, message)`; without it, or with
+        mode switching off, nothing happens and the reply says why."""
+        cfg = self._cfg
+        if not getattr(cfg, "mode_switch_enabled", False):
+            return False, "Mode switching is off (mode_switch_enabled in ~/.franklinwh.json). Switch in the FranklinWH app."
+        mode = getattr(cfg, "mode_switch_home", "self") if which == "home" else which
+        controller = getattr(self, "mode_controller", None)
+        if controller is None:
+            return False, "I'm not connected to the battery here, so I can't switch it. Use the FranklinWH app."
+        return controller(mode)
 
     def _set_spike_label(self, key: str, code: str) -> tuple[bool, str]:
         """Record what a big spike (identified by its start, YYYY-MM-DDTHH:MM) was."""

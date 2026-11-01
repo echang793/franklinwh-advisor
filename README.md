@@ -250,7 +250,7 @@ Enable it by running `python3 scrape.py setup` again and picking a chatbot backe
 | `/today` | The day so far: solar, house load, grid in/out and its cost, battery charge/discharge, and how much solar is still to come against the sunrise forecast |
 | `/reserve` | What to charge the battery to overnight so the morning needs no grid: when it would reach the floor on its own, the 6 AM level, and the grid energy and cost to get there |
 | `/accuracy` | A scoreboard of how far `/sundown` (by time of day) and the whole-day solar forecast have actually been off. `/sundown` itself now shows a likely range from this record |
-| `/ebplan [kWh] [load kW] [dryer\|oven\|ac [H] [Nh]] [from H] [to H\|midnight]` | How much Emergency Backup, and when to start, to stay off the grid from 2 PM (or `from H`) to 11 PM (or `to H`/`midnight`). Name the dryer/oven/AC (`/ebplan dryer 2pm 1h oven 5pm 2h to midnight`) or set usual loads per weekday in `habit_loads`; it also shows the answer if the sun comes in at only 60% |
+| `/ebplan [kWh] [load kW] [dryer\|oven\|ac [H] [Nh]] [from H] [to H\|midnight]` | How much Emergency Backup, and when to start, to stay off the grid from 2 PM (or `from H`) to 11 PM (or `to H`/`midnight`). Name the dryer/oven/AC (`/ebplan dryer 2pm 1h oven 5pm 2h to midnight`) or set usual loads per weekday in `habit_loads`; it also shows the answer if the sun comes in at only 60%, and says whether today is a cloudy day with a big drop in sun (the only days the morning plan and the start/stop timer bring up EB) |
 | `/whatif kW [hours] [from H]` | What a planned load (dryer ~3 kW, AC) does to the battery at sunset, e.g. `/whatif 3 1.5 from 2pm` |
 | `/alerts` | What fired in the last 30 days, which alerts you snooze, and which to consider turning off |
 | `/mute` | Snooze non-safety alerts — tap 2h or 8h, or type `/mute 2` / `/mute 8` directly. Grid outage, fast drain, and area-outage alerts are never muted |
@@ -290,3 +290,17 @@ Run `python3 scrape.py doctor` — it checks every component and tells you exact
 - Energy data fetched from FranklinWH's own servers (same as the mobile app)
 - Weather from [Open-Meteo](https://open-meteo.com) — free and anonymous
 - Alerts go to your own Telegram bot or email — no central server
+
+### Emergency Backup timer and mode button
+
+On a cloudy day whose forecast sun is at or under 65% of a good day (the median of your better days
+in the last 30), the morning alert plans EB and the advisor sends two pings: "Start EB now" shortly
+before the start-by time, and "Switch EB off" when the target is reached or at 2 PM. On every other
+day neither mentions EB. The cushion the plan keeps (5 points) grows to 8 or 10 when plans you
+followed still left the grid supplying the window.
+
+To get a one-tap button on those pings, set `"mode_switch_enabled": true` in `~/.franklinwh.json`.
+`mode_switch_dry_run` stays `true` until you have seen it work (the call comes from a community
+library and is unconfirmed on this gateway): in dry run the button only says what it would do.
+`mode_switch_home` (`tou`, `self` or `eb`, default `self`) is the mode "Back to normal" returns to.
+
