@@ -11905,3 +11905,72 @@ def test_eb_plan_says_when_there_is_not_enough_time_before_the_window():
     late = _plan(now=datetime(2026, 10, 12, 13, 40), soc=10.0, car_kwh=4.0)         # 20 minutes to 2 PM
     assert late["in_time"] is False
     assert late["start_by"] < 13 + 40 / 60                                          # it would have had to start before now
+
+
+# ── /ebplan with named loads, a midnight target, and a weaker-sun check ──
+
+def test_parse_ebplan_reads_named_loads_and_midnight():
+    from franklinwh_scraper.chatbot import _parse_ebplan
+
+    out = _parse_ebplan("/ebplan dryer 2pm 1h oven 5pm 2h to midnight")
+    assert out["end"] == 24
+    assert out["loads"] == [{"name": "dryer", "start": 14, "hours": 1.0, "kw": 4.0},
+                            {"name": "oven", "start": 17, "hours": 2.0, "kw": 2.5}]
+    out = _parse_ebplan("/ebplan dryer")                                       # defaults for a dryer
+    assert out["loads"] == [{"name": "dryer", "start": 14, "hours": 1.0, "kw": 4.0}]
+    out = _parse_ebplan("/ebplan oven 6pm 90m until 11pm")
+    assert out["loads"] == [{"name": "oven", "start": 18, "hours": 1.5, "kw": 2.5}] and out["end"] == 23
+    assert "loads" not in _parse_ebplan("/ebplan 5 kwh")                       # unchanged for the old forms
+    assert _parse_ebplan("/ebplan dryer 25pm") is None
+
+
+def test_ebplan_counts_the_dryer_and_oven_you_name(tmp_path):
+    now = datetime(2026, 11, 1, 10, 0)                                         # a Sunday
+    bot, sent = _ebplan_bot(tmp_path, now, soc=30.0)
+    _run_at(now, bot._send_ebplan, "1", {"car_kwh": None, "load_kw": None, "start": None, "end": None})
+    plain = sent["text"]
+    _run_at(now, bot._send_ebplan, "1", {"car_kwh": None, "load_kw": None, "start": None, "end": 24,
+                                         "loads": [{"name": "dryer", "start": 14, "hours": 1.0, "kw": 4.0},
+                                                   {"name": "oven", "start": 17, "hours": 2.0, "kw": 2.5}]})
+    loaded = sent["text"]
+    assert "Counting: dryer 2:00 PM–3:00 PM" in loaded and "oven 5:00 PM–7:00 PM" in loaded
+    assert "12:00 AM" in loaded                                               # the midnight target
+    import re
+    need = lambda t: float(re.search(r"need (\d+)%", t).group(1))              # noqa: E731
+    assert need(loaded) > need(plain)
+
+
+def test_ebplan_checks_what_happens_if_the_sun_is_weaker(tmp_path):
+    now = datetime(2026, 11, 1, 10, 0)
+    bot, sent = _ebplan_bot(tmp_path, now, soc=30.0)
+    _run_at(now, bot._send_ebplan, "1", {"car_kwh": None, "load_kw": None, "start": None, "end": 24,
+                                         "loads": [{"name": "dryer", "start": 14, "hours": 1.0, "kw": 4.0},
+                                                   {"name": "oven", "start": 17, "hours": 2.0, "kw": 2.5}]})
+    assert "If the sun is only 60%" in sent["text"]
+
+
+def test_ebplan_uses_your_usual_loads_for_the_day_when_you_name_none(tmp_path):
+    now = datetime(2026, 11, 1, 10, 0)                                         # Sunday
+    bot, sent = _ebplan_bot(tmp_path, now, soc=30.0)
+    bot._cfg.habit_loads = {"sunday": [["dryer", "14:00", 1.0, 4.0], ["oven", "17:00", 2.0, 2.5]]}
+    _run_at(now, bot._send_ebplan, "1", {"car_kwh": None, "load_kw": None, "start": None, "end": None})
+    assert "your usual Sunday" in sent["text"] and "dryer 2:00 PM" in sent["text"]
+    monday = datetime(2026, 11, 2, 10, 0)
+    (tmp_path / "m").mkdir()
+    bot2, sent2 = _ebplan_bot(tmp_path / "m", monday, soc=30.0)
+    bot2._cfg.habit_loads = bot._cfg.habit_loads
+    _run_at(monday, bot2._send_ebplan, "1", {"car_kwh": None, "load_kw": None, "start": None, "end": None})
+    assert "usual" not in sent2["text"]
+
+
+def test_ebplan_when_a_full_battery_is_not_enough_says_what_filling_it_takes(tmp_path):
+    now = datetime(2026, 11, 1, 10, 0)
+    bot, sent = _ebplan_bot(tmp_path, now, soc=20.0)
+    _run_at(now, bot._send_ebplan, "1", {"car_kwh": None, "load_kw": 1.5, "start": None, "end": 24,
+                                         "loads": [{"name": "dryer", "start": 14, "hours": 1.5, "kw": 4.0},
+                                                   {"name": "oven", "start": 17, "hours": 3.0, "kw": 3.0}]})
+    assert "isn't enough" in sent["text"] and "fill" in sent["text"].lower()
+
+
+def test_config_has_habit_loads_empty_by_default():
+    assert Config().habit_loads == {}

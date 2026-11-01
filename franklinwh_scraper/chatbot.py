@@ -281,6 +281,25 @@ def _hour24(num: str, ampm: str | None) -> int | None:
     return h if 0 <= h <= 23 else None
 
 
+_LOAD_DEFAULTS = {"dryer": (14, 1.0, 4.0), "oven": (17, 2.0, 2.5), "kitchen": (17, 2.0, 2.5), "ac": (14, 3.0, 3.0)}
+_LOAD_RE = re.compile(
+    r"\b(dryer|oven|kitchen|ac)\b(?:\s+(?:at\s+)?" + _HOUR + r"(?!\s*(?:h|hr|hrs|m|min)\b))?"
+    r"(?:\s+(?:for\s+)?(\d+(?:\.\d+)?)\s*(h|hr|hrs|m|min)\b)?")
+
+
+def _habit_loads(cfg, now: datetime) -> list[dict]:
+    """The loads configured for today's weekday (Config.habit_loads), as {name, start, hours, kw}."""
+    out = []
+    for item in (getattr(cfg, "habit_loads", None) or {}).get(now.strftime("%A").lower(), []):
+        try:
+            name, hhmm, hours, kw = item
+            hh, mm = (int(x) for x in str(hhmm).split(":"))
+            out.append({"name": str(name), "start": hh + mm / 60.0, "hours": float(hours), "kw": float(kw)})
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _parse_ebplan(text: str) -> dict | None:
     """Parse '/ebplan [car kWh] [load kW] [from H] [to H]' (H like 14, 2pm).
     Returns {car_kwh, load_kw, start, end} (None = use the default) or None if it
@@ -290,12 +309,32 @@ def _parse_ebplan(text: str) -> dict | None:
         return None
     rest = (m.group(1) or "").lower()
     out: dict = {"car_kwh": None, "load_kw": None, "start": None, "end": None}
+    loads = []
+    for mm in list(_LOAD_RE.finditer(rest)):
+        name = mm.group(1)
+        d_start, d_hours, d_kw = _LOAD_DEFAULTS[name]
+        start = _hour24(mm.group(2), mm.group(3)) if mm.group(2) else d_start
+        if start is None:
+            return None
+        hours = d_hours
+        if mm.group(4):
+            hours = float(mm.group(4)) / (60.0 if mm.group(5).startswith("m") else 1.0)
+        loads.append({"name": name, "start": start, "hours": hours, "kw": d_kw})
+    if loads:
+        out["loads"] = loads
+        rest = _LOAD_RE.sub(" ", rest)
+    mm = re.search(r"\b(?:to|until|by)\s+midnight\b", rest)
+    if mm:
+        out["end"] = 24
+        rest = rest[:mm.start()] + " " + rest[mm.end():]
     for key, pat in (("load_kw", r"\bload\s+(\d+(?:\.\d+)?)\s*(?:kw)?\b"),):
         mm = re.search(pat, rest)
         if mm:
             out[key] = float(mm.group(1))
             rest = rest[:mm.start()] + " " + rest[mm.end():]
     for key, pat in (("start", r"\b(?:from|after)\s+" + _HOUR), ("end", r"\b(?:to|until|by)\s+" + _HOUR)):
+        if key == "end" and out["end"] is not None:
+            continue
         mm = re.search(pat, rest)
         if mm:
             out[key] = _hour24(mm.group(1), mm.group(2))
@@ -454,7 +493,7 @@ class TelegramChatBot:
                             "/alerts   — what fired lately, what you snooze, what to turn off\n"
                             "/whatif kW [hours] [from H] — what a load (dryer 3 kW, AC) does to the sundown battery\n"
                             "/cardays  — label which recent afternoons were the car\n"
-                            "/ebplan [kWh] [load kW] [from H] [to H] — EB charge needed for a grid-free window\n"
+                            "/ebplan [kWh] [load kW] [dryer|oven|ac [H] [Nh]] [from H] [to H|midnight] — EB charge needed for a grid-free window\n"
                             "/ebtarget — Emergency Backup charge target for today\n"
                             "/mute     — snooze non-safety alerts (2h or 8h)\n"
                             "/unmute   — cancel an active mute\n"
@@ -1605,12 +1644,23 @@ class TelegramChatBot:
                 return
             house_now = args.get("load_kw") if args.get("load_kw") is not None else c.home_load_kw
             quiet = profile.quiet_by_hour if profile else {}
+            # Loads the forecast cannot know about: named in the command, else the usual ones for today.
+            loads = args.get("loads")
+            usual = False
+            if not loads:
+                loads = _habit_loads(cfg, now)
+                usual = bool(loads)
+
+            def extras(h: int) -> float:
+                """kW added in clock hour h by the named loads (each prorated by the part of the hour it runs)."""
+                return sum(ld["kw"] * max(0.0, min(h + 1, ld["start"] + ld["hours"]) - max(h, ld["start"]))
+                           for ld in loads)
 
             def solar(h: int) -> float:
                 return predictor._hour_bin_kw(outlook, datetime(now.year, now.month, now.day, h), peak, pr, hb) * nc
 
             def load(h: int) -> float:
-                return house_now if h < start_h else quiet.get(h, 0.5)
+                return (house_now if h < start_h else quiet.get(h, 0.5)) + extras(h)
 
             if now.hour >= start_h:
                 car_start = now.hour                                            # already in the window: a planned charge starts now
@@ -1629,6 +1679,10 @@ class TelegramChatBot:
                 return datetime(2000, 1, 1, (total // 60) % 24, total % 60).strftime("%-I:%M %p")
 
             lines = [f"🔋 <b>EB plan — grid-free {fmt(start_h)}–{fmt(end_h)}</b>"]
+            if loads:
+                lines.append(("Counting your usual " + now.strftime("%A") + ": " if usual else "Counting: ")
+                             + ", ".join(f"{ld['name']} {fmt(ld['start'])}–{fmt(ld['start'] + ld['hours'])} "
+                                         f"({ld['kw']:g} kW)" for ld in loads))
             plans = []
             for label, kwh in cases:
                 plan = _eb_plan(now, c.battery_soc_pct, cap, floor, 5.0, solar, load, kwh, car_start, 3,
@@ -1640,7 +1694,10 @@ class TelegramChatBot:
                             if in_window else f"Without EB: ~<b>{plans[0]['soc_at_start']:.0f}%</b> at {fmt(start_h)}."))
             for (label, _kwh), plan in zip(cases, plans):
                 if not plan["feasible"]:
-                    lines.append(f"• {label}: <b>a full battery isn't enough</b> — ~{plan['grid_import_kwh']:.1f} kWh would come from the grid.")
+                    fill = (f" Best you can do is fill it: EB ~{plan['eb_minutes']:.0f} min, start by "
+                            f"{fmt(max(now.hour + now.minute / 60.0, plan['start_by']))}." if plan["eb_kwh"] >= 0.1 else "")
+                    lines.append(f"• {label}: <b>a full battery isn't enough</b> — ~{plan['grid_import_kwh']:.1f} kWh would "
+                                 f"come from the grid.{fill}")
                 elif plan["eb_kwh"] < 0.1:
                     lines.append(f"• {label}: need {plan['need_at_start']:.0f}%"
                                  f"{' now' if in_window else ''} → <b>no EB needed</b>.")
@@ -1649,6 +1706,15 @@ class TelegramChatBot:
                         f"• {label}: need {plan['need_at_start']:.0f}% → EB ~<b>{plan['eb_minutes']:.0f} min</b> "
                         f"(~{plan['eb_kwh']:.1f} kWh), start by <b>{fmt(max(now.hour + now.minute / 60.0, plan['start_by']))}</b>."
                         + ("" if plan["in_time"] else " ⚠️ That is more time than is left: start now and expect to fall short."))
+            # How the answer moves if the sun disappoints (the first case, with 60% of the forecast sun).
+            weak = _eb_plan(now, c.battery_soc_pct, cap, floor, 5.0, lambda h: solar(h) * 0.6, load, cases[0][1],
+                            car_start, 3, (start_h, end_h), _EB_CHARGE_KW)
+            if weak["eb_kwh"] >= 0.1 or not weak["feasible"]:
+                lines.append(f"If the sun is only 60% of forecast: EB ~<b>{weak['eb_minutes']:.0f} min</b>, start by "
+                             f"<b>{fmt(max(now.hour + now.minute / 60.0, weak['start_by']))}</b>"
+                             + (f" (and still ~{weak['grid_import_kwh']:.1f} kWh from the grid)" if not weak["feasible"] and weak["grid_import_kwh"] >= 0.05 else "") + ".")
+            else:
+                lines.append("Even with only 60% of the forecast sun, no EB is needed.")
             rate = rate_at(now)
             lines.append(f"<i>Floor {floor:.0f}% + 5-pt margin; EB charges ~{_EB_CHARGE_KW:.0f} kW in total, so the minutes "
                          f"allow for the sun already charging; grid rate now "
