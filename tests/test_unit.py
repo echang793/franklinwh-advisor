@@ -11974,3 +11974,122 @@ def test_ebplan_when_a_full_battery_is_not_enough_says_what_filling_it_takes(tmp
 
 def test_config_has_habit_loads_empty_by_default():
     assert Config().habit_loads == {}
+
+
+# ── what a typical day of the week looks like ───────────────────────────
+
+class _WeeksStore:
+    """daily_hourly_load_means over 10 weeks: quiet 0.4 kW, plus `lumps(day)` extra kW at given hours."""
+    def __init__(self, lumps, end="2026-11-01", weeks=10):
+        from datetime import date
+        self.days = {}
+        d_end = date.fromisoformat(end)
+        for i in range(1, weeks * 7 + 1):
+            d = d_end - timedelta(days=i)
+            hours = {h: 0.4 for h in range(24)}
+            for h, kw in lumps(d).items():
+                hours[h] += kw
+            self.days[d.isoformat()] = hours
+
+    def daily_hourly_load_means(self, start, end, min_readings=8):
+        return {d: h for d, h in self.days.items() if start <= d < end}
+
+
+def _sunday_lumps(d):
+    """Sundays: a dryer in the early afternoon whose hour and size vary, a little oven in the evening."""
+    if d.weekday() != 6:
+        return {}
+    k = d.toordinal() % 3
+    return {13 + k: 3.0 + k, 14 + k: 1.0, 19: 0.8}
+
+
+def test_typical_load_uses_the_weekdays_own_mean_when_that_weekday_is_consistently_heavier():
+    from datetime import date
+
+    from franklinwh_scraper.typicalload import typical_hourly_load
+
+    typ = typical_hourly_load(_WeeksStore(_sunday_lumps), date(2026, 11, 1))          # a Sunday
+    assert typ.source == "same-weekday mean" and typ.n_same >= 8
+    assert typ.by_hour[19] == pytest.approx(1.2)                                       # 0.4 + 0.8 every Sunday
+    assert typ.by_hour[14] > 1.0                                                       # the dryer shows up
+    assert typ.evening_kwh > 4.0 + 3.0                                                 # well above ten quiet hours (4 kWh)
+
+
+def test_typical_load_keeps_the_quiet_median_for_days_the_mean_overshoots():
+    from datetime import date
+
+    from franklinwh_scraper.typicalload import typical_hourly_load
+
+    def rare_spikes(d):
+        # big spikes on the OLDER Wednesdays only (a summer habit that stopped): the mean still remembers them
+        return {15: 6.0} if d.weekday() == 2 and d < date(2026, 9, 20) else {}
+
+    typ = typical_hourly_load(_WeeksStore(rare_spikes), date(2026, 11, 4))            # a Wednesday
+    assert typ.source == "quiet-day median"
+    assert typ.by_hour[15] == pytest.approx(0.4)
+
+
+def test_typical_load_needs_enough_of_that_weekday_and_ignores_car_days():
+    from datetime import date, timedelta as td
+
+    from franklinwh_scraper.typicalload import typical_hourly_load
+
+    assert typical_hourly_load(_WeeksStore(_sunday_lumps, weeks=3), date(2026, 11, 1)) is None   # only 3 Sundays
+    store = _WeeksStore(_sunday_lumps)
+    all_sundays = [(date(2026, 11, 1) - td(days=i)) for i in range(1, 71) if (date(2026, 11, 1) - td(days=i)).weekday() == 6]
+    labels = {d.isoformat(): True for d in all_sundays[:-3]}                                       # most Sundays were car days
+    assert typical_hourly_load(store, date(2026, 11, 1), labels) is None
+
+
+def _typical(**hours):
+    from franklinwh_scraper.typicalload import TypicalLoad
+
+    by_hour = {h: 0.4 for h in range(24)}
+    by_hour.update({int(k[1:]): v for k, v in hours.items()})
+    return TypicalLoad(by_hour=by_hour, source="same-weekday mean", n_same=8, evening_kwh=sum(by_hour[h] for h in range(14, 24)),
+                       weekday_name="Sunday", low_kwh=3.0, high_kwh=14.0)
+
+
+def test_ebplan_uses_your_typical_weekday_when_you_name_nothing(tmp_path, monkeypatch):
+    from franklinwh_scraper import typicalload
+
+    now = datetime(2026, 11, 1, 10, 0)                                         # Sunday
+    bot, sent = _ebplan_bot(tmp_path, now, soc=30.0)
+    _run_at(now, bot._send_ebplan, "1", {"car_kwh": None, "load_kw": None, "start": None, "end": None})
+    plain = sent["text"]
+    monkeypatch.setattr(typicalload, "typical_hourly_load", lambda *a, **k: _typical(h14=2.5, h15=3.0, h19=1.5))
+    _run_at(now, bot._send_ebplan, "1", {"car_kwh": None, "load_kw": None, "start": None, "end": None})
+    text = sent["text"]
+    assert "typical Sunday" in text and "last 8" in text and "3.0–14.0 kWh" in text
+    import re
+    need = lambda t: float(re.search(r"no car: need (\d+)%", t).group(1))      # noqa: E731
+    assert need(text) > need(plain)
+
+
+def test_ebplan_named_loads_beat_the_learned_typical_day(tmp_path, monkeypatch):
+    from franklinwh_scraper import typicalload
+
+    now = datetime(2026, 11, 1, 10, 0)
+    bot, sent = _ebplan_bot(tmp_path, now, soc=30.0)
+    monkeypatch.setattr(typicalload, "typical_hourly_load", lambda *a, **k: _typical(h14=9.0))
+    _run_at(now, bot._send_ebplan, "1", {"car_kwh": None, "load_kw": None, "start": None, "end": None,
+                                         "loads": [{"name": "dryer", "start": 14, "hours": 1.0, "kw": 4.0}]})
+    assert "Counting: dryer" in sent["text"] and "typical Sunday" not in sent["text"]
+
+
+def test_ebplan_explicit_house_load_is_respected_over_the_typical_day(tmp_path, monkeypatch):
+    from franklinwh_scraper import typicalload
+
+    now = datetime(2026, 11, 1, 10, 0)
+    bot, sent = _ebplan_bot(tmp_path, now, soc=30.0)
+    monkeypatch.setattr(typicalload, "typical_hourly_load", lambda *a, **k: _typical(h14=9.0))
+    _run_at(now, bot._send_ebplan, "1", {"car_kwh": None, "load_kw": 1.0, "start": None, "end": None})
+    assert "typical Sunday" not in sent["text"]
+
+
+def test_daily_plan_counts_the_typical_day_and_says_so(monkeypatch):
+    from franklinwh_scraper import typicalload
+
+    monkeypatch.setattr(typicalload, "typical_hourly_load", lambda *a, **k: _typical(h14=3.0, h15=3.0, h19=2.0))
+    text, state = _daily_plan_for(soc=30.0, solar=_SUNNY, store=object())
+    assert "typical Sunday" in text or "typical" in text.lower()

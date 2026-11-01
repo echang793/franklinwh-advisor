@@ -1647,9 +1647,14 @@ class TelegramChatBot:
             # Loads the forecast cannot know about: named in the command, else the usual ones for today.
             loads = args.get("loads")
             usual = False
+            typical = None
             if not loads:
                 loads = _habit_loads(cfg, now)
                 usual = bool(loads)
+            if not loads and args.get("load_kw") is None:
+                # Nothing named and no house load given: what this weekday usually looks like, learned.
+                from . import typicalload
+                typical = typicalload.typical_hourly_load(store, now.date(), state.get("car_day_labels"))
 
             def extras(h: int) -> float:
                 """kW added in clock hour h by the named loads (each prorated by the part of the hour it runs)."""
@@ -1660,6 +1665,8 @@ class TelegramChatBot:
                 return predictor._hour_bin_kw(outlook, datetime(now.year, now.month, now.day, h), peak, pr, hb) * nc
 
             def load(h: int) -> float:
+                if typical is not None and h > now.hour:
+                    return typical.by_hour.get(h, 0.5)
                 return (house_now if h < start_h else quiet.get(h, 0.5)) + extras(h)
 
             if now.hour >= start_h:
@@ -1679,6 +1686,10 @@ class TelegramChatBot:
                 return datetime(2000, 1, 1, (total // 60) % 24, total % 60).strftime("%-I:%M %p")
 
             lines = [f"🔋 <b>EB plan — grid-free {fmt(start_h)}–{fmt(end_h)}</b>"]
+            if typical is not None:
+                lines.append(f"Counting a typical {typical.weekday_name} (average of your last {typical.n_same}, "
+                             f"{fmt(14)}–{fmt(24)} ≈ {typical.evening_kwh:.1f} kWh; yours have run "
+                             f"{typical.low_kwh:.1f}–{typical.high_kwh:.1f} kWh).")
             if loads:
                 lines.append(("Counting your usual " + now.strftime("%A") + ": " if usual else "Counting: ")
                              + ", ".join(f"{ld['name']} {fmt(ld['start'])}–{fmt(ld['start'] + ld['hours'])} "

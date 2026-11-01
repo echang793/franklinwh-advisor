@@ -1775,16 +1775,19 @@ def _window_grid_import(soc_pct: float, cap: float, floor_pct: float, solar, loa
     return imported, cost
 
 
-def _plan_curves(live, now: datetime, profile):
+def _plan_curves(live, now: datetime, profile, typical=None):
     """(solar(h), load(h)) closures from the live forecast: kW for clock hour h today. Hours
-    after this one use the learned quiet load when there is one."""
+    after this one use what this weekday typically looks like when it has been learned
+    (typicalload), else the learned quiet load."""
     solar: dict[int, float] = {}
     load: dict[int, float] = {}
     for h in live.hours:
         if h.dt.date() != now.date() or h.dt.hour in solar:
             continue
         solar[h.dt.hour] = h.predicted_solar_kw
-        q = profile.quiet_by_hour.get(h.dt.hour) if profile is not None else None
+        q = typical.by_hour.get(h.dt.hour) if typical is not None else None
+        if q is None and profile is not None:
+            q = profile.quiet_by_hour.get(h.dt.hour)
         load[h.dt.hour] = q if (q is not None and h.dt.hour != now.hour) else h.predicted_load_kw
     return (lambda h: solar.get(h, 0.0)), (lambda h: load.get(h, 0.5))
 
@@ -1895,6 +1898,8 @@ def _daily_plan(state: dict, today: str, now: datetime, c, cfg, outlook, usage_f
         sunset = _sunset_today(outlook, now)
         quiet = _afternoon_scenarios(live, now, c.battery_soc_pct, cap, profile, getattr(c, "home_load_kw", None),
                                      floor_pct=reserve, sunset=sunset)["quiet"]
+        from . import typicalload
+        typical = typicalload.typical_hourly_load(store, now.date(), state.get("car_day_labels"))
         lines: list[str] = []
         record: dict = {"window": list(_PLAN_WINDOW)}
 
@@ -1909,11 +1914,15 @@ def _daily_plan(state: dict, today: str, now: datetime, c, cfg, outlook, usage_f
             lines.append(line)
             record["sundown_pct"] = round(end_pct, 1)
 
+        if typical is not None:
+            lines.append(f"📊 Counting a typical {typical.weekday_name} evening (~{typical.evening_kwh:.1f} kWh from 2 PM "
+                         f"to midnight; yours have run {typical.low_kwh:.0f}–{typical.high_kwh:.0f}).")
+
         # Emergency Backup for the grid-free window
         start_h, end_h = _PLAN_WINDOW
         if now.hour < end_h:
             from .advisor import _EB_CHARGE_KW
-            solar, load = _plan_curves(live, now, profile)
+            solar, load = _plan_curves(live, now, profile, typical)
             eb = _eb_plan(now, c.battery_soc_pct, cap, reserve, _PLAN_MARGIN_PCT, solar, load, 0.0, 15, 3,
                           _PLAN_WINDOW, _EB_CHARGE_KW)
             w = f"{_clock_str(start_h)}–{_clock_str(end_h)}"
