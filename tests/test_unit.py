@@ -10169,8 +10169,11 @@ def test_eb_plan_sizes_the_charge_and_the_start_time_for_a_car_session():
     p = _plan(car_kwh=4.0)
     assert p["need_at_start"] == pytest.approx(70.0)         # 30% + 4 kWh of a 10 kWh pack
     assert p["eb_kwh"] == pytest.approx(1.5)                 # (70 - 55)% of 10 kWh
-    assert p["eb_minutes"] == pytest.approx(18.0)            # at 5 kW
-    assert p["start_by"] == pytest.approx(14 - 0.3)          # finish by the window start
+    # EB charges the battery at 5 kW IN TOTAL; the house already nets +0.5 kW of sun, so it adds
+    # only 4.5 kW over what would have happened anyway (the old math said 18 min)
+    assert p["eb_minutes"] == pytest.approx(1.5 / 4.5 * 60)
+    assert p["start_by"] == pytest.approx(14 - 1.5 / 4.5)    # finish by the window start
+    assert p["in_time"] is True
     assert p["feasible"] is True
 
 
@@ -10264,7 +10267,7 @@ def test_eb_plan_inside_the_window_plans_only_the_hours_that_remain():
     assert ok["eb_kwh"] == 0.0
     low = _plan(**base, soc=30.0)
     assert low["eb_kwh"] == pytest.approx(1.0)
-    assert low["eb_minutes"] == pytest.approx(12.0)
+    assert low["eb_minutes"] == pytest.approx(1.0 / 4.5 * 60)    # 5 kW total, minus the +0.5 kW the sun nets anyway
     assert low["start_by"] == pytest.approx(16.0)      # start now, not at the (already passed) window start
 
 
@@ -11879,3 +11882,26 @@ def test_car_on_peak_alert_fires_once_per_run_and_at_most_three_a_day(monkeypatc
 
 def test_car_on_peak_alert_without_a_store_is_silent():
     assert alerts._alert_car_on_peak({}, "2026-10-26", datetime(2026, 10, 26, 17, 21), _tracker_c(), Config(), None) is None
+
+
+def test_eb_plan_takes_longer_when_the_sun_is_already_charging_the_battery():
+    """The bug in the old math: EB's 5 kW is the battery's total charge rate, so a strong sun
+    leaves little for EB to add and the same top-up takes much longer."""
+    gloom = _plan(car_kwh=15.0, cap=40.0, solar_kw=lambda h: 0.5 if h < 17 else 0.0)            # house nets 0 kW before 2 PM
+    sunny = _plan(car_kwh=15.0, cap=40.0, soc=10.0,
+                  solar_kw=lambda h: 3.5 if h < 14 else (0.5 if h < 17 else 0.0))              # nets +3 kW before 2 PM
+    assert gloom["eb_kwh"] > 0 and sunny["eb_kwh"] > 0
+    assert gloom["eb_minutes"] == pytest.approx(gloom["eb_kwh"] / 5.0 * 60)
+    assert sunny["eb_minutes"] == pytest.approx(sunny["eb_kwh"] / 2.0 * 60)         # only 5 - 3 kW is new
+    assert sunny["eb_minutes"] / sunny["eb_kwh"] > gloom["eb_minutes"] / gloom["eb_kwh"] * 2
+
+
+def test_eb_plan_is_quicker_when_the_house_is_drawing_from_the_battery():
+    heavy = _plan(car_kwh=4.0, load_kw=lambda h: 2.5)                               # house nets -1.5 kW
+    assert heavy["eb_minutes"] == pytest.approx(heavy["eb_kwh"] / 6.5 * 60)
+
+
+def test_eb_plan_says_when_there_is_not_enough_time_before_the_window():
+    late = _plan(now=datetime(2026, 10, 12, 13, 40), soc=10.0, car_kwh=4.0)         # 20 minutes to 2 PM
+    assert late["in_time"] is False
+    assert late["start_by"] < 13 + 40 / 60                                          # it would have had to start before now

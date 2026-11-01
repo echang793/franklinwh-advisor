@@ -1647,9 +1647,11 @@ class TelegramChatBot:
                 else:
                     lines.append(
                         f"• {label}: need {plan['need_at_start']:.0f}% → EB ~<b>{plan['eb_minutes']:.0f} min</b> "
-                        f"(~{plan['eb_kwh']:.1f} kWh), start by <b>{fmt(max(now.hour + now.minute / 60.0, plan['start_by']))}</b>.")
+                        f"(~{plan['eb_kwh']:.1f} kWh), start by <b>{fmt(max(now.hour + now.minute / 60.0, plan['start_by']))}</b>."
+                        + ("" if plan["in_time"] else " ⚠️ That is more time than is left: start now and expect to fall short."))
             rate = rate_at(now)
-            lines.append(f"<i>Floor {floor:.0f}% + 5-pt margin; EB at ~{_EB_CHARGE_KW:.0f} kW; grid rate now "
+            lines.append(f"<i>Floor {floor:.0f}% + 5-pt margin; EB charges ~{_EB_CHARGE_KW:.0f} kW in total, so the minutes "
+                         f"allow for the sun already charging; grid rate now "
                          f"${rate:.3f}/kWh."
                          + ("" if in_window else f" Stop EB by {fmt(start_h)} — it gets pricier after.") + "</i>")
             self._send(chat_id, "\n".join(lines))

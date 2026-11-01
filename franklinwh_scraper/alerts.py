@@ -1932,10 +1932,11 @@ def _daily_plan(state: dict, today: str, now: datetime, c, cfg, outlook, usage_f
                 start_dt = datetime(now.year, now.month, now.day) + timedelta(hours=float(eb["start_by"]))
                 cost = eb["eb_kwh"] * rate_at(start_dt)
                 lines.append(
-                    f"⚡ EB: ~{eb['eb_kwh']:.1f} kWh (~{eb['eb_minutes']:.0f} min at {_EB_CHARGE_KW:.0f} kW), start by "
+                    f"⚡ EB: ~{eb['eb_kwh']:.1f} kWh (~{eb['eb_minutes']:.0f} min), start by "
                     f"{_clock_str(eb['start_by'])}, so the battery is ~{eb['need_at_start']:.0f}% at "
                     f"{_clock_str(start_h)}. Costs ~${cost:.2f}; skipping it means ~{imp_kwh:.1f} kWh from the "
-                    f"grid {w} (~${imp_cost:.2f}).")
+                    f"grid {w} (~${imp_cost:.2f})."
+                    + ("" if eb["in_time"] else " That is more time than is left: start now and expect to fall short."))
 
         # Car: free room, and the hours with surplus solar
         if quiet is not None:
@@ -3273,11 +3274,47 @@ def _eb_plan(now: datetime, soc: float, cap: float, floor: float, margin: float,
                 k = floor_kwh
             k = min(cap, k)
     eb_kwh = max(0.0, need - soc_at_start) / 100.0 * cap
-    eb_minutes = eb_kwh / eb_kw * 60.0 if eb_kw > 0 else 0.0
+
+    # How long that takes. Emergency Backup charges the battery at eb_kw IN TOTAL (the grid makes up
+    # whatever the sun does not), so it adds only eb_kw minus what the house nets at that hour
+    # anyway: a strong sun leaves EB little to add, a drawn-down house leaves it more. (The old math
+    # counted the full eb_kw on top of the sun, so sunny-day times came out up to twice too short.)
+    def adds(h: int) -> float:
+        return max(0.0, eb_kw - (solar_kw(h) - load_kw(h) - extra(h)))
+
+    now_dec = now.hour + now.minute / 60.0
+    remaining, eb_minutes = eb_kwh, 0.0
+    if in_window:
+        end_dt = now.replace(hour=end_h, minute=0, second=0, microsecond=0)
+        room_min = max(0.0, (end_dt - now).total_seconds() / 60.0)
+        cursor = now
+        while remaining > 1e-9 and eb_minutes < room_min:
+            step = adds(cursor.hour) / 60.0                      # kWh gained in the next minute
+            if step >= remaining:
+                eb_minutes += remaining / step if step > 0 else 0.0
+                remaining = 0.0
+                break
+            remaining -= step
+            eb_minutes += 1.0
+            cursor += timedelta(minutes=1)
+        in_time = remaining <= 1e-9
+        start_by = now_dec
+    else:
+        cursor = now.replace(hour=start_h, minute=0, second=0, microsecond=0)
+        while remaining > 1e-9 and eb_minutes < 24 * 60:         # walk back from the window start
+            cursor -= timedelta(minutes=1)
+            step = adds(cursor.hour if cursor >= now else now.hour) / 60.0
+            if step >= remaining:
+                eb_minutes += remaining / step
+                remaining = 0.0
+                break
+            remaining -= step
+            eb_minutes += 1.0
+        start_by = start_h - eb_minutes / 60.0
+        in_time = remaining <= 1e-9 and start_by >= now_dec - 1e-9
     return {
         "soc_at_start": soc_at_start, "need_at_start": need, "eb_kwh": eb_kwh,
-        "eb_minutes": eb_minutes,
-        "start_by": now.hour + now.minute / 60.0 if in_window else start_h - eb_minutes / 60.0,
+        "eb_minutes": eb_minutes, "start_by": start_by, "in_time": in_time,
         "feasible": feasible, "grid_import_kwh": imported, "in_window": in_window,
     }
 
