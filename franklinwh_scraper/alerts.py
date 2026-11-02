@@ -1859,6 +1859,9 @@ def _plan_scorecard(state: dict, store, today: str, now: datetime) -> str:
                          f"{grid_kwh:.1f} kWh (${grid_cost:.2f}).")
             entry.update(planned_eb_kwh=round(float(plan.get("eb_kwh", 0.0)), 2), ran_eb_kwh=round(ran, 2),
                          grid_kwh=round(grid_kwh, 2), grid_cost=round(grid_cost, 2))
+            gate = plan.get("gate") or {}
+            if gate.get("ratio") is not None:        # lets ebguide.tuned_ratio learn the threshold
+                entry.update(gate_cloudy=bool(gate.get("cloudy")), gate_ratio=round(float(gate["ratio"]), 3))
         if rplan:
             from .reservehold import detect_reserve_hold
             hold = detect_reserve_hold(store.night_readings(today))
@@ -1914,7 +1917,8 @@ def _eb_gate_today(state: dict, today: str, now: datetime, outlook, store) -> di
     gate = ebguide.eb_day_gate(outlook, store, now.date(), _GHI_CLOUDY_THRESHOLD,
                                peak_kw=_get_system_peak_kw(state),
                                perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
-                               hourly_bias=_get_hourly_bias(state))
+                               hourly_bias=_get_hourly_bias(state),
+                               ratio_threshold=ebguide.tuned_ratio(state.get("plan_log", [])))
     if gate["known"]:
         state[key] = gate
     return gate

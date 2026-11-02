@@ -157,3 +157,43 @@ def test_heavy_day_needs_a_real_gap_and_real_load():
     assert not ebguide.is_heavy(recent_kw=1.0, quiet_kw=0.8)         # a little over: noise
     assert not ebguide.is_heavy(recent_kw=0.8, quiet_kw=0.3)         # 2.7x but under a kilowatt: standby noise
     assert not ebguide.is_heavy(recent_kw=None, quiet_kw=0.8)
+
+
+def _day(ratio, grid, ran=0.0, cloudy=True):
+    return {"gate_cloudy": cloudy, "gate_ratio": ratio, "grid_kwh": grid, "ran_eb_kwh": ran}
+
+
+def _quiet_days(n, ratio=0.7):
+    return [_day(ratio, 0.0) for _ in range(n)]
+
+
+def test_gate_threshold_can_be_passed_in():
+    g = ebguide.eb_day_gate(_Outlook(cloudy=True, kwh=19.8), _Store(_history(TODAY)), TODAY, 300,
+                            peak_kw=4.5, ratio_threshold=0.70)      # 0.66 of a 30 kWh day
+    assert g["needed"] and g["threshold"] == 0.70
+    assert not _gate(_Outlook(cloudy=True, kwh=19.8), _Store(_history(TODAY)))["needed"]
+
+
+def test_tuned_ratio_stays_at_the_default_without_history():
+    assert ebguide.tuned_ratio([]) == ebguide.SIGNIFICANT_RATIO
+    assert ebguide.tuned_ratio(_quiet_days(6) + [_day(0.6, 3.0)] * 3) == ebguide.SIGNIFICANT_RATIO   # 9 days, < 10
+
+
+def test_tuned_ratio_needs_a_few_days_that_really_imported():
+    log = _quiet_days(12) + [_day(0.7, 3.0)] * 2
+    assert ebguide.tuned_ratio(log) == ebguide.SIGNIFICANT_RATIO
+
+
+def test_tuned_ratio_rises_when_milder_days_still_imported_without_eb():
+    log = _quiet_days(8, 0.8) + [_day(r, 2.5) for r in (0.5, 0.6, 0.7, 0.75)]
+    assert ebguide.tuned_ratio(log) == pytest.approx(0.72)           # upper quartile of 0.5..0.75, +0.02
+
+
+def test_tuned_ratio_ignores_days_eb_ran_and_clear_days():
+    log = _quiet_days(10) + [_day(0.84, 4.0, ran=2.0)] * 4 + [_day(0.84, 4.0, cloudy=False)] * 4
+    assert ebguide.tuned_ratio(log) == ebguide.SIGNIFICANT_RATIO
+
+
+def test_tuned_ratio_is_clamped():
+    assert ebguide.tuned_ratio(_quiet_days(10) + [_day(0.99, 5.0)] * 3) == 0.85
+    assert ebguide.tuned_ratio(_quiet_days(10) + [_day(0.1, 5.0)] * 3) == 0.5

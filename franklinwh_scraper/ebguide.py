@@ -45,8 +45,29 @@ def good_day_baseline_kwh(store, today: date) -> float | None:
     return float(statistics.median(vals[: max(1, len(vals) // 2)]))
 
 
+TUNE_MIN_DAYS = 10           # cloudy, un-mitigated days before the threshold moves
+TUNE_MIN_NEEDED = 3          # of which the grid really had to supply the window
+TUNE_NEED_GRID_KWH = 1.0
+TUNE_BOUNDS = (0.5, 0.85)
+
+
+def tuned_ratio(plan_log: list[dict], base: float = SIGNIFICANT_RATIO) -> float:
+    """The "big drop in sun" threshold, learned from how past cloudy days went. Looks at cloudy
+    days the plan log has a gate ratio for and where no EB ran (so the grid import shows what
+    happened unaided). If on enough of them the grid still supplied the 2-11 PM window, the
+    threshold moves up to cover the milder of those days (upper quartile of their ratios, plus
+    0.02), clamped to 0.5-0.85. Otherwise the default."""
+    days = [e for e in plan_log
+            if e.get("gate_cloudy") and e.get("gate_ratio") is not None and (e.get("ran_eb_kwh") or 0) < 0.5]
+    needed = sorted(float(e["gate_ratio"]) for e in days if (e.get("grid_kwh") or 0) > TUNE_NEED_GRID_KWH)
+    if len(days) < TUNE_MIN_DAYS or len(needed) < TUNE_MIN_NEEDED:
+        return base
+    q = needed[round(0.75 * (len(needed) - 1))]
+    return min(TUNE_BOUNDS[1], max(TUNE_BOUNDS[0], round(q + 0.02, 2)))
+
+
 def eb_day_gate(outlook, store, today: date, ghi_threshold: float, *, peak_kw: float | None,
-                perf_ratio: float = 1.0, hourly_bias=None) -> dict:
+                perf_ratio: float = 1.0, hourly_bias=None, ratio_threshold: float = SIGNIFICANT_RATIO) -> dict:
     """Is today a cloudy day with a significant drop in generation?
 
     Returns {"known", "needed", "cloudy", "forecast_kwh", "baseline_kwh", "ratio"}. `needed`
@@ -55,7 +76,7 @@ def eb_day_gate(outlook, store, today: date, ghi_threshold: float, *, peak_kw: f
     when there is no forecast to judge by, in which case callers should not suppress anything.
     Never raises."""
     out = {"known": False, "needed": False, "cloudy": None, "forecast_kwh": None,
-           "baseline_kwh": None, "ratio": None}
+           "baseline_kwh": None, "ratio": None, "threshold": ratio_threshold}
     if outlook is None:
         return out
     try:
@@ -69,7 +90,7 @@ def eb_day_gate(outlook, store, today: date, ghi_threshold: float, *, peak_kw: f
         logger.debug("EB gate failed", exc_info=True)
         return out
     out.update(known=True, cloudy=cloudy, forecast_kwh=forecast, baseline_kwh=baseline, ratio=ratio,
-               needed=cloudy and (ratio is None or ratio <= SIGNIFICANT_RATIO))
+               needed=cloudy and (ratio is None or ratio <= ratio_threshold))
     return out
 
 

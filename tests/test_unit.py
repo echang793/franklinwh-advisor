@@ -12163,6 +12163,24 @@ def test_daily_plan_uses_the_learned_margin():
         "daily_plan_2026-11-02"]["eb_kwh"]
 
 
+def test_daily_plan_uses_the_learned_gate_threshold():
+    quiet = {"gate_cloudy": True, "gate_ratio": 0.95, "grid_kwh": 0.0, "ran_eb_kwh": 0.0}
+    short = {"gate_cloudy": True, "gate_ratio": 0.82, "grid_kwh": 3.0, "ran_eb_kwh": 0.0}
+    log = [quiet] * 7 + [short] * 3                       # milder days still imported -> threshold ~0.84
+    text, st = _gated_plan(cloudy=True, kwh=25.0, solar=_SUNNY,                # 83% of a good day
+                           state={"solar_cal_samples": [4.0, 4.2, 3.9], "plan_log": log})
+    assert "Cloudy day" in text
+    assert st["eb_gate_2026-11-02"]["threshold"] == pytest.approx(0.84)
+
+
+def test_plan_scorecard_logs_the_gate_for_tuning():
+    gate = {"known": True, "needed": False, "cloudy": True, "ratio": 0.7}
+    state = {"daily_plan_2026-10-25": {"eb_kwh": 0.0, "start_by": 14.0, "window": [14, 23], "gate": gate}}
+    alerts._plan_scorecard(state, _ScoreStore(ran_eb=False), "2026-10-26", datetime(2026, 10, 26, 7, 30))
+    entry = state["plan_log"][-1]
+    assert entry["gate_cloudy"] is True and entry["gate_ratio"] == 0.7 and entry["grid_kwh"] > 0
+
+
 # ── the EB start/stop timer ──────────────────────────────────────────────
 
 def _timer_c(soc, grid=0.0, batt=-0.5, load=0.8):

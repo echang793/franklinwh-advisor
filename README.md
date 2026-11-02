@@ -297,7 +297,9 @@ On a cloudy day whose forecast sun is at or under 65% of a good day (the median 
 in the last 30), the morning alert plans EB and the advisor sends two pings: "Start EB now" shortly
 before the start-by time, and "Switch EB off" when the target is reached or at 2 PM. On every other
 day neither mentions EB. The cushion the plan keeps (5 points) grows to 8 or 10 when plans you
-followed still left the grid supplying the window.
+followed still left the grid supplying the window. The 65% line moves too: after ten cloudy days with
+no EB run, if the grid still had to supply the window on at least three of them, the line rises to cover
+the milder of those days (between 50% and 85%).
 
 To get a one-tap button on those pings, set `"mode_switch_enabled": true` in `~/.franklinwh.json`.
 `mode_switch_dry_run` stays `true` until you have seen it work (the call comes from a community
