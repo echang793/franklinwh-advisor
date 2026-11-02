@@ -3148,6 +3148,9 @@ def _alert_car_question(state: dict, today: str, now: datetime, store) -> str | 
         return None
     state["car_question_date"] = today
     start = sess["readings"][0][0]
+    from . import appliances
+    state["car_question_key"] = start.strftime("%Y-%m-%dT%H:%M")
+    appliances.remember_spike(state, state["car_question_key"], sess["avg_kw"], sess["minutes"])
     kwh = sess["avg_kw"] * sess["minutes"] / 60.0
     wfh = (" You're usually back around 3 PM, so was this a work-from-home day?"
            if before_arrival(start) else "")
@@ -3202,6 +3205,8 @@ def _alert_load_question(state: dict, today: str, now: datetime, store) -> str |
         state["load_asked"] = (asked + [key])[-60:]
         state["load_question_count"] = {"date": today, "n": n_today + 1}
         state["load_question_key"] = key
+        from . import appliances
+        appliances.remember_spike(state, key, sp["avg_kw"], sp["minutes"])     # for the "which appliance?" answer
         kwh = sp["avg_kw"] * sp["minutes"] / 60.0
         return (
             "❓ <b>What was that?</b>\n"

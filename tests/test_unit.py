@@ -12433,3 +12433,104 @@ def test_eb_week_line_is_empty_when_no_eb_was_run():
     state = {"plan_log": [{"day": "2026-10-29", "planned_eb_kwh": 0.0, "ran_eb_kwh": 0.0, "grid_kwh": 0.0, "grid_cost": 0.0}]}
     assert alerts._eb_week_line(state, datetime(2026, 11, 1, 20, 0)) == ""
     assert alerts._eb_week_line({}, datetime(2026, 11, 1, 20, 0)) == ""
+
+
+# ── learning appliances from the answers ─────────────────────────────────
+
+def _label_bot(tmp_path):
+    bot = TelegramChatBot(Config(), api_key="x")
+    bot._outdir = tmp_path
+    bot._is_authorized = lambda chat_id: True
+    sent: list = []
+    bot._send = lambda chat_id, text, reply_markup=None: sent.append((text, reply_markup))
+    bot._answer_callback_query = lambda *a, **k: None
+    return bot, sent
+
+
+def _tap(bot, data):
+    bot._handle_callback_query({"id": "1", "data": data, "message": {"chat": {"id": 5}}})
+
+
+def test_load_question_remembers_the_spike_for_the_appliance_answer(tmp_path):
+    db = _spike_store(tmp_path, datetime(2026, 10, 9).date(), {7: 4.1, 8: 4.1})
+    state: dict = {}
+    alerts._alert_load_question(state, "2026-10-09", datetime(2026, 10, 9, 9, 20), db)
+    fact = state["spike_facts"]["2026-10-09T07:00"]
+    assert fact["minutes"] == 120 and fact["kw"] == pytest.approx(4.1, abs=0.1)
+
+
+def test_car_question_remembers_its_block_too(tmp_path):
+    db = HistoryStore(tmp_path / "h.db")
+    _seed_loads(db, datetime(2026, 10, 9).date(), _car_day(13))
+    state: dict = {}
+    alerts._alert_car_question(state, "2026-10-09", datetime(2026, 10, 9, 17, 15), db)
+    assert state["car_question_key"] == "2026-10-09T13:00"
+    assert state["spike_facts"]["2026-10-09T13:00"]["minutes"] == 180
+
+
+def test_tapping_appliance_asks_which_one(tmp_path):
+    bot, sent = _label_bot(tmp_path)
+    alerts._save_peak_state(tmp_path, {"spike_facts": {"2026-10-09T07:43": {"kw": 4.1, "minutes": 60}}})
+    _tap(bot, "spk:2026-10-09T07:43:a")
+    text, markup = sent[-1]
+    assert "Which" in text
+    assert [b["callback_data"] for b in markup["inline_keyboard"][0]][0] == "apl:2026-10-09T07:43:d"
+
+
+def test_tapping_car_does_not_ask_which_appliance(tmp_path):
+    bot, sent = _label_bot(tmp_path)
+    alerts._save_peak_state(tmp_path, {"spike_facts": {"2026-10-09T07:43": {"kw": 4.1, "minutes": 60}}})
+    _tap(bot, "spk:2026-10-09T07:43:c")
+    assert all(markup is None for _t, markup in sent)
+
+
+def test_saying_it_was_not_the_car_asks_which_appliance(tmp_path):
+    bot, sent = _label_bot(tmp_path)
+    alerts._save_peak_state(tmp_path, {"car_question_key": "2026-10-09T13:00",
+                                       "spike_facts": {"2026-10-09T13:00": {"kw": 4.0, "minutes": 60}}})
+    _tap(bot, "car:2026-10-09:0")
+    assert any(markup and "apl:2026-10-09T13:00:d" in str(markup) for _t, markup in sent)
+    sent.clear()
+    _tap(bot, "car:2026-10-09:1")
+    assert all(markup is None for _t, markup in sent)
+
+
+def test_naming_the_appliance_is_stored_as_an_event(tmp_path):
+    bot, sent = _label_bot(tmp_path)
+    alerts._save_peak_state(tmp_path, {"spike_facts": {"2026-10-09T13:00": {"kw": 4.0, "minutes": 60}}})
+    _tap(bot, "apl:2026-10-09T13:00:d")
+    assert alerts._load_peak_state(tmp_path)["appliance_events"][0]["name"] == "dryer"
+    assert "dryer" in sent[-1][0]
+    n = len(sent)
+    _tap(bot, "apl:2026-10-09T13:00:zz")                                   # garbage: nothing stored or said
+    _tap(bot, "apl:2020-01-01T00:00:d")                                    # forgotten spike
+    assert len(sent) == n and len(alerts._load_peak_state(tmp_path)["appliance_events"]) == 1
+
+
+def _dryer_sundays(n=4):
+    from datetime import date as _d
+    return [{"key": f"{(_d(2026, 11, 1) - timedelta(weeks=i)).isoformat()}T14:00", "name": "dryer",
+             "kw": 4.0, "minutes": 60} for i in range(n)]
+
+
+def test_habit_loads_fall_back_to_the_learned_ones_but_config_wins():
+    from franklinwh_scraper.chatbot import _habit_loads
+    sunday = datetime(2026, 11, 1, 10, 0)
+    state = {"appliance_events": _dryer_sundays()}
+    learned = _habit_loads(Config(), sunday, state)
+    assert [(h["name"], h["start"], h["hours"], h["kw"]) for h in learned] == [("dryer", 14.0, 1.0, 4.0)]
+    cfg = Config(habit_loads={"sunday": [["oven", "17:00", 2.0, 2.5]]})
+    assert [h["name"] for h in _habit_loads(cfg, sunday, state)] == ["oven"]
+    assert _habit_loads(Config(), datetime(2026, 11, 2, 10, 0), state) == []         # a Monday: nothing learned
+    assert _habit_loads(Config(), sunday) == []                                      # no state, as before
+
+
+def test_ebplan_counts_the_learned_loads_without_any_config(tmp_path):
+    import json
+    now = datetime(2026, 11, 1, 10, 0)                                               # Sunday
+    bot, sent = _ebplan_bot(tmp_path, now, soc=30.0)
+    st = json.loads((tmp_path / ".peak_alert_state.json").read_text())
+    st["appliance_events"] = _dryer_sundays()
+    (tmp_path / ".peak_alert_state.json").write_text(json.dumps(st))
+    _run_at(now, bot._send_ebplan, "1", {"car_kwh": None, "load_kw": None, "start": None, "end": None})
+    assert "your usual Sunday" in sent["text"] and "dryer 2:00 PM" in sent["text"]

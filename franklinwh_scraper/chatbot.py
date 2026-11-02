@@ -287,10 +287,17 @@ _LOAD_RE = re.compile(
     r"(?:\s+(?:for\s+)?(\d+(?:\.\d+)?)\s*(h|hr|hrs|m|min)\b)?")
 
 
-def _habit_loads(cfg, now: datetime) -> list[dict]:
-    """The loads configured for today's weekday (Config.habit_loads), as {name, start, hours, kw}."""
+def _habit_loads(cfg, now: datetime, state: dict | None = None) -> list[dict]:
+    """The loads you usually run today, as {name, start, hours, kw}: the ones configured for this
+    weekday (Config.habit_loads), else, given `state`, the ones learned from your answers to
+    "what was that?" (appliances.learned_habit_loads)."""
+    weekday = now.strftime("%A").lower()
+    items = (getattr(cfg, "habit_loads", None) or {}).get(weekday)
+    if not items and state:
+        from . import appliances
+        items = appliances.learned_habit_loads(state.get("appliance_events", []), now.date()).get(weekday, [])
     out = []
-    for item in (getattr(cfg, "habit_loads", None) or {}).get(now.strftime("%A").lower(), []):
+    for item in items or []:
         try:
             name, hhmm, hours, kw = item
             hh, mm = (int(x) for x in str(hhmm).split(":"))
@@ -1662,7 +1669,7 @@ class TelegramChatBot:
             usual = False
             typical = None
             if not loads:
-                loads = _habit_loads(cfg, now)
+                loads = _habit_loads(cfg, now, state)
                 usual = bool(loads)
             if not loads and args.get("load_kw") is None:
                 # Nothing named and no house load given: what this weekday usually looks like, learned.
@@ -1864,6 +1871,8 @@ class TelegramChatBot:
                 self._answer_callback_query(cq_id, "Got it" if ok else "Can't read that")
                 if ok:
                     self._send(chat_id, reply)
+                    if parts[2] == "0":
+                        self._ask_appliance(chat_id, self._car_question_key(parts[1]))
                 return
         if data.startswith("mis:"):
             parts = data.split(":")
@@ -1883,6 +1892,15 @@ class TelegramChatBot:
             self._answer_callback_query(cq_id, "Got it" if ok else "Can't read that")
             if ok:
                 self._send(chat_id, reply)
+                if code == "a":
+                    self._ask_appliance(chat_id, key)
+            return
+        if data.startswith("apl:"):
+            key, _, code = data[4:].rpartition(":")
+            ok, reply = self._set_appliance(key, code)
+            self._answer_callback_query(cq_id, "Got it" if ok else "Can't read that")
+            if ok:
+                self._send(chat_id, reply)
             return
         self._answer_callback_query(cq_id)
 
@@ -1898,6 +1916,41 @@ class TelegramChatBot:
         if controller is None:
             return False, "I'm not connected to the battery here, so I can't switch it. Use the FranklinWH app."
         return controller(mode)
+
+    def _car_question_key(self, day: str) -> str | None:
+        """The start of the block the car question asked about on `day`, if it was remembered."""
+        from pathlib import Path
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        key = _load_peak_state(out).get("car_question_key")
+        return key if isinstance(key, str) and key.startswith(day) else None
+
+    def _ask_appliance(self, chat_id: str, key: str | None) -> None:
+        """Follow up a "not the car" / "appliance" answer with which appliance it was. Only when the
+        spike is still remembered (an older question cannot be learned from)."""
+        from pathlib import Path
+
+        from . import appliances
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        if not key or key not in _load_peak_state(out).get("spike_facts", {}):
+            return
+        row = appliances.buttons(key)
+        self._send(chat_id, "Which appliance was it? I use this to learn when you usually run each one.",
+                   reply_markup={"inline_keyboard": [row[:2], row[2:]]})
+
+    def _set_appliance(self, key: str, code: str) -> tuple[bool, str]:
+        """Record which appliance the spike starting at `key` was (see appliances.record_event)."""
+        from pathlib import Path
+
+        from . import appliances
+        from .alerts import _save_peak_state, _state_lock
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        with _state_lock(out):
+            state = _load_peak_state(out)
+            name = appliances.record_event(state, key, code)
+            if name is None:
+                return False, ""
+            _save_peak_state(out, state)
+        return True, f"Noted: that was the {name}." if name != "other" else "Noted."
 
     def _set_spike_label(self, key: str, code: str) -> tuple[bool, str]:
         """Record what a big spike (identified by its start, YYYY-MM-DDTHH:MM) was."""
