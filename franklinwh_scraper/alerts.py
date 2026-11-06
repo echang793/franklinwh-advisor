@@ -1394,7 +1394,7 @@ _DATE_KEYED_PREFIXES = (
     "predicted_kwh_", "predicted_avg_ghi_", "predicted_cloudy_", "daily_import_cost_",
     "outages_", "sundown_pred_", "savings_daily_", "soc_7am_pred_",
     "actual_bill_", "perf_ratio_used_", "sundown_shadow_", "daily_plan_", "reserve_plan_", "eb_gate_",
-    "eb_timer_",
+    "eb_timer_", "evening_short_",
 )
 
 
@@ -2104,6 +2104,55 @@ def _alert_eb_timer(state: dict, today: str, now: datetime, c, cfg, outlook, usa
     else:
         why = f"Target reached: battery {soc:.0f}%" + (f" (aimed for ~{target:.0f}%)" if target else "") + "."
     return f"↩️ <b>Switch EB off</b>\n{why}\nBack to your normal mode."
+
+
+_EVENING_ALERT_CUSHION_PTS = 5.0     # fire when the forecast is within this of the heavy-night level: it runs rosy on big-load days
+
+
+def _alert_evening_short(state: dict, today: str, now: datetime, c, cfg, outlook, usage_forecast, store) -> str | None:
+    """Around 12:30 PM: if the forecast battery level at sundown will not carry a heavy night for
+    this weekday (evening.py) through midnight, say so while grid charging is still cheap (before
+    2 PM). Silent otherwise, and once a day. Checked 12:30-13:10; skipped while the battery is
+    already charging from the grid. Records its numbers in state["evening_short_<today>"]."""
+    from . import ebguide, ebpattern, evening
+    slot = now.replace(hour=12, minute=30, second=0, microsecond=0)
+    if store is None or not slot <= now < slot + _SUNDOWN_SLOT_WINDOW:
+        return None
+    if _already_alerted(state, "evening_short_date", today):
+        return None
+    me = evening.evening_profiles(store, now.date()).get(now.weekday())
+    if me is None:
+        return None
+    if getattr(c, "grid_use_kw", 0.0) > ebpattern.GRID_KW and getattr(c, "battery_use_kw", 0.0) < -ebpattern.BATT_KW:
+        return None                                            # already topping up
+    live = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
+    if live is None or not getattr(live, "hours", None):
+        return None
+    cap = getattr(cfg, "battery_capacity_kwh", None) or _BATTERY_CAPACITY_KWH
+    floor = _effective_reserve_pct(cfg, store, now)
+    profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
+    quiet = _afternoon_scenarios(live, now, c.battery_soc_pct, cap, profile, getattr(c, "home_load_kw", None),
+                                 floor_pct=floor, sunset=_sunset_today(outlook, now))["quiet"]
+    if quiet is None:
+        return None
+    raw_pct, sundown_dt, _export = quiet
+    proj = max(0.0, min(100.0, raw_pct + _get_sundown_bias(state)))
+    margin = ebguide.plan_margin(state.get("plan_log", []))
+    typ = evening.target_pct(me.median_kwh, cap, floor, margin)
+    hvy = evening.target_pct(me.heavy_kwh, cap, floor, margin)
+    if proj >= hvy + _EVENING_ALERT_CUSHION_PTS:
+        return None
+    _mark_alerted(state, "evening_short_date", today)
+    state[f"evening_short_{today}"] = {"proj_pct": round(proj, 1), "typical_pct": round(typ, 1),
+                                       "heavy_pct": round(hvy, 1), "soc": round(float(c.battery_soc_pct), 1)}
+    how = ("under even a typical night" if proj < typ
+           else "fine for a typical night, but short for a heavy one")
+    return (f"🌆 <b>Tonight may run short</b>\n"
+            f"{me.name} evenings use ~{me.median_kwh:.1f} kWh (a heavy one {me.heavy_kwh:.1f}). The forecast has the "
+            f"battery at ~{proj:.0f}% at sundown (~{sundown_dt.strftime('%-I:%M %p')}), {how}: "
+            f"you want ~{hvy:.0f}% for a heavy night, ~{typ:.0f}% for a typical one.\n"
+            f"Battery is {c.battery_soc_pct:.0f}% now. Grid power is cheapest until 2 PM, so top up before then; "
+            f"/ebplan shows when to start.")
 
 
 def _alert_morning_preview(
@@ -5547,6 +5596,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("car_charge_started",   lambda: _alert_car_charge_started(state, today, now, c, cfg, store)),
             ("car_on_peak",          lambda: _alert_car_on_peak(state, today, now, c, cfg, store, outlook)),
             ("eb_timer",             lambda: _alert_eb_timer(state, today, now, c, cfg, outlook, usage_forecast, store)),
+            ("evening_short",        lambda: _alert_evening_short(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("solar_backtest",       lambda: _maybe_launch_monthly_backtest(state, now, cfg)),
             ("sundown_drift",        lambda: _alert_sundown_drift(state, today, now)),
             ("miss_question",        lambda: _alert_miss_question(state, today, now)),

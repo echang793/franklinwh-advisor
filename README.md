@@ -17,6 +17,7 @@ attention. A local dashboard is there when you do want the detail.
 | **2-day cloudy warning** | 7–9 am — when two consecutive low-solar days are forecast and battery is below 65%; advises charging now at cheap super-off-peak rate |
 | **Low battery at 1 pm** | SoC < 40% heading into 4–9 pm peak; shows estimated time to empty at current load |
 | **Low battery at noon** | SoC < 30% at 11am–noon despite solar; flags battery mode issue |
+| **Tonight may run short** | 12:30–1:10 pm, only when needed — the forecast battery level at sundown is under what a heavy night for this weekday needs (learned from your 4 PM–midnight history; see `/evening`); tells you to top up before 2 PM while grid power is cheap. Silent otherwise, once a day |
 | **Battery full — solar surplus** | 10 am–6 pm — battery at 100% and solar > load; reports the surplus (Self-Consumption already exports it to grid automatically). Fires once per fill, not once per day — stays quiet as long as the battery is still full |
 | **Grid import during peak** | 4–9 pm — drawing from grid when battery should be covering load |
 | **Not charging** | Solar > 1.5 kW but battery not charging; possible mode or inverter issue |
@@ -249,6 +250,7 @@ Enable it by running `python3 scrape.py setup` again and picking a chatbot backe
 | `/until N` | Estimated time to reach N% SoC at the current charge or discharge rate — e.g. `/until 20`, `/until 80` |
 | `/today` | The day so far: solar, house load, grid in/out and its cost, battery charge/discharge, and how much solar is still to come against the sunrise forecast |
 | `/reserve` | What to charge the battery to overnight so the morning needs no grid: when it would reach the floor on its own, the 6 AM level, and the grid energy and cost to get there |
+| `/evening` | This weekday's 4 PM–midnight usage (typical and heavy night, where it goes), the battery level to have at sundown, and whether today's forecast gets there; plus the typical/heavy level for every weekday |
 | `/accuracy` | A scoreboard of how far `/sundown` (by time of day) and the whole-day solar forecast have actually been off. `/sundown` itself now shows a likely range from this record |
 | `/ebplan [kWh] [load kW] [dryer\|oven\|ac [H] [Nh]] [from H] [to H\|midnight]` | How much Emergency Backup, and when to start, to stay off the grid from 2 PM (or `from H`) to 11 PM (or `to H`/`midnight`). Name the dryer/oven/AC (`/ebplan dryer 2pm 1h oven 5pm 2h to midnight`) or set usual loads per weekday in `habit_loads` (or leave it empty and let it learn them: see "Learning your appliances"); it also shows the answer if the sun comes in at only 60%, and says whether today is a cloudy day with a big drop in sun (the only days the morning plan and the start/stop timer bring up EB) |
 | `/whatif kW [hours] [from H]` | What a planned load (dryer ~3 kW, AC) does to the battery at sunset, e.g. `/whatif 3 1.5 from 2pm` |

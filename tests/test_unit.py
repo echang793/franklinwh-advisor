@@ -12596,3 +12596,63 @@ def test_evening_is_a_listed_command(tmp_path):
     import inspect
     src = inspect.getsource(chatbot_mod)
     assert '"/evening": self._send_evening' in src and "/evening  —" in src
+
+
+# ── the 12:30 "tonight may run short" alert ──────────────────────────────
+
+def _short_alert(tmp_path, hour=12, minute=35, soc=12.0, solar=None, weeks=10, state=None, c=None, with_store=True):
+    db = HistoryStore(tmp_path / "h.db")
+    now = datetime(2026, 11, 6, hour, minute)                                         # a Friday
+    for i in range(1, weeks * 7 + 1):
+        _seed_loads(db, (now - timedelta(days=i)).date(), _quiet_day())               # 3.2 kWh, 4 PM to midnight
+    st = {"solar_cal_samples": [4.0, 4.2, 3.9]} if state is None else state
+    fc = _day_forecast(now.date(), _GLOOM if solar is None else solar, load=0.8, start_hour=7)
+    msg = alerts._alert_evening_short(st, "2026-11-06", now, c or _tracker_c(soc), Config(battery_capacity_kwh=13.6),
+                                      _GateOutlook(False, 25.0), fc, db if with_store else None)
+    return msg, st
+
+
+def test_evening_short_alert_fires_when_the_forecast_misses_the_level(tmp_path):
+    msg, st = _short_alert(tmp_path)
+    assert msg and "run short" in msg and "Friday" in msg and "/ebplan" in msg
+    assert "2 PM" in msg and "39%" in msg                                              # the level to have, and the deadline
+    assert st["evening_short_date"] == "2026-11-06"
+    assert st["evening_short_2026-11-06"]["heavy_pct"] > st["evening_short_2026-11-06"]["proj_pct"]
+    _assert_left_aligned(msg)
+
+
+def test_evening_short_alert_is_silent_when_the_evening_is_covered(tmp_path):
+    msg, st = _short_alert(tmp_path, soc=60.0, solar=_SUNNY)
+    assert msg is None and "evening_short_date" not in st
+
+
+def test_evening_short_alert_only_runs_around_half_past_twelve(tmp_path):
+    assert _short_alert(tmp_path, hour=11, minute=0)[0] is None
+    assert _short_alert(tmp_path, hour=13, minute=30)[0] is None
+    assert _short_alert(tmp_path, hour=12, minute=30)[0] is not None
+
+
+def test_evening_short_alert_fires_once_a_day(tmp_path):
+    msg, st = _short_alert(tmp_path)
+    assert msg
+    (tmp_path / "again").mkdir()
+    again, _ = _short_alert(tmp_path / "again", minute=45, state=st)
+    assert again is None
+
+
+def test_evening_short_alert_stays_quiet_while_you_are_already_topping_up(tmp_path):
+    import types
+    eb = types.SimpleNamespace(battery_soc_pct=12.0, solar_production_kw=0.5, home_load_kw=0.8,
+                               battery_use_kw=-4.0, grid_use_kw=4.5)
+    assert _short_alert(tmp_path, c=eb)[0] is None
+
+
+def test_evening_short_alert_needs_history_and_a_store(tmp_path):
+    assert _short_alert(tmp_path, weeks=2)[0] is None
+    assert _short_alert(tmp_path, with_store=False)[0] is None
+
+
+def test_evening_short_alert_is_in_the_dispatch_list():
+    import inspect
+    assert '("evening_short"' in inspect.getsource(alerts._check_peak_alerts)
+    assert "evening_short_" in alerts._DATE_KEYED_PREFIXES
