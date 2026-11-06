@@ -497,6 +497,7 @@ class TelegramChatBot:
                             "/evroom [car %] [to N%] — battery room for the car without grid import\n"
                             "/today    — the day so far: solar, load, grid cost, what's still to come\n"
                             "/reserve  — what to charge the battery to overnight\n"
+                            "/evening  — this weekday's 4 PM-midnight usage and the battery level to have at sundown\n"
                             "/accuracy — how accurate /sundown and the solar forecast have been\n"
                             "/alerts   — what fired lately, what you snooze, what to turn off\n"
                             "/whatif kW [hours] [from H] — what a load (dryer 3 kW, AC) does to the sundown battery\n"
@@ -625,7 +626,8 @@ class TelegramChatBot:
                         continue
                     _cmd = text.lower().strip().split("@")[0]
                     _simple = {"/accuracy": self._send_accuracy, "/today": self._send_today,
-                               "/reserve": self._send_reserve, "/alerts": self._send_alerts}.get(_cmd)
+                               "/reserve": self._send_reserve, "/alerts": self._send_alerts,
+                               "/evening": self._send_evening}.get(_cmd)
                     if _simple is not None:
                         threading.Thread(target=_simple, args=(chat_id,), daemon=True).start()
                         continue
@@ -1394,6 +1396,75 @@ class TelegramChatBot:
             outlook, store = self._outlook, self._hist_store
         out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
         return stats, forecast, outlook, store, _load_peak_state(out)
+
+    def _send_evening(self, chat_id: str) -> None:
+        """/evening: what this weekday's 4 PM-midnight usually costs the battery, the level to have
+        at sundown to carry it, and whether today's forecast gets there (evening.py)."""
+        try:
+            from . import ebguide, evening
+            from .alerts import (_afternoon_profile, _afternoon_scenarios, _effective_reserve_pct,
+                                 _get_sundown_bias, _live_anchored_forecast, _sunset_today)
+            stats, forecast, outlook, store, state = self._snapshot_for_report()
+            now = datetime.now()
+            profiles = evening.evening_profiles(store, now.date())
+            me = profiles.get(now.weekday())
+            if me is None:
+                self._send(chat_id, f"Not enough {now.strftime('%A')} evenings recorded yet to learn this "
+                                    f"(it needs {evening.MIN_DAYS} whole ones from 4 PM to midnight).")
+                return
+            cap = getattr(self._cfg, "battery_capacity_kwh", 13.6)
+            floor = _effective_reserve_pct(self._cfg, store, now)
+            margin = ebguide.plan_margin(state.get("plan_log", []))
+
+            def level(kwh: float) -> float:
+                return evening.target_pct(kwh, cap, floor, margin)
+
+            typ, hvy = level(me.median_kwh), level(me.heavy_kwh)
+            a, b, c3 = me.segments
+            lines = [f"🌆 <b>{me.name} evening, 4 PM–midnight</b>",
+                     f"Typical <b>{me.median_kwh:.1f} kWh</b>; a heavy night {me.heavy_kwh:.1f}. Your {me.n} "
+                     f"{me.name}s have run {me.low_kwh:.1f}–{me.max_kwh:.1f}.",
+                     f"Where it goes: 4–7 PM {a:.1f} · 7–10 PM {b:.1f} · 10 PM–12 {c3:.1f} kWh.",
+                     f"{me.heavy_nights} of {me.n} were big (over {evening.HEAVY_NIGHT_KWH:.0f} kWh: dryer, oven or car).",
+                     f"🎯 Have at sundown: <b>{typ:.0f}%</b> for a typical night, <b>{hvy:.0f}%</b> for a heavy one "
+                     f"(floor {floor:.0f}% + {margin:.0f}-pt margin)."]
+
+            extra = " from the grid before 2 PM, when it is cheapest" if now.hour < 14 else ""
+            soc = None
+            quiet = None
+            if stats is not None:
+                cur = stats.current
+                soc = cur.battery_soc_pct
+                if forecast is not None and getattr(forecast, "hours", None):
+                    live = _live_anchored_forecast(state, cur, outlook, forecast, store)
+                    profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
+                    quiet = _afternoon_scenarios(live, now, soc, cap, profile, getattr(cur, "home_load_kw", None),
+                                                 floor_pct=floor, sunset=_sunset_today(outlook, now))["quiet"]
+            if quiet is not None:
+                raw_pct, sundown_dt, _export = quiet
+                proj = max(0.0, min(100.0, raw_pct + _get_sundown_bias(state)))
+                lines.append(f"At sundown (~{sundown_dt.strftime('%-I:%M %p')}) the forecast has the battery at "
+                             f"~<b>{proj:.0f}%</b> (now {soc:.0f}%).")
+                kind, room = evening.verdict(proj, typical_pct=typ, heavy_pct=hvy)
+                if kind == "heavy":
+                    lines.append(f"✅ That covers even a heavy {me.name} night ({room:.0f} pts to spare).")
+                elif kind == "typical":
+                    lines.append(f"🟡 That covers a typical {me.name}, but a heavy one would run ~{hvy - proj:.0f} pts "
+                                 f"short. Worth topping up{extra}.")
+                else:
+                    lines.append(f"⚠️ Short: that is {typ - proj:.0f} pts under a typical {me.name} night. "
+                                 f"Charge to at least {typ:.0f}%{extra}.")
+            elif soc is not None:
+                lines.append(f"Solar is done for today (or there is no forecast): the battery is at {soc:.0f}% now.")
+
+            week = [f"{('<b>' + p.name[:3] + '</b>') if wd == now.weekday() else p.name[:3]} "
+                    f"{level(p.median_kwh):.0f}% / {level(p.heavy_kwh):.0f}%"
+                    for wd, p in sorted(profiles.items())]
+            lines.append("📅 Typical / heavy level, by day: " + " · ".join(week))
+            self._send(chat_id, "\n".join(lines))
+        except Exception as e:
+            logger.warning("_send_evening error: %s", e)
+            self._send(chat_id, f"Error: {e}")
 
     def _send_accuracy(self, chat_id: str) -> None:
         """/accuracy: how far /sundown and the solar forecast have actually been off."""

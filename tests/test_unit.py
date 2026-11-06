@@ -12534,3 +12534,65 @@ def test_ebplan_counts_the_learned_loads_without_any_config(tmp_path):
     (tmp_path / ".peak_alert_state.json").write_text(json.dumps(st))
     _run_at(now, bot._send_ebplan, "1", {"car_kwh": None, "load_kw": None, "start": None, "end": None})
     assert "your usual Sunday" in sent["text"] and "dryer 2:00 PM" in sent["text"]
+
+
+# ── /evening: the 4 PM-midnight load by weekday and the battery level it asks for ──
+
+def _evening_bot(tmp_path, now, soc=60.0, forecast_solar=None, weeks=10):
+    import types
+
+    db = HistoryStore(tmp_path / "h.db")
+    for i in range(1, weeks * 7 + 1):
+        _seed_loads(db, (now - timedelta(days=i)).date(), _quiet_day())            # 3.2 kWh from 4 PM to midnight
+    import json
+    (tmp_path / ".peak_alert_state.json").write_text(json.dumps({"solar_cal_samples": [4.0, 4.2, 3.9]}))
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6), api_key="x")
+    bot._outdir = tmp_path
+    bot._stats = types.SimpleNamespace(current=_tracker_c(soc))
+    bot._hist_store = db
+    bot._outlook = _GateOutlook(False, 25.0)
+    bot._usage_forecast = (_day_forecast(now.date(), forecast_solar, load=0.8, start_hour=7)
+                           if forecast_solar is not None else None)
+    sent: dict = {}
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
+    return bot, sent
+
+
+def test_evening_gives_the_weekdays_load_and_the_level_to_have_at_sundown(tmp_path):
+    now = datetime(2026, 11, 6, 13, 20)                                              # a Friday
+    bot, sent = _evening_bot(tmp_path, now)
+    _run_at(now, bot._send_evening, "1")
+    text = sent["text"]
+    assert "Friday" in text and "3.2 kWh" in text
+    assert "39%" in text                                                              # 10 floor + 5 margin + 3.2/13.6
+    assert "4–7 PM" in text and "7–10 PM" in text
+    assert "Mon" in text and "Sun" in text                                            # the week at a glance
+    _assert_left_aligned(text)
+
+
+def test_evening_says_when_a_heavy_night_is_covered(tmp_path):
+    now = datetime(2026, 11, 6, 13, 20)
+    bot, sent = _evening_bot(tmp_path, now, soc=60.0, forecast_solar=_SUNNY)
+    _run_at(now, bot._send_evening, "1")
+    assert "At sundown" in sent["text"] and "even a heavy" in sent["text"]
+
+
+def test_evening_says_how_far_short_the_forecast_is(tmp_path):
+    now = datetime(2026, 11, 6, 13, 20)
+    bot, sent = _evening_bot(tmp_path, now, soc=12.0, forecast_solar=_GLOOM)
+    _run_at(now, bot._send_evening, "1")
+    assert "short" in sent["text"].lower() and "pts" in sent["text"]
+
+
+def test_evening_without_enough_history_says_so(tmp_path):
+    now = datetime(2026, 11, 6, 13, 20)
+    bot, sent = _evening_bot(tmp_path, now, weeks=2)
+    _run_at(now, bot._send_evening, "1")
+    assert "Not enough" in sent["text"]
+
+
+def test_evening_is_a_listed_command(tmp_path):
+    from franklinwh_scraper import chatbot as chatbot_mod
+    import inspect
+    src = inspect.getsource(chatbot_mod)
+    assert '"/evening": self._send_evening' in src and "/evening  —" in src
