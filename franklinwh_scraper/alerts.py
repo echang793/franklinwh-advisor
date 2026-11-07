@@ -1394,7 +1394,7 @@ _DATE_KEYED_PREFIXES = (
     "predicted_kwh_", "predicted_avg_ghi_", "predicted_cloudy_", "daily_import_cost_",
     "outages_", "sundown_pred_", "savings_daily_", "soc_7am_pred_",
     "actual_bill_", "perf_ratio_used_", "sundown_shadow_", "daily_plan_", "reserve_plan_", "eb_gate_",
-    "eb_timer_", "evening_short_",
+    "eb_timer_", "evening_short_", "sundown_watch_",
 )
 
 
@@ -2153,6 +2153,105 @@ def _alert_evening_short(state: dict, today: str, now: datetime, c, cfg, outlook
             f"you want ~{hvy:.0f}% for a heavy night, ~{typ:.0f}% for a typical one.\n"
             f"Battery is {c.battery_soc_pct:.0f}% now. Grid power is cheapest until 2 PM, so top up before then; "
             f"/ebplan shows when to start.")
+
+
+# ── corrected /sundown projection ────────────────────────────────────
+# Asking /sundown starts a watch for the day. When the live projection later moves this many
+# points away from the last number sent, a corrected one goes out on its own. The evening
+# digest then compares the actual battery level to the FIRST projection, not the corrected ones.
+_SUNDOWN_WATCH_PTS = 15.0
+_SUNDOWN_WATCH_MIN_GAP = timedelta(minutes=45)    # between messages, so a swinging forecast cannot spam
+_SUNDOWN_WATCH_MAX = 3                            # corrections a day
+_SUNDOWN_WATCH_STOP = timedelta(hours=1)          # inside the last hour a correction is no use to anyone
+
+
+def _start_sundown_watch(state: dict, today: str, now: datetime, pct: float, sundown_dt: datetime,
+                         soc: float) -> None:
+    """Called when /sundown answers. The first projection of the day is kept for the evening
+    comparison; every ask resets the baseline the corrections are measured from."""
+    key = f"sundown_watch_{today}"
+    w = state.get(key)
+    if not w:
+        state[key] = {"initial_pct": round(pct, 1), "initial_at": now.isoformat(), "initial_dt": sundown_dt.isoformat(),
+                      "soc0": round(float(soc), 1), "last_pct": round(pct, 1), "last_at": now.isoformat(),
+                      "last_soc": round(float(soc), 1), "corrections": []}
+        return
+    w.update(last_pct=round(pct, 1), last_at=now.isoformat(), last_soc=round(float(soc), 1))
+
+
+def _sundown_projection_now(state: dict, now: datetime, c, cfg, outlook, usage_forecast, store
+                            ) -> tuple[float, datetime, float] | None:
+    """(bias-corrected % at sundown, sundown time, raw %): the same quiet-afternoon number /sundown
+    headlines. None when there is no forecast or the solar day is over."""
+    live = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
+    if live is None or not getattr(live, "hours", None):
+        return None
+    cap = getattr(cfg, "battery_capacity_kwh", None) or _BATTERY_CAPACITY_KWH
+    profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
+    quiet = _afternoon_scenarios(live, now, c.battery_soc_pct, cap, profile, getattr(c, "home_load_kw", None),
+                                 floor_pct=_effective_reserve_pct(cfg, store, now),
+                                 sunset=_sunset_today(outlook, now))["quiet"]
+    if quiet is None:
+        return None
+    raw_pct, sundown_dt, _export = quiet
+    return max(0.0, min(100.0, raw_pct + _get_sundown_bias(state))), sundown_dt, raw_pct
+
+
+def _alert_sundown_watch(state: dict, today: str, now: datetime, c, cfg, outlook, usage_forecast, store) -> str | None:
+    """After a /sundown today: if the projection has moved _SUNDOWN_WATCH_PTS or more from the
+    last number sent, send the corrected one. At most _SUNDOWN_WATCH_MAX a day, one per
+    _SUNDOWN_WATCH_MIN_GAP, none in the last hour before sundown or while the battery is topping up
+    from the grid (that charge is not in the walk, so the number would be wrong)."""
+    from . import ebpattern
+    w = state.get(f"sundown_watch_{today}")
+    if not w or len(w.get("corrections", [])) >= _SUNDOWN_WATCH_MAX:
+        return None
+    try:
+        last_at = datetime.fromisoformat(w["last_at"])
+        last_pct = float(w["last_pct"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if now - last_at < _SUNDOWN_WATCH_MIN_GAP:
+        return None
+    if getattr(c, "grid_use_kw", 0.0) > ebpattern.GRID_KW and getattr(c, "battery_use_kw", 0.0) < -ebpattern.BATT_KW:
+        return None
+    proj = _sundown_projection_now(state, now, c, cfg, outlook, usage_forecast, store)
+    if proj is None:
+        return None
+    pct, sundown_dt, _raw = proj
+    if now > sundown_dt - _SUNDOWN_WATCH_STOP or abs(pct - last_pct) < _SUNDOWN_WATCH_PTS:
+        return None
+    soc_then = w.get("last_soc", w.get("soc0"))
+    w.setdefault("corrections", []).append({"at": now.isoformat(), "from": round(last_pct, 1), "to": round(pct, 1)})
+    w.update(last_pct=round(pct, 1), last_at=now.isoformat(), last_soc=round(float(c.battery_soc_pct), 1))
+    battery = f"Battery is {c.battery_soc_pct:.0f}% now" + (f" (it was {soc_then:.0f}% when I last sent it)." if soc_then is not None else ".")
+    return (f"🔄 <b>Sundown projection updated</b>\n"
+            f"Was ~{last_pct:.0f}% (sent {last_at.strftime('%-I:%M %p')}), now ~{pct:.0f}% at sundown "
+            f"(~{sundown_dt.strftime('%-I:%M %p')}): {pct - last_pct:+.0f} pts.\n"
+            f"{battery}\n"
+            f"Tonight's summary will compare the actual to the first one I sent today (~{w['initial_pct']:.0f}%).")
+
+
+def _sundown_watch_line(watch: dict, pred_pct: float, actual_pct: float) -> str:
+    """The evening digest's extra lines: the actual level against the FIRST projection of the day,
+    and each correction on the way. "" when nothing was sent beyond what the digest already grades."""
+    try:
+        first = float(watch["initial_pct"])
+        first_at = datetime.fromisoformat(watch["initial_at"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    corrections = watch.get("corrections") or []
+    if not corrections and abs(first - pred_pct) < 0.5:
+        return ""
+    out = (f"\n🔎 First said {first:.0f}% ({first_at.strftime('%-I:%M %p')}), actual {actual_pct:.0f}% "
+           f"({actual_pct - first:+.0f} pt)")
+    for corr in corrections:
+        try:
+            at = datetime.fromisoformat(corr["at"])
+            out += f"\n↳ {at.strftime('%-I:%M %p')}: updated to {corr['to']:.0f}% ({actual_pct - corr['to']:+.0f} pt off)"
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
 
 
 def _alert_morning_preview(
@@ -3688,6 +3787,7 @@ def _alert_eod_digest(
                             "not a model miss, sample skipped")
             else:
                 _record_sundown_bias(state, actual_pct - raw_pct)
+            sundown_acc_str += _sundown_watch_line(state.get(f"sundown_watch_{today}") or {}, pred_pct, actual_pct)
 
     # "Without EV" is a flat assumed-baseline walk to the next sunrise (no
     # forecast/solar/percentile model, by request 2026-08-17 — see
@@ -5597,6 +5697,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("car_on_peak",          lambda: _alert_car_on_peak(state, today, now, c, cfg, store, outlook)),
             ("eb_timer",             lambda: _alert_eb_timer(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("evening_short",        lambda: _alert_evening_short(state, today, now, c, cfg, outlook, usage_forecast, store)),
+            ("sundown_watch",        lambda: _alert_sundown_watch(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("solar_backtest",       lambda: _maybe_launch_monthly_backtest(state, now, cfg)),
             ("sundown_drift",        lambda: _alert_sundown_drift(state, today, now)),
             ("miss_question",        lambda: _alert_miss_question(state, today, now)),

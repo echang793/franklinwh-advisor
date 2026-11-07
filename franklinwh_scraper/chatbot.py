@@ -1230,8 +1230,8 @@ class TelegramChatBot:
 
             from .alerts import (_afternoon_profile, _afternoon_scenarios, _get_sundown_bias,
                                  _effective_reserve_pct, _live_anchored_forecast, _load_peak_state,
-                                 _save_peak_state, _spike_started_today, _state_lock,
-                                 _sundown_band, _sunset_today, _zone_stats)
+                                 _save_peak_state, _spike_started_today, _start_sundown_watch,
+                                 _state_lock, _sundown_band, _sunset_today, _zone_stats)
             from .ebpattern import build_eb_profile
             from .tou import peak_export_hour
 
@@ -1294,6 +1294,9 @@ class TelegramChatBot:
                     "dt": sundown_dt.isoformat(),
                     "requested_at": now.isoformat(),
                 }
+                # Remember this as the day's first projection; the advisor sends a corrected
+                # one if it moves 10+ points, and tonight's summary grades the first.
+                _start_sundown_watch(state, now.strftime('%Y-%m-%d'), now, end_pct, sundown_dt, soc)
                 _save_peak_state(out, state)
 
             # The EOD digest fires once at 9-10pm and won't re-check a
@@ -1306,6 +1309,8 @@ class TelegramChatBot:
                 if now.hour >= 21 else
                 "\n<i>I'll check how this did in tonight's ~9pm summary.</i>"
             )
+            if now < sundown_dt - timedelta(hours=1):
+                followup += "\n<i>If it moves 15+ points before sundown I'll send an update.</i>"
             # Surplus the walk clips once the battery hits cap — on this
             # system's always-on Self-Consumption mode that surplus exports
             # to grid automatically (see _alert_solar_surplus_overflow's

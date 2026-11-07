@@ -12656,3 +12656,200 @@ def test_evening_short_alert_is_in_the_dispatch_list():
     import inspect
     assert '("evening_short"' in inspect.getsource(alerts._check_peak_alerts)
     assert "evening_short_" in alerts._DATE_KEYED_PREFIXES
+
+
+# ── corrected /sundown projection + the evening comparison to the first one ──
+
+_WATCH_DAY = "2026-11-06"                                                              # a Friday
+
+
+def _watch_now(hour=14, minute=0):
+    return datetime(2026, 11, 6, hour, minute)
+
+
+def _watch_proj(tmp_path, soc, solar, now=None):
+    """The projection the watch itself would compute for this battery and sky."""
+    db = HistoryStore(tmp_path / "p.db")
+    now = now or _watch_now()
+    fc = _day_forecast(now.date(), solar, load=0.8, start_hour=7)
+    st = {"solar_cal_samples": [4.0, 4.2, 3.9]}
+    return alerts._sundown_projection_now(st, now, _tracker_c(soc), Config(battery_capacity_kwh=13.6),
+                                          _GateOutlook(False, 25.0), fc, db)
+
+
+def _watch_run(tmp_path, last_pct, soc=40.0, solar=None, now=None, watch=None, c=None, **over):
+    db = HistoryStore(tmp_path / "w.db")
+    now = now or _watch_now()
+    fc = _day_forecast(now.date(), _SUNNY if solar is None else solar, load=0.8, start_hour=7)
+    w = {"initial_pct": last_pct, "initial_at": "2026-11-06T10:00:00", "initial_dt": "2026-11-06T16:45:00",
+         "soc0": 70.0, "last_pct": last_pct, "last_at": "2026-11-06T10:00:00", "corrections": []}
+    w.update(over)
+    st = {"solar_cal_samples": [4.0, 4.2, 3.9], f"sundown_watch_{_WATCH_DAY}": w if watch is None else watch}
+    msg = alerts._alert_sundown_watch(st, _WATCH_DAY, now, c or _tracker_c(soc), Config(battery_capacity_kwh=13.6),
+                                      _GateOutlook(False, 25.0), fc, db)
+    return msg, st
+
+
+def test_start_sundown_watch_keeps_the_first_projection_and_resets_the_baseline():
+    st: dict = {}
+    sd = datetime(2026, 11, 6, 16, 45)
+    alerts._start_sundown_watch(st, _WATCH_DAY, datetime(2026, 11, 6, 10, 0), 62.0, sd, 70.0)
+    alerts._start_sundown_watch(st, _WATCH_DAY, datetime(2026, 11, 6, 13, 0), 50.0, sd, 55.0)
+    w = st[f"sundown_watch_{_WATCH_DAY}"]
+    assert w["initial_pct"] == 62.0 and w["initial_at"].startswith("2026-11-06T10:00")   # the first one stays
+    assert w["last_pct"] == 50.0 and w["last_at"].startswith("2026-11-06T13:00")         # a new ask is the new baseline
+    assert w["corrections"] == []
+
+
+def test_sundown_watch_sends_a_corrected_projection_when_it_moves_fifteen_points(tmp_path):
+    proj = _watch_proj(tmp_path, 40.0, _SUNNY)[0]
+    first = round(min(100.0, proj + 20.0), 1)
+    msg, st = _watch_run(tmp_path, first)
+    assert msg and "updated" in msg.lower()
+    assert f"{first:.0f}%" in msg and "now" in msg                                      # was X, now Y
+    w = st[f"sundown_watch_{_WATCH_DAY}"]
+    assert w["initial_pct"] == first                                                    # the first one is untouched
+    assert len(w["corrections"]) == 1 and w["last_pct"] != first
+    assert w["corrections"][0]["from"] == first
+    _assert_left_aligned(msg)
+
+
+def test_sundown_watch_is_quiet_inside_fifteen_points(tmp_path):
+    proj = _watch_proj(tmp_path, 40.0, _SUNNY)[0]
+    msg, st = _watch_run(tmp_path, proj + 12.0)
+    assert msg is None and st[f"sundown_watch_{_WATCH_DAY}"]["corrections"] == []
+    msg, _ = _watch_run(tmp_path, proj - 12.0)
+    assert msg is None
+
+
+def test_sundown_watch_also_catches_a_rise(tmp_path):
+    proj = _watch_proj(tmp_path, 40.0, _SUNNY)[0]
+    msg, st = _watch_run(tmp_path, max(0.0, proj - 20.0))
+    assert msg and st[f"sundown_watch_{_WATCH_DAY}"]["corrections"][0]["to"] > proj - 20.0
+
+
+def test_sundown_watch_compares_against_the_last_one_sent(tmp_path):
+    proj = _watch_proj(tmp_path, 40.0, _SUNNY)[0]
+    near = proj + 3.0                                                                   # last sent is close to now...
+    msg, _ = _watch_run(tmp_path, near, initial_pct=min(100.0, proj + 25.0))            # ...even though the first was far
+    assert msg is None
+
+
+def test_sundown_watch_needs_a_request_first(tmp_path):
+    msg, _ = _watch_run(tmp_path, 90.0, watch={})
+    assert msg is None
+    db = HistoryStore(tmp_path / "n.db")
+    st = {"solar_cal_samples": [4.0, 4.2, 3.9]}
+    fc = _day_forecast(_watch_now().date(), _SUNNY, load=0.8, start_hour=7)
+    assert alerts._alert_sundown_watch(st, _WATCH_DAY, _watch_now(), _tracker_c(40.0), Config(battery_capacity_kwh=13.6),
+                                       _GateOutlook(False, 25.0), fc, db) is None
+
+
+def test_sundown_watch_waits_between_messages_and_stops_after_three(tmp_path):
+    proj = _watch_proj(tmp_path, 40.0, _SUNNY)[0]
+    first = min(100.0, proj + 20.0)
+    assert _watch_run(tmp_path, first, last_at="2026-11-06T13:40:00")[0] is None        # 20 minutes ago
+    assert _watch_run(tmp_path, first, last_at="2026-11-06T13:00:00")[0] is not None    # an hour ago
+    three = [{"at": "x", "from": 1, "to": 2}] * 3
+    assert _watch_run(tmp_path, first, corrections=three)[0] is None
+
+
+def test_sundown_watch_stays_quiet_near_sundown_and_after_solar_is_done(tmp_path):
+    proj = _watch_proj(tmp_path, 40.0, _SUNNY)[0]
+    first = min(100.0, proj + 20.0)
+    assert _watch_run(tmp_path, first, now=_watch_now(17, 10))[0] is None               # under an hour to sundown
+    assert _watch_run(tmp_path, first, now=_watch_now(19, 0))[0] is None                # solar is over
+
+
+def test_sundown_watch_waits_out_a_grid_top_up(tmp_path):
+    import types
+    eb = types.SimpleNamespace(battery_soc_pct=40.0, solar_production_kw=0.5, home_load_kw=0.8,
+                               battery_use_kw=-4.0, grid_use_kw=4.5)
+    proj = _watch_proj(tmp_path, 40.0, _SUNNY)[0]
+    assert _watch_run(tmp_path, min(100.0, proj + 20.0), c=eb)[0] is None
+
+
+def test_sundown_watch_is_in_the_dispatch_list():
+    import inspect
+    assert '("sundown_watch"' in inspect.getsource(alerts._check_peak_alerts)
+    assert "sundown_watch_" in alerts._DATE_KEYED_PREFIXES
+
+
+def test_send_sundown_starts_a_watch_for_a_corrected_projection(tmp_path):
+    import types as _types
+    from pathlib import Path
+
+    from franklinwh_scraper import chatbot as chatbot_mod
+    from franklinwh_scraper.alerts import _load_peak_state
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+
+    now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    hours, t = [], now
+    while t.date() == now.date() and t.hour <= 23:
+        solar = 3.0 if 12 <= t.hour < 18 else 0.0
+        hours.append(HourPrediction(dt=t, predicted_load_kw=1.0, predicted_solar_kw=solar,
+                                    net_kw=solar - 1.0, confidence="high"))
+        t += timedelta(hours=1)
+    forecast = UsageForecast(hours=hours, total_load_kwh=24.0, total_solar_kwh=18.0,
+                             net_kwh=-6.0, peak_load_kw=1.0, confidence="high", data_days=30)
+    bot = TelegramChatBot(Config(battery_capacity_kwh=13.6, output_dir=str(tmp_path)), api_key="x")
+    bot._stats = _types.SimpleNamespace(current=_types.SimpleNamespace(battery_soc_pct=27.0))
+    bot._usage_forecast = forecast
+    sent = {}
+    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    real_datetime = chatbot_mod.datetime
+    try:
+        class _FakeDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+        chatbot_mod.datetime = _FakeDatetime
+        bot._send_sundown("123")
+        w = _load_peak_state(Path(tmp_path))[f"sundown_watch_{now.strftime('%Y-%m-%d')}"]
+        first = w["initial_pct"]
+        bot._send_sundown("123")                                                       # asking again keeps the first
+    finally:
+        chatbot_mod.datetime = real_datetime
+    w = _load_peak_state(Path(tmp_path))[f"sundown_watch_{now.strftime('%Y-%m-%d')}"]
+    assert w["initial_pct"] == first and w["last_pct"] == first and w["corrections"] == []
+    assert "update" in sent["text"].lower()                                           # tells you it will follow up
+
+
+def _eod_with_watch(watch, pred_pct=60.0, actual=45.0):
+    import types
+    today = "2026-07-20"
+    now = datetime(2026, 7, 20, 21, 0, 0)
+    state = {f"sundown_pred_{today}": {"pct": pred_pct, "dt": datetime(2026, 7, 20, 17, 30).isoformat(),
+                                       "requested_at": "2026-07-20T12:00:00"},
+             f"sundown_watch_{today}": watch}
+    stats = types.SimpleNamespace(
+        current=types.SimpleNamespace(battery_soc_pct=40.0),
+        totals=types.SimpleNamespace(solar_kwh=0.0, battery_charge_kwh=0.0, battery_discharge_kwh=0.0,
+                                     grid_load_kwh=0.0, grid_export_kwh=0.0, home_use_kwh=0.0))
+
+    class _FakeStore:
+        def daily_solar_kwh_api(self, d): return 0.0
+        def daily_solar_kwh(self, d): return 0.0
+        def daily_battery_kwh(self, d): return (0.0, 0.0)
+        def weekly_readings(self, s, e): return []
+        def soc_near(self, ts): return actual
+
+    return alerts._alert_eod_digest(state, today, now, stats, Config(battery_capacity_kwh=13.6), None, None,
+                                    store=_FakeStore())
+
+
+def test_eod_digest_compares_the_actual_to_the_first_projection_and_the_corrections():
+    watch = {"initial_pct": 72.0, "initial_at": "2026-07-20T10:30:00", "initial_dt": "2026-07-20T17:30:00",
+             "soc0": 80.0, "last_pct": 58.0, "last_at": "2026-07-20T13:15:00",
+             "corrections": [{"at": "2026-07-20T13:15:00", "from": 72.0, "to": 58.0}]}
+    msg = _eod_with_watch(watch, pred_pct=58.0, actual=45.0)
+    assert "First said 72%" in msg and "10:30 AM" in msg and "-27 pt" in msg            # first vs actual
+    assert "58%" in msg and "1:15 PM" in msg                                           # the correction on the way
+    assert "actual 45%" in msg
+
+
+def test_eod_digest_has_no_extra_line_when_nothing_changed_since_the_first_ask():
+    watch = {"initial_pct": 60.0, "initial_at": "2026-07-20T12:00:00", "initial_dt": "2026-07-20T17:30:00",
+             "soc0": 80.0, "last_pct": 60.0, "last_at": "2026-07-20T12:00:00", "corrections": []}
+    msg = _eod_with_watch(watch)
+    assert "/sundown accuracy" in msg and "First said" not in msg

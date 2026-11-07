@@ -18,6 +18,7 @@ attention. A local dashboard is there when you do want the detail.
 | **Low battery at 1 pm** | SoC < 40% heading into 4–9 pm peak; shows estimated time to empty at current load |
 | **Low battery at noon** | SoC < 30% at 11am–noon despite solar; flags battery mode issue |
 | **Tonight may run short** | 12:30–1:10 pm, only when needed — the forecast battery level at sundown is under what a heavy night for this weekday needs (learned from your 4 PM–midnight history; see `/evening`); tells you to top up before 2 PM while grid power is cheap. Silent otherwise, once a day |
+| **Sundown projection updated** | After you ask `/sundown`: if the projection moves 15+ points from the last number sent, a corrected one goes out on its own (45 min apart, 3 a day at most, not in the last hour before sundown or while the battery is grid-charging). The 9 pm summary compares the actual battery level to the **first** projection of the day and lists each correction |
 | **Battery full — solar surplus** | 10 am–6 pm — battery at 100% and solar > load; reports the surplus (Self-Consumption already exports it to grid automatically). Fires once per fill, not once per day — stays quiet as long as the battery is still full |
 | **Grid import during peak** | 4–9 pm — drawing from grid when battery should be covering load |
 | **Not charging** | Solar > 1.5 kW but battery not charging; possible mode or inverter issue |
