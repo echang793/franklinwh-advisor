@@ -12677,8 +12677,15 @@ def _watch_proj(tmp_path, soc, solar, now=None):
                                           _GateOutlook(False, 25.0), fc, db)
 
 
-def _watch_run(tmp_path, last_pct, soc=40.0, solar=None, now=None, watch=None, c=None, **over):
+def _watch_run(tmp_path, last_pct, soc=40.0, solar=None, now=None, watch=None, c=None, grid_charge=False, **over):
     db = HistoryStore(tmp_path / "w.db")
+    if grid_charge:                                                                    # an Emergency Backup session at 11:00
+        for m in (0, 5, 10):
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,solar_kw,battery_soc,"
+                "grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (f"2026-11-06T11:{m:02d}:00", 4, 11, 0.8, 0.5, 40.0, 4.5, "normal", 0.0, -4.0))
+        db._conn.commit()
     now = now or _watch_now()
     fc = _day_forecast(now.date(), _SUNNY if solar is None else solar, load=0.8, start_hour=7)
     w = {"initial_pct": last_pct, "initial_at": "2026-11-06T10:00:00", "initial_dt": "2026-11-06T16:45:00",
@@ -12712,6 +12719,18 @@ def test_sundown_watch_sends_a_corrected_projection_when_it_moves_fifteen_points
     assert len(w["corrections"]) == 1 and w["last_pct"] != first
     assert w["corrections"][0]["from"] == first
     _assert_left_aligned(msg)
+
+
+def test_sundown_watch_says_when_the_move_is_your_own_grid_top_up(tmp_path):
+    proj = _watch_proj(tmp_path, 40.0, _SUNNY)[0]
+    first = max(0.0, proj - 20.0)
+    msg, st = _watch_run(tmp_path, first, grid_charge=True)
+    assert msg and "Emergency Backup" in msg and "not a forecast" in msg
+    assert st[f"sundown_watch_{_WATCH_DAY}"]["corrections"][0]["grid"] is True
+    (tmp_path / "b").mkdir()
+    msg, st = _watch_run(tmp_path / "b", first)                                        # no top-up: no such claim
+    assert msg and "Emergency Backup" not in msg
+    assert st[f"sundown_watch_{_WATCH_DAY}"]["corrections"][0]["grid"] is False
 
 
 def test_sundown_watch_is_quiet_inside_fifteen_points(tmp_path):
@@ -12815,7 +12834,7 @@ def test_send_sundown_starts_a_watch_for_a_corrected_projection(tmp_path):
     assert "update" in sent["text"].lower()                                           # tells you it will follow up
 
 
-def _eod_with_watch(watch, pred_pct=60.0, actual=45.0):
+def _eod_with_watch(watch, pred_pct=60.0, actual=45.0, grid=False):
     import types
     today = "2026-07-20"
     now = datetime(2026, 7, 20, 21, 0, 0)
@@ -12833,6 +12852,7 @@ def _eod_with_watch(watch, pred_pct=60.0, actual=45.0):
         def daily_battery_kwh(self, d): return (0.0, 0.0)
         def weekly_readings(self, s, e): return []
         def soc_near(self, ts): return actual
+        def grid_charged_between(self, a, b, min_readings=2): return grid
 
     return alerts._alert_eod_digest(state, today, now, stats, Config(battery_capacity_kwh=13.6), None, None,
                                     store=_FakeStore())
@@ -12853,3 +12873,15 @@ def test_eod_digest_has_no_extra_line_when_nothing_changed_since_the_first_ask()
              "soc0": 80.0, "last_pct": 60.0, "last_at": "2026-07-20T12:00:00", "corrections": []}
     msg = _eod_with_watch(watch)
     assert "/sundown accuracy" in msg and "First said" not in msg
+
+
+def test_eod_digest_does_not_call_a_grid_top_up_a_forecast_miss():
+    watch = {"initial_pct": 40.0, "initial_at": "2026-07-20T10:30:00", "initial_dt": "2026-07-20T17:30:00",
+             "soc0": 30.0, "last_pct": 90.0, "last_at": "2026-07-20T11:40:00",
+             "corrections": [{"at": "2026-07-20T11:40:00", "from": 40.0, "to": 90.0, "grid": True}]}
+    msg = _eod_with_watch(watch, pred_pct=90.0, actual=85.0, grid=True)
+    assert "First said 40%" in msg and "+45 pt" in msg
+    assert "Emergency Backup" in msg and "not a forecast miss" in msg
+    assert "-5 pt off" in msg                                                          # the post top-up number is the real test
+    calm = dict(watch, corrections=[dict(watch["corrections"][0], grid=False)])
+    assert "not a forecast miss" not in _eod_with_watch(calm, pred_pct=90.0, actual=85.0, grid=False)

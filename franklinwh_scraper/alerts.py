@@ -2222,17 +2222,24 @@ def _alert_sundown_watch(state: dict, today: str, now: datetime, c, cfg, outlook
     if now > sundown_dt - _SUNDOWN_WATCH_STOP or abs(pct - last_pct) < _SUNDOWN_WATCH_PTS:
         return None
     soc_then = w.get("last_soc", w.get("soc0"))
-    w.setdefault("corrections", []).append({"at": now.isoformat(), "from": round(last_pct, 1), "to": round(pct, 1)})
+    try:                                     # your own Emergency Backup top-up since the last message moves it too
+        grid = bool(store is not None and store.grid_charged_between(w["last_at"], now.isoformat()))
+    except Exception:
+        grid = False
+    w.setdefault("corrections", []).append({"at": now.isoformat(), "from": round(last_pct, 1), "to": round(pct, 1),
+                                            "grid": grid})
     w.update(last_pct=round(pct, 1), last_at=now.isoformat(), last_soc=round(float(c.battery_soc_pct), 1))
     battery = f"Battery is {c.battery_soc_pct:.0f}% now" + (f" (it was {soc_then:.0f}% when I last sent it)." if soc_then is not None else ".")
     return (f"🔄 <b>Sundown projection updated</b>\n"
             f"Was ~{last_pct:.0f}% (sent {last_at.strftime('%-I:%M %p')}), now ~{pct:.0f}% at sundown "
             f"(~{sundown_dt.strftime('%-I:%M %p')}): {pct - last_pct:+.0f} pts.\n"
             f"{battery}\n"
-            f"Tonight's summary will compare the actual to the first one I sent today (~{w['initial_pct']:.0f}%).")
+            + ("You charged from the grid (Emergency Backup) since then, so this is your top-up, not a forecast "
+               "change.\n" if grid else "")
+            + f"Tonight's summary will compare the actual to the first one I sent today (~{w['initial_pct']:.0f}%).")
 
 
-def _sundown_watch_line(watch: dict, pred_pct: float, actual_pct: float) -> str:
+def _sundown_watch_line(watch: dict, pred_pct: float, actual_pct: float, grid: bool = False) -> str:
     """The evening digest's extra lines: the actual level against the FIRST projection of the day,
     and each correction on the way. "" when nothing was sent beyond what the digest already grades."""
     try:
@@ -2244,7 +2251,8 @@ def _sundown_watch_line(watch: dict, pred_pct: float, actual_pct: float) -> str:
     if not corrections and abs(first - pred_pct) < 0.5:
         return ""
     out = (f"\n🔎 First said {first:.0f}% ({first_at.strftime('%-I:%M %p')}), actual {actual_pct:.0f}% "
-           f"({actual_pct - first:+.0f} pt)")
+           f"({actual_pct - first:+.0f} pt"
+           + ("; you topped up from the grid (Emergency Backup) after that, so not a forecast miss)" if grid else ")"))
     for corr in corrections:
         try:
             at = datetime.fromisoformat(corr["at"])
@@ -3787,7 +3795,11 @@ def _alert_eod_digest(
                             "not a model miss, sample skipped")
             else:
                 _record_sundown_bias(state, actual_pct - raw_pct)
-            sundown_acc_str += _sundown_watch_line(state.get(f"sundown_watch_{today}") or {}, pred_pct, actual_pct)
+            watch = state.get(f"sundown_watch_{today}") or {}
+            grid_topped = (any(x.get("grid") for x in watch.get("corrections", []))
+                           or _sundown_window_had_grid_charge(store, {"requested_at": watch.get("initial_at", ""),
+                                                                      "dt": watch.get("initial_dt", "")}))
+            sundown_acc_str += _sundown_watch_line(watch, pred_pct, actual_pct, grid_topped)
 
     # "Without EV" is a flat assumed-baseline walk to the next sunrise (no
     # forecast/solar/percentile model, by request 2026-08-17 — see
