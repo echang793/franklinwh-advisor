@@ -18,6 +18,7 @@ import hmac
 import json
 import math
 import sqlite3
+import types
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from .alerts import (
     _NO_EV_LOAD_MIN_SAMPLES,
     _predict_overnight_soc_flat,
     _PR_BIAS_FIX_DATE,
+    _sundown_report,
 )
 from .advisor import _tou_eb_plan
 from .config import load as load_config
@@ -482,6 +484,36 @@ def api_forecast():
         "system_peak_kw": round(sp, 2) if sp is not None else None,
         "error": error,
     }
+
+
+def _sundown_now() -> datetime:
+    return datetime.now()
+
+
+@app.get("/api/sundown", dependencies=_authed)
+def api_sundown():
+    """The dashboard's sundown panel: the projected battery level at sundown against what tonight needs,
+    the what-if scenarios, and today's first projection with its corrections (the same numbers /sundown
+    gives in the chat bot, from alerts._sundown_report)."""
+    r = _latest_reading()
+    if not r:
+        return {"ok": False, "reason": "no_reading", "watch": None}
+    c = types.SimpleNamespace(
+        battery_soc_pct=r["battery_soc"], home_load_kw=r["home_load_kw"], solar_production_kw=r["solar_kw"],
+        battery_use_kw=r["battery_use_kw"], grid_use_kw=r["grid_use_kw"])
+    try:
+        state = _load_peak_state(_OUT)
+        with HistoryStore(_OUT / "history.db") as history:
+            outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
+            sp = _get_system_peak_kw(state)
+            cloudy = bool(outlook and outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
+            fc = (predict(history, 24, outlook=outlook, system_peak_kw=sp,
+                          perf_ratio=_get_performance_ratio(state, cloudy=cloudy),
+                          hourly_bias=_get_hourly_bias(state))
+                  if history.has_enough_data() else None)
+            return _sundown_report(state, _sundown_now(), c, _cfg, outlook, fc, history)
+    except Exception:
+        return {"ok": False, "reason": "error", "watch": None}
 
 
 @app.get("/api/accuracy", dependencies=_authed)

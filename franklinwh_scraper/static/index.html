@@ -172,8 +172,8 @@ const WALL_RELOAD_MS = 6 * 3600 * 1000;   // fresh page every 6 h: no memory cre
 const CAP0 = 13.6;
 const $ = id => document.getElementById(id);
 const M = "'JetBrains Mono',monospace";
-const PANEL_IDS = ['battery','history','flow','bill','forecast','mode','ebplan','touclock','accuracy','batteryhealth','attribution','savings','alerts','digests','ev','vpp','sunpath'];
-const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',attribution:'ATTRIBUTION',savings:'SAVINGS',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING',vpp:'VPP EVENT',sunpath:'SUN PATH'};
+const PANEL_IDS = ['battery','history','flow','bill','forecast','sundown','mode','ebplan','touclock','accuracy','batteryhealth','attribution','savings','alerts','digests','ev','vpp','sunpath'];
+const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',sundown:'SUNDOWN',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',attribution:'ATTRIBUTION',savings:'SAVINGS',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING',vpp:'VPP EVENT',sunpath:'SUN PATH'};
 
 // ── Live state ───────────────────────────────────────────────────────
 const S = {
@@ -183,7 +183,7 @@ const S = {
   lastPoll: null, nextPoll: null,
   alerts: [], unread: 0, alertsVisible: true, filterCat: 'ALL',
   hist: [], histY: [], histIdx: -1, cmp: false,
-  forecast: [], cc: 0, scrubIdx: -1,
+  forecast: [], sundown: null, cc: 0, scrubIdx: -1,
   eb: null, rec: null, acc: [], tou: null, bill: null, vpp: null,
   attribution: [], attrWindowDays: 14,
   tab: 0, focusId: null, flashId: null, narrow: !WALL && window.innerWidth < 920,
@@ -307,6 +307,22 @@ mkPanel('forecast', `
   </div>
   <div id="f-health" class="mono" style="font-size:10px;color:#4c5f50;margin-top:10px;"></div>`);
 
+
+mkPanel('sundown', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div class="plabel">SUNDOWN PROJECTION</div>
+    <div id="sd-time" class="mono" style="font-size:10px;letter-spacing:.1em;color:#3f5244;"></div>
+  </div>
+  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:14px;margin-top:14px;">
+    <div id="sd-pct" style="font-size:54px;font-weight:700;line-height:1;color:#57e389;transition:color .6s;">—%</div>
+    <div id="sd-sub" class="mono" style="font-size:12px;color:#7d937f;"></div>
+  </div>
+  <div id="sd-gauge" style="position:relative;height:14px;border-radius:7px;background:#18231a;margin-top:18px;"></div>
+  <div id="sd-ticks" class="mono" style="font-size:10px;color:#5f7263;margin-top:8px;"></div>
+  <div id="sd-verdict" class="mono" style="font-size:11.5px;margin-top:12px;line-height:1.6;"></div>
+  <div id="sd-scen" style="margin-top:16px;display:flex;flex-direction:column;gap:9px;"></div>
+  <div id="sd-watch" class="mono" style="margin-top:16px;font-size:11px;line-height:1.7;color:#7d937f;"></div>
+  <div id="sd-foot" class="mono" style="font-size:10px;color:#4c5f50;margin-top:12px;line-height:1.6;"></div>`);
 mkPanel('mode', `
   <div id="m-burst" style="display:none;position:absolute;top:50%;left:70%;width:160px;height:160px;margin:-80px 0 0 -80px;border-radius:50%;background:radial-gradient(circle,rgba(87,227,137,.5),transparent 70%);animation:burst .9s ease-out forwards;pointer-events:none;"></div>
   <div class="plabel">RECOMMENDED MODE</div>
@@ -570,7 +586,7 @@ function snapshot(){
 }
 
 // ── Layout system ────────────────────────────────────────────────────
-function defaultLayout(){ return { left:['battery','flow','sunpath','forecast','ebplan','accuracy','attribution','alerts'], right:['history','bill','savings','mode','touclock','batteryhealth','digests','ev','vpp'] }; }
+function defaultLayout(){ return { left:['battery','flow','sunpath','forecast','sundown','ebplan','accuracy','attribution','alerts'], right:['history','bill','savings','mode','touclock','batteryhealth','digests','ev','vpp'] }; }
 // Merge a saved layout against the current PANEL_IDS instead of requiring
 // an exact set match — previously, adding (or renaming) even one panel
 // silently discarded every user's custom drag arrangement back to default,
@@ -995,6 +1011,62 @@ function renderMode(){
   $('m-from').textContent = rec.needs_action ? 'Current' : pretty(rec.recommended_mode);
   $('m-reason').textContent = rec.reason || '';
   $('m-applyrow').style.display = DEMO ? 'flex' : 'none';  // FranklinWH mode switching lives in their app
+}
+function renderSundown(){
+  const r = S.sundown;
+  const t12 = iso => new Date(iso).toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit'});
+  const pctEl = $('sd-pct'), sub = $('sd-sub'), gauge = $('sd-gauge'), ticks = $('sd-ticks');
+  const verdict = $('sd-verdict'), scen = $('sd-scen'), watch = $('sd-watch'), foot = $('sd-foot');
+  const clear = () => { gauge.innerHTML = ''; ticks.textContent = ''; verdict.textContent = ''; scen.innerHTML = ''; foot.textContent = ''; };
+  const watchLine = w => {
+    if (!w || w.initial_pct == null) return '';
+    const parts = [`First said <b style="color:#b9d8be;">${Math.round(w.initial_pct)}%</b> at ${w.initial_at ? t12(w.initial_at) : '—'}`];
+    (w.corrections || []).forEach(c => parts.push(`${c.grid ? '⚡ ' : ''}${Math.round(c.to)}% at ${t12(c.at)}`));
+    let line = parts.join(' → ');
+    if (w.actual_pct != null) {
+      const d = w.actual_pct - w.initial_pct;
+      const grid = (w.corrections || []).some(c => c.grid);
+      line += `<br>Actual at sundown: <b style="color:#b9d8be;">${Math.round(w.actual_pct)}%</b> (${d >= 0 ? '+' : ''}${Math.round(d)} pt${grid ? ' · ⚡ you topped up from the grid, so not a forecast miss' : ''})`;
+    }
+    return line;
+  };
+  if (!r) { pctEl.textContent = '—%'; pctEl.style.color = '#4c5f50'; sub.textContent = 'loading…'; $('sd-time').textContent = ''; clear(); watch.innerHTML = ''; return; }
+  if (!r.ok) {
+    pctEl.textContent = r.reason === 'solar_done' && r.soc != null ? Math.round(r.soc) + '%' : '—';
+    pctEl.style.color = '#7d937f';
+    sub.textContent = r.reason === 'solar_done' ? 'solar is done for today' : r.reason === 'no_forecast' ? 'not enough usage history yet' : 'projection unavailable';
+    $('sd-time').textContent = ''; clear(); watch.innerHTML = watchLine(r.watch);
+    return;
+  }
+  const t = r.targets;
+  const col = !t ? '#57e389' : t.verdict === 'heavy' ? '#57e389' : t.verdict === 'typical' ? '#f5b942' : '#ff8a7a';
+  pctEl.textContent = Math.round(r.projected_pct) + '%'; pctEl.style.color = col;
+  $('sd-time').textContent = '~' + t12(r.sundown_at);
+  sub.textContent = `now ${Math.round(r.soc)}% · ${r.band ? `likely ${Math.round(r.band.lo)}–${Math.round(r.band.hi)}%` : 'quiet afternoon'}`;
+  const pos = v => Math.max(0, Math.min(100, v)) + '%';
+  gauge.innerHTML =
+    (r.band ? `<div style="position:absolute;top:0;bottom:0;left:${pos(r.band.lo)};width:${Math.max(0, Math.min(100, r.band.hi) - Math.max(0, r.band.lo))}%;background:rgba(87,227,137,.16);border-radius:7px;"></div>` : '') +
+    `<div style="position:absolute;top:0;left:0;bottom:0;width:${pos(r.projected_pct)};border-radius:7px;background:linear-gradient(90deg,#1f7a44,${col});box-shadow:0 0 14px ${col}55;"></div>` +
+    (t ? `<div title="typical ${t.weekday} night" style="position:absolute;top:-3px;bottom:-3px;left:${pos(t.typical_pct)};width:2px;background:#f5b942;"></div>` +
+         `<div title="heavy ${t.weekday} night" style="position:absolute;top:-3px;bottom:-3px;left:${pos(t.heavy_pct)};width:2px;background:#ff8a7a;"></div>` : '');
+  if (t) {
+    ticks.innerHTML = `<span style="color:#f5b942;">▏${Math.round(t.typical_pct)}%</span> typical ${escapeHtml(t.weekday)} night (${t.typical_kwh.toFixed(1)} kWh) · <span style="color:#ff8a7a;">▏${Math.round(t.heavy_pct)}%</span> heavy (${t.heavy_kwh.toFixed(1)} kWh)` + (t.plan_kwh > 0 ? ` · +${t.plan_kwh.toFixed(1)} kWh planned` : '');
+    const gap = r.projected_pct - t.heavy_pct, short = t.typical_pct - r.projected_pct;
+    verdict.style.color = col;
+    verdict.textContent = t.verdict === 'heavy' ? `✓ Covers even a heavy night (${Math.round(gap)} pts to spare).`
+      : t.verdict === 'typical' ? `Covers a typical night; a heavy one would run ~${Math.round(t.heavy_pct - r.projected_pct)} pts short.`
+      : `⚠ ${Math.round(short)} pts under a typical night. Worth topping up.`;
+  } else { ticks.textContent = ''; verdict.textContent = ''; }
+  scen.innerHTML = (r.scenarios || []).map(s => {
+    const d = s.pct - r.projected_pct;
+    const c = s.pct >= (t ? t.heavy_pct : 50) ? '#57e389' : s.pct >= (t ? t.typical_pct : 30) ? '#f5b942' : '#ff8a7a';
+    return `<div style="display:flex;align-items:center;gap:10px;">
+      <div class="mono" style="flex:1.4;font-size:11px;color:#9db8a2;line-height:1.35;">${escapeHtml(s.label)}</div>
+      <div style="flex:1;height:8px;border-radius:4px;background:#18231a;overflow:hidden;"><div style="width:${pos(s.pct)};height:100%;background:${c};"></div></div>
+      <div class="mono" style="width:76px;text-align:right;font-size:11px;color:${c};font-weight:700;">${Math.round(s.pct)}% <span style="color:#5f7263;font-weight:400;">${d >= 0 ? '+' : ''}${Math.round(d)}</span></div></div>`;
+  }).join('');
+  watch.innerHTML = watchLine(r.watch);
+  foot.textContent = `${r.confidence ? r.confidence + ' confidence · ' : ''}${r.data_days}d of history${r.bias ? ` · learned correction ${r.bias >= 0 ? '+' : ''}${r.bias.toFixed(1)} pts` : ''} · the sun and your loads decide the rest.`;
 }
 function renderAccuracy(){
   const days = S.acc;
@@ -1537,11 +1609,11 @@ async function pollSlow(){
   // update instead of blanking all 7 slow-refresh panels for the cycle —
   // each panel keeps showing its last-known-good data until that specific
   // endpoint recovers.
-  const [h, f, acc, tou, bill, rec, health, bh, ev, attr, sav, vpp] = await Promise.allSettled([
+  const [h, f, acc, tou, bill, rec, health, bh, ev, attr, sav, vpp, sd] = await Promise.allSettled([
     J('/api/history?hours=48'), J('/api/forecast'), J('/api/accuracy'),
     J('/api/tou'), J('/api/bill'), J('/api/recommendation'), J('/api/health'),
     J('/api/battery-health'), J('/api/ev'), J(`/api/attribution?days=${S.attrWindowDays}`), J('/api/savings?days=30'),
-    J('/api/vpp'),
+    J('/api/vpp'), J('/api/sundown'),
   ]);
   const ok = r => r.status === 'fulfilled' ? r.value : null;
   const now = Date.now();
@@ -1557,6 +1629,9 @@ async function pollSlow(){
     S.forecastHealth = { perfRatio: fv.perf_ratio, cloudy: fv.cloudy_today, systemPeakKw: fv.system_peak_kw };
     renderForecast();
   }
+
+  const sdv = ok(sd);
+  if (sdv) { S.sundown = sdv; renderSundown(); }
 
   const accv = ok(acc);
   if (accv) { S.acc = accv.days; renderAccuracy(); }
@@ -1690,7 +1765,7 @@ function demoData(){
     { ts: new Date(Date.now()-120000).toISOString(), body: '⚡ Switch to <b>Time-of-Use</b> mode. Battery at 78% with 14 kWh of solar still expected — hold charge for the 4–9 PM peak window and export at <b>$0.529/kWh</b>.' },
     { ts: new Date(Date.now()-120000).toISOString(), body: 'Heads up: grid peak pricing starts in 1h 28m. Current plan saves an estimated <b>$4.80</b> today vs Self-Use.' },
   ], true);
-  renderHistory(); renderForecast(); renderAccuracy(); renderBatteryHealth(); renderTou(); renderBill(); renderMode(); renderEv(); renderVpp(); renderAttribution(); renderSavings();
+  renderHistory(); renderForecast(); renderSundown(); renderAccuracy(); renderBatteryHealth(); renderTou(); renderBill(); renderMode(); renderEv(); renderVpp(); renderAttribution(); renderSavings();
   $('m-apply').addEventListener('click', () => {
     if (S.applying || S.modeApplied) return;
     S.applying = true; $('m-apply').textContent = '◈ SWITCHING…';

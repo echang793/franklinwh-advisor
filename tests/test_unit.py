@@ -13628,3 +13628,113 @@ def test_the_command_menu_is_registered_with_telegram(monkeypatch):
     assert all(len(c["description"]) <= 256 and c["command"].islower() for c in seen["body"]["commands"])
     import inspect
     assert "self._register_commands()" in inspect.getsource(chatbot_mod.TelegramChatBot.run)
+
+
+# ── the dashboard's sundown panel: _sundown_report and /api/sundown ──────
+
+def _report(tmp_path, hour=12, minute=35, soc=40.0, sun=0.5, state=None, store="seed", c=None):
+    """A Friday sundown report over a quiet 10-week history."""
+    now = datetime(2026, 11, 6, hour, minute)
+    db = HistoryStore(tmp_path / "rep.db")
+    for i in range(1, 11 * 7):
+        _seed_loads(db, (now - timedelta(days=i)).date(), _quiet_day())
+    st = {"solar_cal_samples": [4.0, 4.2, 3.9]} if state is None else state
+    fc = _day_forecast(now.date(), {h: kw * sun for h, kw in _SUNNY.items()}, load=0.8, start_hour=7)
+    return alerts._sundown_report(st, now, c or _tracker_c(soc), Config(battery_capacity_kwh=13.6),
+                                  _GateOutlook(False, 25.0), fc, db if store == "seed" else store), st
+
+
+def test_sundown_report_gives_the_projection_and_what_it_is_measured_against(tmp_path):
+    r, _ = _report(tmp_path)
+    assert r["ok"] and r["soc"] == 40.0 and 0 <= r["projected_pct"] <= 100
+    assert r["sundown_at"].startswith("2026-11-06T") and r["confidence"] and r["data_days"] == 30
+    t = r["targets"]
+    assert t["weekday"] == "Friday" and t["heavy_pct"] >= t["typical_pct"] > 0
+    assert t["verdict"] in ("heavy", "typical", "short")
+    assert r["plan"] == [] and r["watch"] is None
+    import json
+    json.dumps(r)                                                                          # plain JSON: no numpy, no datetimes
+
+
+def test_sundown_report_matches_what_the_sundown_command_headlines(tmp_path):
+    r, st = _report(tmp_path)
+    proj = alerts._sundown_projection_now(st, datetime(2026, 11, 6, 12, 35), _tracker_c(40.0),
+                                          Config(battery_capacity_kwh=13.6), _GateOutlook(False, 25.0),
+                                          _day_forecast(datetime(2026, 11, 6).date(),
+                                                        {h: kw * 0.5 for h, kw in _SUNNY.items()}, load=0.8, start_hour=7),
+                                          HistoryStore(tmp_path / "rep.db"))
+    assert abs(r["projected_pct"] - proj[0]) < 0.06 and abs(r["raw_pct"] - proj[2]) < 0.06
+
+
+def test_sundown_report_offers_a_grid_top_up_before_2pm_only(tmp_path):
+    keys = {s["key"] for s in _report(tmp_path)[0]["scenarios"]}
+    assert "eb_hour" in keys
+    (tmp_path / "late").mkdir()
+    late = {s["key"] for s in _report(tmp_path / "late", hour=14, minute=30)[0]["scenarios"]}
+    assert "eb_hour" not in late
+    eb = next(s for s in _report(tmp_path)[0]["scenarios"] if s["key"] == "eb_hour")
+    assert eb["pct"] > _report(tmp_path)[0]["projected_pct"]                                # topping up helps
+
+
+def test_sundown_report_includes_your_plan_and_usual_day(tmp_path):
+    from franklinwh_scraper import planned
+    st = {"solar_cal_samples": [4.0, 4.2, 3.9]}
+    planned.set_plan(st, "2026-11-06", [{"name": "dryer", "start": 14.0, "hours": 1.0, "kw": 4.0}])
+    r, _ = _report(tmp_path, state=st)
+    assert [p["name"] for p in r["plan"]] == ["dryer"]
+    plan = next(s for s in r["scenarios"] if s["key"] == "plan")
+    assert plan["pct"] < r["projected_pct"] and "dryer" in plan["label"]
+
+
+def test_sundown_report_shows_the_first_projection_and_its_corrections(tmp_path):
+    watch = {"initial_pct": 67.0, "initial_at": "2026-11-06T10:49:00", "initial_dt": "2026-11-06T16:51:00",
+             "last_pct": 44.0, "last_at": "2026-11-06T12:00:00",
+             "corrections": [{"at": "2026-11-06T11:41:00", "from": 67.0, "to": 96.2, "grid": True},
+                             {"at": "2026-11-06T12:00:00", "from": 96.2, "to": 44.0, "grid": False}]}
+    r, _ = _report(tmp_path, state={"solar_cal_samples": [4.0, 4.2, 3.9], "sundown_watch_2026-11-06": watch})
+    w = r["watch"]
+    assert w["initial_pct"] == 67.0 and len(w["corrections"]) == 2 and w["actual_pct"] is None
+    assert w["corrections"][0]["grid"] is True
+
+
+def test_sundown_report_after_sundown_says_so_and_grades_the_first_projection(tmp_path):
+    watch = {"initial_pct": 67.0, "initial_at": "2026-11-06T10:49:00", "initial_dt": "2026-11-06T16:51:00",
+             "last_pct": 67.0, "last_at": "2026-11-06T10:49:00", "corrections": []}
+    st = {"solar_cal_samples": [4.0, 4.2, 3.9], "sundown_watch_2026-11-06": watch}
+    db = HistoryStore(tmp_path / "late.db")
+    _seed_loads(db, datetime(2026, 11, 6).date(), {16: 0.5, 17: 0.5})                       # a reading near 4:51 PM (battery 50%)
+    r, _ = _report(tmp_path, hour=20, minute=0, state=st, store=db)
+    assert r["ok"] is False and r["reason"] == "solar_done"
+    assert r["watch"]["initial_pct"] == 67.0 and r["watch"]["actual_pct"] == 50.0
+
+
+def test_sundown_report_without_a_forecast_says_why(tmp_path):
+    now = datetime(2026, 11, 6, 12, 35)
+    r = alerts._sundown_report({}, now, _tracker_c(40.0), Config(), _GateOutlook(False, 25.0), None, None)
+    assert r == {"ok": False, "reason": "no_forecast", "watch": None}
+
+
+def test_api_sundown_serves_the_report(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from franklinwh_scraper import webapi
+    now = datetime.now().replace(hour=12, minute=35, second=0, microsecond=0)
+    db = HistoryStore(tmp_path / "history.db")
+    for i in range(1, 11 * 7):
+        _seed_loads(db, (now - timedelta(days=i)).date(), _quiet_day())
+    _seed_loads(db, now.date(), {12: 0.6})                                                   # today's latest reading
+    alerts._save_peak_state(tmp_path, {"solar_cal_samples": [4.0, 4.2, 3.9]})
+    monkeypatch.setattr(webapi, "_OUT", tmp_path, raising=False)
+    monkeypatch.setattr(webapi, "_cfg", Config(battery_capacity_kwh=13.6), raising=False)
+    monkeypatch.setattr(webapi, "_fetch_outlook_cached", lambda *a, **k: _GateOutlook(False, 25.0))
+    monkeypatch.setattr(webapi, "_sundown_now", lambda: now, raising=False)
+    r = TestClient(webapi.app).get("/api/sundown")
+    assert r.status_code == 200
+    body = r.json()
+    assert "ok" in body and ("projected_pct" in body or body.get("reason"))
+
+
+def test_dashboard_has_a_sundown_panel():
+    from franklinwh_scraper import webapi
+    html = (webapi._STATIC / "index.html").read_text()
+    assert "'sundown'" in html and "/api/sundown" in html and "function renderSundown" in html
+    assert "mkPanel('sundown'" in html

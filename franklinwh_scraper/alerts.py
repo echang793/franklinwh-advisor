@@ -2290,6 +2290,116 @@ def _sundown_projection_now(state: dict, now: datetime, c, cfg, outlook, usage_f
     return max(0.0, min(100.0, raw_pct + _get_sundown_bias(state))), sundown_dt, raw_pct
 
 
+def _watch_summary(state: dict, today: str, now: datetime, store) -> dict | None:
+    """Today's /sundown watch for the dashboard: the first projection, each correction, and (once the
+    battery has been read after sundown) what the level actually was. None when /sundown was not asked."""
+    w = state.get(f"sundown_watch_{today}")
+    if not w:
+        return None
+    actual = None
+    try:
+        dt = datetime.fromisoformat(w["initial_dt"])
+        if store is not None and now >= dt + _SUNDOWN_GRADE_DELAY:
+            soc = store.soc_near(w["initial_dt"])
+            actual = None if soc is None else round(float(soc), 1)
+    except (KeyError, TypeError, ValueError):
+        pass
+    return {"initial_pct": w.get("initial_pct"), "initial_at": w.get("initial_at"),
+            "initial_dt": w.get("initial_dt"),
+            "corrections": [{"at": x.get("at"), "from": x.get("from"), "to": x.get("to"), "grid": bool(x.get("grid"))}
+                            for x in w.get("corrections", [])],
+            "actual_pct": actual}
+
+
+def _sundown_report(state: dict, now: datetime, c, cfg, outlook, usage_forecast, store) -> dict:
+    """Everything the dashboard's sundown panel shows, as plain JSON: the projected battery level at
+    sundown (the same quiet-afternoon number /sundown headlines), how it compares with what tonight
+    needs, the what-if scenarios (car, typical day, your usual loads, your plan, a grid top-up) and
+    today's first projection with its corrections. {"ok": False, "reason": ...} when there is nothing
+    to project (no forecast, or the solar day is over)."""
+    from . import evening, loadevents, planned, typicalload
+    today = now.strftime("%Y-%m-%d")
+    watch = _watch_summary(state, today, now, store)
+    if usage_forecast is None or getattr(usage_forecast, "confidence", "none") == "none":
+        return {"ok": False, "reason": "no_forecast", "watch": watch}
+    live = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
+    cap = getattr(cfg, "battery_capacity_kwh", None) or _BATTERY_CAPACITY_KWH
+    floor = _effective_reserve_pct(cfg, store, now)
+    soc = float(c.battery_soc_pct)
+    profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
+    sunset = _sunset_today(outlook, now)
+    try:
+        typical = typicalload.typical_hourly_load(store, now.date(), state.get("car_day_labels"))
+    except Exception:
+        typical = None
+    sc = _afternoon_scenarios(live, now, soc, cap, profile, getattr(c, "home_load_kw", None),
+                              floor_pct=floor, sunset=sunset, typical=typical)
+    if sc["quiet"] is None:
+        return {"ok": False, "reason": "solar_done", "soc": round(soc, 1), "watch": watch}
+    raw_pct, sundown_dt, _export = sc["quiet"]
+    bias = _get_sundown_bias(state)
+
+    def pct(raw: float) -> float:
+        return round(max(0.0, min(100.0, raw + bias)), 1)
+
+    projected = pct(raw_pct)
+    weekday = now.strftime("%A")
+    now_h = now.hour + now.minute / 60.0
+    scenarios: list[dict] = []
+    if profile is not None and sc["with_car"] is not None:
+        scenarios.append({"key": "car", "label": "If you charge the car this afternoon", "pct": pct(sc["with_car"][0])})
+    if typical is not None and sc["typical"] is not None and abs(sc["typical"][0] - raw_pct) >= 1.5:
+        scenarios.append({"key": "typical", "label": f"A typical {weekday} afternoon", "pct": pct(sc["typical"][0])})
+    plan = planned.get_plan(state, today)
+    reserve = floor
+    if plan:
+        _b, with_plan, _dt = _planned_sundown(live, now, soc, cap, profile, plan, reserve, sunset)
+        if with_plan is not None:
+            scenarios.append({"key": "plan", "label": f"Your plan: {planned.describe(plan)}", "pct": pct(with_plan)})
+    elif not planned.declared(state, today):
+        usual = [e for e in loadevents.learn(store, now.date(), state.get("car_day_labels")).get(now.weekday(), [])
+                 if e.start + e.hours > now_h]
+        if usual:
+            names = state.get("pattern_names")
+            _b, with_usual, _dt = _planned_sundown(live, now, soc, cap, profile,
+                                                   [e.as_load(loadevents.name_for(names, e)) for e in usual],
+                                                   reserve, sunset)
+            if with_usual is not None and abs(pct(with_usual) - projected) >= 0.5:   # a load after sundown changes nothing
+                scenarios.append({"key": "usual", "label": f"Your usual {weekday} loads", "pct": pct(with_usual)})
+    from . import ebpattern
+    from .advisor import _EB_CHARGE_KW
+    topping_up = (getattr(c, "grid_use_kw", 0.0) > ebpattern.GRID_KW and getattr(c, "battery_use_kw", 0.0) < -ebpattern.BATT_KW)
+    if now.hour < 14 and not topping_up:      # grid power is cheapest until 2 PM
+        surplus = float(getattr(c, "solar_production_kw", 0.0) or 0.0) - float(getattr(c, "home_load_kw", 0.0) or 0.0)
+        from_grid = max(0.0, _EB_CHARGE_KW - surplus)
+        _b, with_eb, _dt = _planned_sundown(live, now, soc, cap, profile,
+                                            [{"name": "EB", "start": now_h, "hours": 1.0, "kw": -from_grid}], reserve, sunset)
+        if with_eb is not None:
+            scenarios.append({"key": "eb_hour", "label": "If you charge from the grid for an hour", "pct": pct(with_eb)})
+
+    band = None
+    b = _sundown_band(state, now)
+    if b is not None:
+        band = {"lo": pct(raw_pct + b[0] - bias), "hi": pct(raw_pct + b[1] - bias), "n": b[2]}
+
+    targets = None
+    me = evening.evening_profiles(store, now.date()).get(now.weekday())
+    if me is not None:
+        from . import ebguide
+        margin = ebguide.plan_margin(state.get("plan_log", []))
+        plan_kwh = planned.evening_kwh(plan)
+        typ = evening.target_pct(me.median_kwh + plan_kwh, cap, floor, margin)
+        hvy = evening.target_pct(me.heavy_kwh + plan_kwh, cap, floor, margin)
+        targets = {"weekday": me.name, "typical_pct": round(typ, 1), "heavy_pct": round(hvy, 1),
+                   "typical_kwh": round(me.median_kwh, 1), "heavy_kwh": round(me.heavy_kwh, 1),
+                   "plan_kwh": round(plan_kwh, 1),
+                   "verdict": evening.verdict(projected, typical_pct=typ, heavy_pct=hvy)[0]}
+    return {"ok": True, "now": now.isoformat(), "soc": round(soc, 1), "sundown_at": sundown_dt.isoformat(),
+            "projected_pct": projected, "raw_pct": round(float(raw_pct), 1), "bias": round(float(bias), 1),
+            "band": band, "scenarios": scenarios, "targets": targets, "plan": plan, "watch": watch,
+            "confidence": getattr(live, "confidence", ""), "data_days": int(getattr(live, "data_days", 0) or 0)}
+
+
 def _alert_sundown_watch(state: dict, today: str, now: datetime, c, cfg, outlook, usage_forecast, store) -> str | None:
     """After a /sundown today: if the projection has moved _SUNDOWN_WATCH_PTS or more from the
     last number sent, send the corrected one. At most _SUNDOWN_WATCH_MAX a day, one per

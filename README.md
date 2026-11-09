@@ -207,7 +207,7 @@ Settings in `~/.franklinwh.json` are kept — nothing to re-configure.
 ## Live dashboard
 
 Alerts cover the moments that need you. When you want the whole picture —
-live energy flow, forecast, bill projection, savings, battery health — run:
+live energy flow, forecast, the sundown projection (the same number `/sundown` gives, against what tonight needs, with what-ifs for the car, a grid top-up and your plan), bill projection, savings, battery health — run:
 
 ```bash
 python3 scrape.py dashboard
