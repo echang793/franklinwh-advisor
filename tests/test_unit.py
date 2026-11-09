@@ -12885,3 +12885,332 @@ def test_eod_digest_does_not_call_a_grid_top_up_a_forecast_miss():
     assert "-5 pt off" in msg                                                          # the post top-up number is the real test
     calm = dict(watch, corrections=[dict(watch["corrections"][0], grid=False)])
     assert "not a forecast miss" not in _eod_with_watch(calm, pred_pct=90.0, actual=85.0, grid=False)
+
+
+# ── /plan: tell the advisor what you will run today ──────────────────────
+
+def test_parse_plan_reads_loads_clear_and_show():
+    from franklinwh_scraper.chatbot import _parse_plan
+    got = _parse_plan("/plan dryer 4pm, oven 5pm for 90m")
+    assert [(ld["name"], ld["start"], ld["hours"]) for ld in got["loads"]] == [("dryer", 16, 1.0), ("oven", 17, 1.5)]
+    assert _parse_plan("/plan clear") == {"clear": True}
+    assert _parse_plan("/plan") == {}
+    assert _parse_plan("/plan banana") is None
+    assert _parse_plan("/ebplan dryer 4pm") is None
+    assert _parse_plan("/plan dryer 25pm") is None
+
+
+def test_plan_command_stores_the_loads_and_says_what_they_do_to_sundown(tmp_path):
+    now = datetime(2026, 11, 6, 13, 20)
+    bot, sent = _evening_bot(tmp_path, now, soc=60.0, forecast_solar=_SUNNY)
+    _run_at(now, bot._send_plan, "1", {"loads": [{"name": "dryer", "start": 14, "hours": 1.0, "kw": 4.0}]})
+    assert "dryer 2–3 PM (4 kW)" in sent["text"] and "sundown" in sent["text"].lower() and "pts" in sent["text"]
+    from franklinwh_scraper import planned
+    from franklinwh_scraper.alerts import _load_peak_state
+    assert planned.get_plan(_load_peak_state(tmp_path), "2026-11-06")[0]["name"] == "dryer"
+    _assert_left_aligned(sent["text"])
+    _run_at(now, bot._send_plan, "1", {})                                              # bare /plan shows it
+    assert "dryer" in sent["text"]
+    _run_at(now, bot._send_plan, "1", {"clear": True})
+    assert planned.get_plan(_load_peak_state(tmp_path), "2026-11-06") == []
+
+
+def test_plan_with_nothing_planned_says_how_to_add_one(tmp_path):
+    now = datetime(2026, 11, 6, 13, 20)
+    bot, sent = _evening_bot(tmp_path, now)
+    _run_at(now, bot._send_plan, "1", {})
+    assert "/plan dryer" in sent["text"]
+
+
+def test_planned_loads_become_todays_usual_loads_for_ebplan():
+    from franklinwh_scraper.chatbot import _habit_loads
+    from franklinwh_scraper import planned
+    now = datetime(2026, 11, 6, 13, 20)
+    st: dict = {}
+    planned.set_plan(st, "2026-11-06", [{"name": "dryer", "start": 16.0, "hours": 1.0, "kw": 4.0}])
+    got = _habit_loads(Config(habit_loads={"friday": [["oven", "17:00", 2.0, 2.5]]}), now, st)
+    assert [ld["name"] for ld in got] == ["dryer"]                                     # what you said beats the habit
+
+
+def test_sundown_shows_the_outcome_with_your_plan(tmp_path):
+    now = datetime(2026, 11, 6, 13, 20)
+    bot, sent = _evening_bot(tmp_path, now, soc=60.0, forecast_solar=_SUNNY)
+    _run_at(now, bot._send_plan, "1", {"loads": [{"name": "dryer", "start": 14, "hours": 2.0, "kw": 4.0}]})
+    _run_at(now, bot._send_sundown, "1")
+    assert "With your plan" in sent["text"] and "dryer" in sent["text"]
+
+
+def test_sundown_has_no_plan_line_without_a_plan(tmp_path):
+    now = datetime(2026, 11, 6, 13, 20)
+    bot, sent = _evening_bot(tmp_path, now, soc=60.0, forecast_solar=_SUNNY)
+    _run_at(now, bot._send_sundown, "1")
+    assert "With your plan" not in sent["text"]
+
+
+def test_evening_adds_the_planned_load_to_the_level_you_want(tmp_path):
+    now = datetime(2026, 11, 6, 13, 20)
+    bot, sent = _evening_bot(tmp_path, now, soc=60.0, forecast_solar=_SUNNY)
+    _run_at(now, bot._send_plan, "1", {"loads": [{"name": "dryer", "start": 17, "hours": 1.0, "kw": 4.0}]})
+    _run_at(now, bot._send_evening, "1")
+    assert "Your plan adds ~4.0 kWh" in sent["text"] and "68%" in sent["text"]         # 38.5% + 4.0/13.6 = 29 pts
+
+
+def test_evening_short_alert_counts_the_planned_load(tmp_path):
+    from franklinwh_scraper import planned
+    # sunny and 40%: covers the usual night, but not once a 4 kW dryer is on the plan
+    assert _short_alert(tmp_path, soc=40.0, solar=_SUNNY)[0] is None
+    (tmp_path / "p").mkdir()
+    st = {"solar_cal_samples": [4.0, 4.2, 3.9]}
+    planned.set_plan(st, "2026-11-06", [{"name": "dryer", "start": 17.0, "hours": 3.0, "kw": 4.0}])
+    msg, _ = _short_alert(tmp_path / "p", soc=40.0, solar=_SUNNY, state=st)
+    assert msg and "plan" in msg.lower()
+
+
+def test_plan_is_routed_listed_and_pruned():
+    from franklinwh_scraper import chatbot as chatbot_mod
+    import inspect
+    src = inspect.getsource(chatbot_mod)
+    assert "_parse_plan(text)" in src and "/plan " in src
+    assert "planned_loads_" in alerts._DATE_KEYED_PREFIXES
+
+
+def test_evening_short_alert_says_how_much_to_charge_and_by_when(tmp_path):
+    msg, st = _short_alert(tmp_path)
+    assert msg and "Grid top-up" in msg
+    import re
+    kwh = float(re.search(r"~([\d.]+) kWh \(~(\d+) min", msg).group(1))
+    gap_pts = st["evening_short_2026-11-06"]["heavy_pct"] - st["evening_short_2026-11-06"]["proj_pct"]
+    assert abs(kwh - gap_pts / 100 * 13.6) < 0.06                                       # the gap to the heavy level, in kWh
+    assert "$" in msg and "finish by 2 PM" in msg and "start by" in msg
+    _assert_left_aligned(msg)
+
+
+def test_evening_short_alert_says_start_now_when_the_deadline_is_close(tmp_path):
+    from franklinwh_scraper import planned
+    st = {"solar_cal_samples": [4.0, 4.2, 3.9]}
+    planned.set_plan(st, "2026-11-06", [{"name": "oven", "start": 17.0, "hours": 3.0, "kw": 4.0}])   # +12 kWh: ~2 h to charge
+    msg, _ = _short_alert(tmp_path, hour=13, minute=5, state=st)                       # 55 minutes to 2 PM
+    assert msg and "start now" in msg
+
+
+# ── bill pace: this cycle against the last one ────────────────────────────
+
+def _seed_grid(db, start, end, kw):
+    """One reading an hour from `start` through `end` (dates, inclusive) importing `kw` from the grid."""
+    day = start
+    while day <= end:
+        for h in range(24):
+            db._conn.execute(
+                "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,solar_kw,battery_soc,"
+                "grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (datetime(day.year, day.month, day.day, h).isoformat(), day.weekday(), h, kw, 0.0, 50.0, kw,
+                 "normal", 0.0, 0.0))
+        day += timedelta(days=1)
+    db._conn.commit()
+
+
+def _pace_db(tmp_path, last_kw, this_kw, through=None, name="bill.db"):
+    from datetime import date
+    db = HistoryStore(tmp_path / name)
+    _seed_grid(db, date(2026, 10, 20), date(2026, 11, 19), last_kw)                    # the last cycle, whole
+    _seed_grid(db, date(2026, 11, 20), through or date(2026, 12, 6), this_kw)
+    return db
+
+
+_PACE_NOW = datetime(2026, 12, 6, 9, 0)                                                 # a Sunday, day 17 of the cycle
+
+
+def test_cycle_pace_compares_the_projection_to_the_last_cycle(tmp_path):
+    pace = alerts._cycle_pace(_pace_db(tmp_path, 0.5, 2.0), _PACE_NOW, Config())
+    assert pace["days_so_far"] == 17 and pace["cycle_days"] == 30
+    assert pace["projected"] > pace["last_total"] * 2 and pace["change_pct"] > 100
+    assert "Oct 20" in pace["last_label"] and "Nov 19" in pace["last_label"]
+
+
+def test_cycle_pace_needs_a_whole_last_cycle(tmp_path):
+    from datetime import date
+    db = HistoryStore(tmp_path / "short.db")
+    _seed_grid(db, date(2026, 11, 20), date(2026, 12, 6), 1.0)                         # no history before this cycle
+    pace = alerts._cycle_pace(db, _PACE_NOW, Config())
+    assert pace is not None and pace["last_total"] is None and pace["change_pct"] is None
+
+
+def test_bill_pace_alert_warns_when_the_cycle_is_running_well_over(tmp_path):
+    st: dict = {}
+    msg = alerts._alert_bill_pace(st, "2026-12-06", _PACE_NOW, _pace_db(tmp_path, 0.5, 2.0), Config())
+    assert msg and "last cycle" in msg and "/bill" in msg and "%" in msg
+    assert st["bill_pace_week"] == "2026-W49"
+    _assert_left_aligned(msg)
+    assert alerts._alert_bill_pace(st, "2026-12-06", _PACE_NOW, _pace_db(tmp_path, 0.5, 2.0, name="again.db"),
+                                   Config()) is None                                    # once a week
+
+
+def test_bill_pace_alert_is_quiet_when_the_cycle_is_cheaper(tmp_path):
+    assert alerts._alert_bill_pace({}, "2026-12-06", _PACE_NOW, _pace_db(tmp_path, 2.0, 0.5), Config()) is None
+
+
+def test_bill_pace_alert_waits_for_a_week_of_data_and_a_sunday(tmp_path):
+    from datetime import date
+    young = _pace_db(tmp_path, 0.5, 2.0, through=date(2026, 11, 22), name="young.db")     # a Sunday, day 3
+    assert alerts._alert_bill_pace({}, "2026-11-22", datetime(2026, 11, 22, 9, 0), young, Config()) is None
+    full = _pace_db(tmp_path, 0.5, 2.0, name="full.db")
+    assert alerts._alert_bill_pace({}, "2026-12-05", datetime(2026, 12, 5, 9, 0), full, Config()) is None   # a Saturday
+    assert alerts._alert_bill_pace({}, "2026-12-06", datetime(2026, 12, 6, 10, 0), full, Config()) is None  # wrong hour
+
+
+def test_bill_command_shows_the_pace_against_last_cycle(tmp_path):
+    _pace_db(tmp_path, 0.5, 2.0, name="history.db")
+    bot = TelegramChatBot(Config(), api_key="x")
+    bot._outdir = tmp_path
+    sent: dict = {}
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
+    _run_at(_PACE_NOW, bot._send_bill, "1")
+    assert "Last cycle" in sent["text"] and "Oct 20" in sent["text"]
+
+
+def test_bill_pace_is_in_the_dispatch_list():
+    import inspect
+    assert '("bill_pace"' in inspect.getsource(alerts._check_peak_alerts)
+
+
+# ── away mode: the house goes quiet for days ──────────────────────────────
+
+def _away_db(tmp_path, quiet_days=2, history=28, normal=None, today=datetime(2026, 11, 20)):
+    """`history` normal days (~12 kWh, evening peak 2 kW), then `quiet_days` fridge-only days before `today`."""
+    db = HistoryStore(tmp_path / "away.db")
+    usual = normal or {h: (2.0 if 17 <= h <= 21 else 0.5) for h in range(24)}
+    quiet = {h: 0.3 for h in range(24)}
+    for i in range(1, quiet_days + history + 1):
+        _seed_loads(db, (today - timedelta(days=i)).date(), quiet if i <= quiet_days else usual)
+    return db
+
+
+def test_away_detects_days_of_fridge_only_load(tmp_path):
+    from franklinwh_scraper import away
+    got = away.detect(_away_db(tmp_path), datetime(2026, 11, 20).date())
+    assert got and got["days"] == 2 and got["kwh"] < got["usual"] * 0.5
+
+
+def test_away_needs_two_quiet_days_and_a_normal_history(tmp_path):
+    from franklinwh_scraper import away
+    today = datetime(2026, 11, 20).date()
+    assert away.detect(_away_db(tmp_path, quiet_days=1), today) is None                  # one quiet day is just a quiet day
+    (tmp_path / "t").mkdir()
+    assert away.detect(_away_db(tmp_path / "t", history=4), today) is None               # nothing to compare with
+    assert away.detect(None, today) is None
+
+
+def test_away_ignores_quiet_days_with_a_spike(tmp_path):
+    from franklinwh_scraper import away
+    today = datetime(2026, 11, 20)
+    db = _away_db(tmp_path, quiet_days=1)
+    _seed_loads(db, (today - timedelta(days=2)).date(), {h: (2.5 if h == 19 else 0.3) for h in range(24)})
+    assert away.detect(db, today.date()) is None                                         # someone cooked at 7 PM
+
+
+def test_away_sees_you_come_back(tmp_path):
+    from franklinwh_scraper import away
+    today = datetime(2026, 11, 20)
+    db = _away_db(tmp_path)
+    assert away.is_back(db, today.date()) is False
+    _seed_loads(db, today.date(), {7: 0.3, 8: 1.8})
+    assert away.is_back(db, today.date()) is True
+
+
+def test_away_alert_announces_once_and_remembers(tmp_path):
+    now = datetime(2026, 11, 20, 9, 30)
+    db = _away_db(tmp_path)
+    st: dict = {}
+    msg = alerts._alert_away_mode(st, "2026-11-20", now, db)
+    assert msg and "away" in msg.lower() and st["away_since"] == "2026-11-20"
+    _assert_left_aligned(msg)
+    assert alerts._alert_away_mode(st, "2026-11-20", now, db) is None                    # already known
+
+
+def test_away_alert_says_welcome_back_and_clears(tmp_path):
+    now = datetime(2026, 11, 20, 9, 30)
+    db = _away_db(tmp_path)
+    _seed_loads(db, now.date(), {7: 0.3, 8: 1.8})
+    st = {"away_since": "2026-11-18"}
+    msg = alerts._alert_away_mode(st, "2026-11-20", now, db)
+    assert msg and "back" in msg.lower() and "away_since" not in st
+
+
+def test_away_alert_only_checks_in_the_morning(tmp_path):
+    assert alerts._alert_away_mode({}, "2026-11-20", datetime(2026, 11, 20, 15, 0), _away_db(tmp_path)) is None
+
+
+def test_away_mode_silences_the_nags_but_never_the_safety_alerts():
+    cfg = Config()
+    now = datetime(2026, 11, 20, 12, 40)
+    away_state = {"away_since": "2026-11-18"}
+    for name in ("evening_short", "eb_timer", "car_question", "load_question", "ev_charge_window"):
+        assert alerts._alert_enabled(cfg, name, away_state, now) is False
+        assert alerts._alert_enabled(cfg, name, {}, now) is True
+    assert alerts._alert_enabled(cfg, "grid_down", away_state, now) is True
+    assert alerts._alert_enabled(cfg, "fast_drain", away_state, now) is True
+
+
+def test_away_mode_is_in_the_dispatch_list():
+    import inspect
+    assert '("away_mode"' in inspect.getsource(alerts._check_peak_alerts)
+
+
+# ── questions you never answer ────────────────────────────────────────────
+
+def test_question_log_records_asks_and_marks_the_matching_answer():
+    st: dict = {}
+    alerts._log_question(st, "car", "2026-11-05")
+    alerts._log_question(st, "car", "2026-11-06")
+    alerts._mark_question_answered(st, "car", "2026-11-06")
+    alerts._mark_question_answered(st, "car", "2026-11-06")                              # a second tap changes nothing
+    alerts._mark_question_answered(st, "load", "2026-11-06")                             # nothing asked: ignored
+    assert [(e["day"], e["answered"]) for e in st["question_log"]] == [("2026-11-05", False), ("2026-11-06", True)]
+
+
+def test_question_log_is_capped():
+    st: dict = {}
+    for i in range(alerts._QUESTION_LOG_CAP + 25):
+        alerts._log_question(st, "load", f"2026-01-{i % 28 + 1:02d}")
+    assert len(st["question_log"]) == alerts._QUESTION_LOG_CAP
+
+
+def _asked(kind, n, answered, day="2026-11-01"):
+    return [{"kind": kind, "day": day, "answered": i < answered} for i in range(n)]
+
+
+def test_alerts_digest_suggests_muting_a_question_you_never_answer():
+    now = datetime(2026, 11, 8, 12, 0)
+    entries = [{"ts": "2026-11-07T10:00:00", "alert": "car_question", "body": "x"}]
+    text = alerts.alerts_digest(entries, {"question_log": _asked("car", 10, 1)}, now)
+    assert "1 of 10" in text and "car_question" in text and "disabled_alerts" in text
+
+
+def test_alerts_digest_is_quiet_about_questions_you_do_answer_or_barely_got():
+    now = datetime(2026, 11, 8, 12, 0)
+    entries = [{"ts": "2026-11-07T10:00:00", "alert": "car_question", "body": "x"}]
+    assert "of 10" not in alerts.alerts_digest(entries, {"question_log": _asked("car", 10, 6)}, now)
+    assert "of 5" not in alerts.alerts_digest(entries, {"question_log": _asked("car", 5, 0)}, now)   # too few to judge
+    old = {"question_log": _asked("car", 10, 0, day="2026-08-01")}
+    assert "of 10" not in alerts.alerts_digest(entries, old, now)                                    # outside 30 days
+
+
+def test_asking_a_question_logs_it_and_answering_marks_it(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+    bot = TelegramChatBot(Config(), api_key="x")
+    bot._outdir = tmp_path
+    st = {}
+    alerts._log_question(st, "car", "2026-11-06")
+    alerts._log_question(st, "miss", "2026-11-06")
+    alerts._log_question(st, "load", "2026-11-06")
+    alerts._save_peak_state(tmp_path, st)
+    assert bot._set_car_label("2026-11-06", True)[0]
+    assert bot._set_miss_label("2026-11-06", "d")[0]
+    assert bot._set_spike_label("2026-11-06T15:20", "a")[0]
+    assert all(e["answered"] for e in _load_peak_state(tmp_path)["question_log"])
+
+
+def test_the_three_questions_log_themselves_when_asked():
+    import inspect
+    for fn in (alerts._alert_car_question, alerts._alert_load_question, alerts._alert_miss_question):
+        assert "_log_question(" in inspect.getsource(fn)

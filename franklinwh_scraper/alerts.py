@@ -1184,6 +1184,28 @@ def summarize_alert_log(entries: list[dict], now: datetime, days: int) -> list[d
     return sorted(rows.values(), key=lambda r: (-r["count"], r["key"]))
 
 
+_QUESTION_LOG_CAP = 200
+_QUESTION_ALERTS = {"car": "car_question", "load": "load_question", "miss": "miss_question"}
+_DIGEST_QUESTION_MIN = 8           # questions asked in the window before an answer rate means anything
+_DIGEST_QUESTION_SHARE = 0.25      # answered less often than this and it is noise
+
+
+def _log_question(state: dict, kind: str, day: str) -> None:
+    """Remember that a question ("car", "load" or "miss") was asked about `day`, so /alerts can tell
+    which ones you never answer."""
+    log = list(state.get("question_log", []))
+    log.append({"kind": kind, "day": day, "answered": False})
+    state["question_log"] = log[-_QUESTION_LOG_CAP:]
+
+
+def _mark_question_answered(state: dict, kind: str, day: str) -> None:
+    """Mark the oldest unanswered question of this kind and day as answered; no-op when there is none."""
+    for e in state.get("question_log", []):
+        if e.get("kind") == kind and e.get("day") == day and not e.get("answered"):
+            e["answered"] = True
+            return
+
+
 _DIGEST_SNOOZE_MIN = 2             # snoozes before it counts as "you keep snoozing this"
 _DIGEST_SNOOZE_SHARE = 0.2         # ... and at least this share of its alerts
 _DIGEST_NOISY_PER_DAY = 1.5        # a non-safety alert firing more often than this is worth a look
@@ -1222,6 +1244,13 @@ def alerts_digest(entries: list[dict], state: dict, now: datetime, days: int = 3
         elif r["per_day"] >= _DIGEST_NOISY_PER_DAY:
             tips.append(f"{r['key']} fires {r['per_day']:.1f}/day: is it still earning its place? "
                         f"/snooze {r['key']} 24 to test life without it.")
+    for kind, alert_name in _QUESTION_ALERTS.items():
+        recent = [e for e in state.get("question_log", [])
+                  if e.get("kind") == kind and str(e.get("day", "")) >= cutoff.strftime("%Y-%m-%d")]
+        done = sum(1 for e in recent if e.get("answered"))
+        if len(recent) >= _DIGEST_QUESTION_MIN and done / len(recent) < _DIGEST_QUESTION_SHARE:
+            tips.append(f"You answered {done} of {len(recent)} {alert_name} questions. If you don't plan to, "
+                        f"turn it off (add it to disabled_alerts in ~/.franklinwh.json) or /snooze {alert_name} 168.")
     if tips:
         lines.append("Suggestions:")
         lines.extend(tips[:4])
@@ -1291,6 +1320,7 @@ def _alert_miss_question(state: dict, today: str, now: datetime) -> str | None:
         return None
     _mark_alerted(state, "miss_question_date", today)
     state["miss_question_day"] = today
+    _log_question(state, "miss", today)
     h, m = (int(x) for x in pick["slot"].split(":"))
     when = _clock_str(h + m / 60.0)
     return (
@@ -1300,9 +1330,16 @@ def _alert_miss_question(state: dict, today: str, now: datetime) -> str | None:
     )
 
 
+# Prompts and nudges that mean nothing while nobody is home (state["away_since"], set by away_mode).
+_AWAY_QUIET_ALERTS = frozenset({"evening_short", "eb_timer", "car_question", "load_question", "ev_charge_window",
+                                "ev_still_charging", "car_charge_started", "car_on_peak"})
+
+
 def _alert_enabled(cfg: Config, name: str, state: dict, now: datetime) -> bool:
     if name in _ALWAYS_ON_ALERTS:
         return True  # grid outage, fast drain, area outage — /mute never touches these
+    if name in _AWAY_QUIET_ALERTS and state.get("away_since"):
+        return False
     if name in (cfg.disabled_alerts or []):
         return False
     if name in active_snoozes(state, now):
@@ -1394,7 +1431,7 @@ _DATE_KEYED_PREFIXES = (
     "predicted_kwh_", "predicted_avg_ghi_", "predicted_cloudy_", "daily_import_cost_",
     "outages_", "sundown_pred_", "savings_daily_", "soc_7am_pred_",
     "actual_bill_", "perf_ratio_used_", "sundown_shadow_", "daily_plan_", "reserve_plan_", "eb_gate_",
-    "eb_timer_", "evening_short_", "sundown_watch_",
+    "eb_timer_", "evening_short_", "sundown_watch_", "planned_loads_",
 )
 
 
@@ -1902,6 +1939,35 @@ def _what_if_sundown(live, now: datetime, soc: float, cap: float, profile, extra
     return base[0], (with_load[0] if with_load else base[0]), base[1]
 
 
+def _planned_sundown(live, now: datetime, soc: float, cap: float, profile, loads: list[dict],
+                     floor_pct: float, sunset: datetime | None) -> tuple[float, float, datetime] | tuple[None, None, None]:
+    """(sundown % as forecast, sundown % with the loads you planned for today, sundown time), or
+    (None x3) when the solar day is over. The same quiet-load walk as /sundown with each planned
+    load laid over its hours; a load already running counts only for what is left of it."""
+    import dataclasses
+
+    base = _afternoon_scenarios(live, now, soc, cap, profile, None, floor_pct=floor_pct, sunset=sunset)["quiet"]
+    if base is None:
+        return None, None, None
+    one_hour = timedelta(hours=1)
+    hours = list(live.hours)
+    today_idx = [i for i, h in enumerate(hours) if h.dt.date() == now.date() and h.dt + one_hour > now]
+    if profile is not None:
+        for i in today_idx[1:]:
+            quiet = profile.quiet_by_hour.get(hours[i].dt.hour)
+            if quiet is not None:
+                hours[i] = dataclasses.replace(hours[i], predicted_load_kw=quiet)
+    now_h = now.hour + now.minute / 60.0
+    for ld in loads:
+        left = ld["start"] + ld["hours"] - max(ld["start"], now_h)
+        if left <= 0:
+            continue
+        idx = [i for i in today_idx if hours[i].dt.hour >= int(ld["start"])]
+        hours = _add_session_load(hours, idx, base[1], ld["kw"], left)
+    with_plan = _predict_sundown_soc(dataclasses.replace(live, hours=hours), now, soc, cap, floor_pct, sunset)
+    return base[0], (with_plan[0] if with_plan else base[0]), base[1]
+
+
 def _eb_gate_today(state: dict, today: str, now: datetime, outlook, store) -> dict:
     """Is today a cloudy day with a big drop in generation (ebguide.eb_day_gate)? Computed once a
     day and kept in state["eb_gate_<today>"] so the morning plan, the start/stop timer and
@@ -2138,8 +2204,11 @@ def _alert_evening_short(state: dict, today: str, now: datetime, c, cfg, outlook
     raw_pct, sundown_dt, _export = quiet
     proj = max(0.0, min(100.0, raw_pct + _get_sundown_bias(state)))
     margin = ebguide.plan_margin(state.get("plan_log", []))
-    typ = evening.target_pct(me.median_kwh, cap, floor, margin)
-    hvy = evening.target_pct(me.heavy_kwh, cap, floor, margin)
+    from . import planned
+    plan = planned.get_plan(state, today)
+    plan_kwh = planned.evening_kwh(plan)                    # what you said you will run, on top of a usual night
+    typ = evening.target_pct(me.median_kwh + plan_kwh, cap, floor, margin)
+    hvy = evening.target_pct(me.heavy_kwh + plan_kwh, cap, floor, margin)
     if proj >= hvy + _EVENING_ALERT_CUSHION_PTS:
         return None
     _mark_alerted(state, "evening_short_date", today)
@@ -2147,12 +2216,21 @@ def _alert_evening_short(state: dict, today: str, now: datetime, c, cfg, outlook
                                        "heavy_pct": round(hvy, 1), "soc": round(float(c.battery_soc_pct), 1)}
     how = ("under even a typical night" if proj < typ
            else "fine for a typical night, but short for a heavy one")
+    from .advisor import _EB_CHARGE_KW
+    kwh = max(0.0, hvy - proj) / 100.0 * cap                # the gap to the heavy-night level (the sun may add some)
+    minutes = kwh / _EB_CHARGE_KW * 60.0
+    deadline = now.replace(hour=14, minute=0, second=0, microsecond=0)
+    start_by = deadline - timedelta(minutes=minutes)
+    when = ("start now" if start_by <= now else f"start by {start_by.strftime('%-I:%M %p')}") + ", to finish by 2 PM"
+    top_up = (f"Grid top-up: ~{kwh:.1f} kWh (~{minutes:.0f} min), ~${kwh * rate_at(now):.2f} now; {when}.\n")
     return (f"🌆 <b>Tonight may run short</b>\n"
             f"{me.name} evenings use ~{me.median_kwh:.1f} kWh (a heavy one {me.heavy_kwh:.1f}). The forecast has the "
             f"battery at ~{proj:.0f}% at sundown (~{sundown_dt.strftime('%-I:%M %p')}), {how}: "
-            f"you want ~{hvy:.0f}% for a heavy night, ~{typ:.0f}% for a typical one.\n"
-            f"Battery is {c.battery_soc_pct:.0f}% now. Grid power is cheapest until 2 PM, so top up before then; "
-            f"/ebplan shows when to start.")
+            f"you want ~{hvy:.0f}% for a heavy night, ~{typ:.0f}% for a typical one"
+            + (f" (counting your plan: {planned.describe(plan)}).\n" if plan_kwh > 0 else ".\n") +
+            f"Battery is {c.battery_soc_pct:.0f}% now. Grid power is cheapest until 2 PM.\n"
+            f"{top_up}"
+            f"/ebplan shows the full plan.")
 
 
 # ── corrected /sundown projection ────────────────────────────────────
@@ -3303,6 +3381,7 @@ def _alert_car_question(state: dict, today: str, now: datetime, store) -> str | 
     if sess is None:
         return None
     state["car_question_date"] = today
+    _log_question(state, "car", today)
     start = sess["readings"][0][0]
     from . import appliances
     state["car_question_key"] = start.strftime("%Y-%m-%dT%H:%M")
@@ -3361,6 +3440,7 @@ def _alert_load_question(state: dict, today: str, now: datetime, store) -> str |
         state["load_asked"] = (asked + [key])[-60:]
         state["load_question_count"] = {"date": today, "n": n_today + 1}
         state["load_question_key"] = key
+        _log_question(state, "load", key[:10])
         from . import appliances
         appliances.remember_spike(state, key, sp["avg_kw"], sp["minutes"])     # for the "which appliance?" answer
         kwh = sp["avg_kw"] * sp["minutes"] / 60.0
@@ -4976,6 +5056,97 @@ def _alert_self_sufficiency_streak(state: dict, today: str, now: datetime, store
     )
 
 
+def _alert_away_mode(state: dict, today: str, now: datetime, store) -> str | None:
+    """Mornings 8-10: notice that the house has been at standby load for days (away.py) and hold the
+    nags until it picks up again; say so once when it does. Silent otherwise."""
+    if store is None or now.hour not in (8, 9, 10):
+        return None
+    from . import away
+    if state.get("away_since"):
+        if not away.is_back(store, now.date()):
+            return None
+        state.pop("away_since", None)
+        return ("🏠 <b>FranklinWH: welcome back</b>\n"
+                "The house load is back up, so the evening, EB and car prompts are on again.")
+    got = away.detect(store, now.date())
+    if got is None:
+        return None
+    state["away_since"] = today
+    return (f"🏝 <b>FranklinWH: looks like you're away</b>\n"
+            f"The last {got['days']} days used ~{got['kwh']:.1f} kWh a day against your usual ~{got['usual']:.0f}, "
+            f"with nothing running. I'll hold the evening, EB and car prompts until the load picks up again. "
+            f"Grid outage and battery alerts stay on.")
+
+
+def _cycle_net_cost(store, start, through) -> float | None:
+    """Net $ (grid import at the TOU rate, less export credit, plus base service) for the days
+    start..through inclusive, from the recorded readings. None when the readings do not cover the
+    span (the first or last reading more than 2 days from its edge)."""
+    readings = store.weekly_readings(start.strftime("%Y-%m-%d"), through.strftime("%Y-%m-%d"))
+    if not readings:
+        return None
+    try:
+        first = datetime.fromisoformat(readings[0][0]).date()
+        last = datetime.fromisoformat(readings[-1][0]).date()
+    except (TypeError, ValueError):
+        return None
+    if (first - start).days > 2 or (through - last).days > 2:
+        return None
+    import_cost = export_credit = 0.0
+    for dt, hours, grid_kw, _home_kw, _solar_kw in integrate_intervals(readings):
+        if grid_kw > 0:
+            import_cost += grid_kw * hours * rate_at(dt)
+        elif grid_kw < 0:
+            export_credit += -grid_kw * hours * export_rate_at(dt)
+    return import_cost - export_credit + base_service_cost((through - start).days + 1)
+
+
+def _cycle_pace(store, now: datetime, cfg) -> dict | None:
+    """This billing cycle's projected total against the whole last cycle, from the readings (the same
+    math as /bill): {days_so_far, cycle_days, projected, last_total, last_label, change_pct}. last_total
+    and change_pct are None when the last cycle is not fully recorded. None with no data this cycle."""
+    start, end = cycle_bounds(now.date(), getattr(cfg, "billing_cycle_start_day", 20))
+    days_so_far = (now.date() - start).days + 1
+    cycle_days = (end - start).days + 1
+    so_far = _cycle_net_cost(store, start, now.date())
+    if so_far is None or days_so_far < 1:
+        return None
+    projected = so_far / days_so_far * cycle_days
+    p_start, p_end = cycle_bounds(start - timedelta(days=1), getattr(cfg, "billing_cycle_start_day", 20))
+    last_total = _cycle_net_cost(store, p_start, p_end)
+    return {"days_so_far": days_so_far, "cycle_days": cycle_days, "projected": projected,
+            "last_total": last_total,
+            "last_label": f"{p_start.strftime('%b %-d')} – {p_end.strftime('%b %-d')}",
+            "change_pct": None if not last_total else (projected / last_total - 1.0) * 100.0}
+
+
+_BILL_PACE_PCT = 15.0          # warn when the cycle is on pace for this much more than the last one
+_BILL_PACE_MIN_USD = 10.0      # ... and at least this many dollars more
+_BILL_PACE_MIN_DAYS = 7
+
+
+def _alert_bill_pace(state: dict, today: str, now: datetime, store, cfg: Config) -> str | None:
+    """Sunday 9 AM, at most once a week: if the billing cycle is on pace to cost clearly more than the
+    last one, say so while there is still time to change the habit. Silent otherwise."""
+    if store is None or now.weekday() != 6 or now.hour != 9:
+        return None
+    week = now.strftime("%G-W%V")
+    if _already_alerted(state, "bill_pace_week", week):
+        return None
+    pace = _cycle_pace(store, now, cfg)
+    if pace is None or pace["last_total"] is None or pace["days_so_far"] < _BILL_PACE_MIN_DAYS:
+        return None
+    more = pace["projected"] - pace["last_total"]
+    if pace["change_pct"] < _BILL_PACE_PCT or more < _BILL_PACE_MIN_USD:
+        return None
+    _mark_alerted(state, "bill_pace_week", week)
+    return (f"💸 <b>FranklinWH: this bill is running high</b>\n"
+            f"Day {pace['days_so_far']} of {pace['cycle_days']}: on pace for ~${pace['projected']:.0f}, "
+            f"{pace['change_pct']:.0f}% (${more:.0f}) more than last cycle (${pace['last_total']:.0f}, "
+            f"{pace['last_label']}).\n"
+            f"/bill has the breakdown.")
+
+
 def _alert_bill_projection(
     state: dict, today: str, now: datetime, store, cfg: Config,
 ) -> str | None:
@@ -5693,6 +5864,8 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("peak_streak_good",     lambda: _alert_peak_streak_good(state, today, now)),
             ("self_sufficiency_streak", lambda: _alert_self_sufficiency_streak(state, today, now, store)),
             ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store, cfg)),
+            ("bill_pace",            lambda: _alert_bill_pace(state, today, now, store, cfg)),
+            ("away_mode",            lambda: _alert_away_mode(state, today, now, store)),
             ("bill_reconciliation",  lambda: _alert_bill_reconciliation(state, today, now, cfg, store)),
             ("rate_plan_optimality", lambda: _alert_rate_plan_optimality(state, today, now, store)),
             ("heat_wave_prep",       lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),

@@ -291,6 +291,11 @@ def _habit_loads(cfg, now: datetime, state: dict | None = None) -> list[dict]:
     """The loads you usually run today, as {name, start, hours, kw}: the ones configured for this
     weekday (Config.habit_loads), else, given `state`, the ones learned from your answers to
     "what was that?" (appliances.learned_habit_loads)."""
+    if state:
+        from . import planned
+        told = planned.get_plan(state, now.strftime("%Y-%m-%d"))
+        if told:                                    # what you said you will run today beats the habit
+            return told
     weekday = now.strftime("%A").lower()
     items = (getattr(cfg, "habit_loads", None) or {}).get(weekday)
     if not items and state:
@@ -305,6 +310,36 @@ def _habit_loads(cfg, now: datetime, state: dict | None = None) -> list[dict]:
         except (TypeError, ValueError):
             continue
     return out
+
+
+_PLAN_RE = re.compile(r"/plan(?:@\w+)?(?:\s+(.*))?$", re.I)
+
+
+def _parse_plan(text: str) -> dict | None:
+    """Parse '/plan dryer 4pm, oven 5pm for 90m' -> {"loads": [...]}, '/plan clear' -> {"clear": True},
+    a bare '/plan' -> {} (show it). None when it is not a valid /plan command."""
+    m = _PLAN_RE.match(text.strip())
+    if not m:
+        return None
+    rest = (m.group(1) or "").lower().strip()
+    if rest in ("clear", "none", "off", "cancel"):
+        return {"clear": True}
+    if not rest:
+        return {}
+    loads = []
+    for mm in _LOAD_RE.finditer(rest):
+        d_start, d_hours, d_kw = _LOAD_DEFAULTS[mm.group(1)]
+        start = _hour24(mm.group(2), mm.group(3)) if mm.group(2) else d_start
+        if start is None:
+            return None
+        hours = d_hours
+        if mm.group(4):
+            hours = float(mm.group(4)) / (60.0 if mm.group(5).startswith("m") else 1.0)
+        loads.append({"name": mm.group(1), "start": float(start), "hours": hours, "kw": d_kw})
+    leftover = _LOAD_RE.sub(" ", rest).replace(",", " ").replace("and", " ").split()
+    if not loads or leftover:
+        return None
+    return {"loads": loads}
 
 
 def _parse_ebplan(text: str) -> dict | None:
@@ -501,6 +536,7 @@ class TelegramChatBot:
                             "/accuracy — how accurate /sundown and the solar forecast have been\n"
                             "/alerts   — what fired lately, what you snooze, what to turn off\n"
                             "/whatif kW [hours] [from H] — what a load (dryer 3 kW, AC) does to the sundown battery\n"
+                            "/plan dryer 4pm, oven 5pm — tell me what you'll run today; /sundown, /evening and /ebplan count it (/plan clear)\n"
                             "/cardays  — label which recent afternoons were the car\n"
                             "/ebplan [kWh] [load kW] [dryer|oven|ac [H] [Nh]] [from H] [to H|midnight] — EB charge needed for a grid-free window\n"
                             "/ebtarget — Emergency Backup charge target for today\n"
@@ -634,6 +670,10 @@ class TelegramChatBot:
                     _wi = _parse_whatif(text)
                     if _wi is not None:
                         threading.Thread(target=self._send_whatif, args=(chat_id, *_wi), daemon=True).start()
+                        continue
+                    _pl = _parse_plan(text)
+                    if _pl is not None:
+                        threading.Thread(target=self._send_plan, args=(chat_id, _pl), daemon=True).start()
                         continue
                     _ebp = _parse_ebplan(text)
                     if _ebp is not None:
@@ -868,6 +908,16 @@ class TelegramChatBot:
             projected_exp = export_credit / days_so_far * cycle_days
             projected_base = base_service_cost(cycle_days)
             cycle_label   = f"{cycle_start.strftime('%b %-d')} – {now.date().strftime('%b %-d')}"
+            pace_line = ""
+            try:
+                from .alerts import _cycle_pace
+                with HistoryStore(db_path) as pace_store:
+                    pace = _cycle_pace(pace_store, now, self._cfg)
+                if pace is not None and pace["last_total"] is not None:
+                    pace_line = (f"\n\nLast cycle ({pace['last_label']}): ${pace['last_total']:.2f}. This one is on "
+                                 f"pace for <b>{pace['change_pct']:+.0f}%</b>.")
+            except Exception:
+                logger.warning("bill pace line failed", exc_info=True)
             self._send(chat_id,
                 f"💡 <b>Billing Cycle</b> — {cycle_label} ({days_so_far} days)\n"
                 f"Grid import:  ${import_cost:.2f}\n"
@@ -879,6 +929,7 @@ class TelegramChatBot:
                 f"  Export:  ${projected_exp:.2f}\n"
                 f"  Base:    ${projected_base:.2f}\n"
                 f"  Net:     <b>${projected_net:.2f}</b>  (${daily_net:.2f}/day avg)"
+                f"{pace_line}"
             )
         except Exception as e:
             logger.warning("_send_bill error: %s", e)
@@ -1045,6 +1096,57 @@ class TelegramChatBot:
         finally:
             self._tls.capture = None
         return {"text": re.sub(r"<[^>]+>", "", text)}
+
+    def _send_plan(self, chat_id: str, args: dict | None = None) -> None:
+        """/plan: keep the loads you say you will run today (dryer, oven, AC) and show what they do to
+        the sundown battery. Counted by /sundown, /evening, /ebplan and the 12:30 alert (planned.py)."""
+        try:
+            from pathlib import Path
+
+            from . import planned
+            from .alerts import (_afternoon_profile, _effective_reserve_pct, _live_anchored_forecast,
+                                 _load_peak_state, _planned_sundown, _save_peak_state, _state_lock,
+                                 _sunset_today)
+            args = args or {}
+            now = datetime.now()
+            today = now.strftime("%Y-%m-%d")
+            out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+            with _state_lock(out):
+                state = _load_peak_state(out)
+                if args.get("clear"):
+                    planned.clear_plan(state, today)
+                    _save_peak_state(out, state)
+                    self._send(chat_id, "📌 Cleared today's plan.")
+                    return
+                if args.get("loads"):
+                    planned.set_plan(state, today, args["loads"])
+                    _save_peak_state(out, state)
+            loads = planned.get_plan(state, today)
+            if not loads:
+                self._send(chat_id, "📌 Nothing planned for today. Tell me what you'll run, e.g. "
+                                    "/plan dryer 4pm, oven 5pm for 2h (dryer, oven, kitchen and ac are known), "
+                                    "and /sundown, /evening and /ebplan will count it. /plan clear removes it.")
+                return
+            lines = [f"📌 <b>Today's plan:</b> {planned.describe(loads)}"]
+            stats, forecast, outlook, store, state = self._snapshot_for_report()
+            if stats is not None and forecast is not None and getattr(forecast, "hours", None):
+                c = stats.current
+                cap = getattr(self._cfg, "battery_capacity_kwh", 13.6)
+                live = _live_anchored_forecast(state, c, outlook, forecast, store)
+                profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
+                base, with_plan, sundown_dt = _planned_sundown(
+                    live, now, c.battery_soc_pct, cap, profile, loads,
+                    _effective_reserve_pct(self._cfg, store, now), _sunset_today(outlook, now))
+                if base is not None:
+                    lines.append(f"🌇 Sundown (~{sundown_dt.strftime('%-I:%M %p')}): {base:.0f}% → "
+                                 f"<b>{with_plan:.0f}%</b> ({with_plan - base:+.0f} pts) with it.")
+                else:
+                    lines.append("Solar is done for today, so there is no sundown number to change; "
+                                 "/evening and /ebplan still count it.")
+            self._send(chat_id, "\n".join(lines))
+        except Exception as e:
+            logger.warning("_send_plan error: %s", e)
+            self._send(chat_id, f"Error: {e}")
 
     def _send_whatif(self, chat_id: str, extra_kw: float | None, hours: float | None,
                      start_hour: float | None) -> None:
@@ -1230,7 +1332,7 @@ class TelegramChatBot:
 
             from .alerts import (_afternoon_profile, _afternoon_scenarios, _get_sundown_bias,
                                  _effective_reserve_pct, _live_anchored_forecast, _load_peak_state,
-                                 _save_peak_state, _spike_started_today, _start_sundown_watch,
+                                 _planned_sundown, _save_peak_state, _spike_started_today, _start_sundown_watch,
                                  _state_lock, _sundown_band, _sunset_today, _zone_stats)
             from .ebpattern import build_eb_profile
             from .tou import peak_export_hour
@@ -1353,6 +1455,17 @@ class TelegramChatBot:
             if typical is not None and sc["typical"] is not None and abs(sc["typical"][0] - raw_pct) >= 1.5:
                 car_str += (f"\n📊 Counting a typical {typical.weekday_name} afternoon (dryer, cooking): "
                             f"~<b>{_pct(sc['typical'][0]):.0f}%</b>")
+            try:
+                from . import planned
+                told = planned.get_plan(state, now.strftime("%Y-%m-%d"))
+                if told:
+                    _b, with_plan, _dt = _planned_sundown(live_forecast, now, soc, cap, profile, told,
+                                                          _effective_reserve_pct(self._cfg, store, now),
+                                                          _sunset_today(outlook, now))
+                    if with_plan is not None:
+                        car_str += f"\n📌 With your plan ({planned.describe(told)}): ~<b>{_pct(with_plan):.0f}%</b>"
+            except Exception:
+                logger.warning("plan line failed", exc_info=True)
             if eb_profile is not None and sc["with_eb"] is not None:
                 size = f"typically ~{eb_profile.kwh:.1f} kWh from the grid"
                 if eb_profile.kwh_lo is not None:
@@ -1424,7 +1537,10 @@ class TelegramChatBot:
             def level(kwh: float) -> float:
                 return evening.target_pct(kwh, cap, floor, margin)
 
-            typ, hvy = level(me.median_kwh), level(me.heavy_kwh)
+            from . import planned
+            plan = planned.get_plan(state, now.strftime("%Y-%m-%d"))
+            plan_kwh = planned.evening_kwh(plan)
+            typ, hvy = level(me.median_kwh + plan_kwh), level(me.heavy_kwh + plan_kwh)
             a, b, c3 = me.segments
             lines = [f"🌆 <b>{me.name} evening, 4 PM–midnight</b>",
                      f"Typical <b>{me.median_kwh:.1f} kWh</b>; a heavy night {me.heavy_kwh:.1f}. Your {me.n} "
@@ -1433,6 +1549,9 @@ class TelegramChatBot:
                      f"{me.heavy_nights} of {me.n} were big (over {evening.HEAVY_NIGHT_KWH:.0f} kWh: dryer, oven or car).",
                      f"🎯 Have at sundown: <b>{typ:.0f}%</b> for a typical night, <b>{hvy:.0f}%</b> for a heavy one "
                      f"(floor {floor:.0f}% + {margin:.0f}-pt margin)."]
+            if plan_kwh > 0:
+                lines.append(f"📌 Your plan adds ~{plan_kwh:.1f} kWh after 4 PM ({planned.describe(plan)}), "
+                             "counted in those levels.")
 
             extra = " from the grid before 2 PM, when it is cheapest" if now.hour < 14 else ""
             soc = None
@@ -2033,7 +2152,7 @@ class TelegramChatBot:
         from datetime import datetime as _dt
         from pathlib import Path
 
-        from .alerts import _SPIKE_CATEGORIES, _save_peak_state, _state_lock
+        from .alerts import _SPIKE_CATEGORIES, _mark_question_answered, _save_peak_state, _state_lock
         category = _SPIKE_CATEGORIES.get(code)
         try:
             _dt.fromisoformat(key)
@@ -2047,6 +2166,7 @@ class TelegramChatBot:
             labels = state.get("load_labels", {})
             labels[key] = category
             state["load_labels"] = {k: labels[k] for k in sorted(labels)[-200:]}
+            _mark_question_answered(state, "load", key[:10])
             _save_peak_state(out, state)
         return True, f"Noted: {key.replace('T', ' ')} was {category}."
 
@@ -2056,7 +2176,7 @@ class TelegramChatBot:
         from datetime import date as _date
         from pathlib import Path
 
-        from .alerts import _MISS_CAUSES, _save_peak_state, _state_lock
+        from .alerts import _MISS_CAUSES, _mark_question_answered, _save_peak_state, _state_lock
         cause = _MISS_CAUSES.get(code)
         try:
             _date.fromisoformat(day)
@@ -2070,6 +2190,7 @@ class TelegramChatBot:
             labels = state.get("miss_labels", {})
             labels[day] = cause
             state["miss_labels"] = {d: labels[d] for d in sorted(labels)[-180:]}
+            _mark_question_answered(state, "miss", day)
             for r in state.get("sundown_resid", []):
                 if r.get("day") == day:
                     r["cause"] = cause
@@ -2087,7 +2208,7 @@ class TelegramChatBot:
         from datetime import date as _date
         from pathlib import Path
 
-        from .alerts import _save_peak_state, _state_lock
+        from .alerts import _mark_question_answered, _save_peak_state, _state_lock
         try:
             _date.fromisoformat(day)
         except ValueError:
@@ -2098,6 +2219,7 @@ class TelegramChatBot:
             labels = state.get("car_day_labels", {})
             labels[day] = was_car
             state["car_day_labels"] = {d: labels[d] for d in sorted(labels)[-180:]}
+            _mark_question_answered(state, "car", day)
             _save_peak_state(out, state)
         return True, (f"🚗 Counted {day} as a car day." if was_car
                       else f"🔌 Noted — {day} was not the car.")
