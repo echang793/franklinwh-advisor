@@ -20,6 +20,11 @@ MAX_FACTS = 40
 MAX_EVENTS = 300
 
 
+def choices() -> list[tuple[str, str]]:
+    """(code, button text) for each answer to "which appliance?"."""
+    return list(_LABELS.items())
+
+
 def buttons(key: str) -> list[dict]:
     """Answers to "which appliance?" for the spike starting at `key` (callback apl:<key>:<code>)."""
     return [{"text": text, "callback_data": f"apl:{key}:{code}"} for code, text in _LABELS.items()]

@@ -13214,3 +13214,254 @@ def test_the_three_questions_log_themselves_when_asked():
     import inspect
     for fn in (alerts._alert_car_question, alerts._alert_load_question, alerts._alert_miss_question):
         assert "_log_question(" in inspect.getsource(fn)
+
+
+# ── loadevents: the big loads you run, learned from the load history ─────
+
+def _event_day(extra=None):
+    """A quiet afternoon (0.4 kW from noon to 11 PM) with `extra` {hour: kW} loads laid over it."""
+    d = {h: 0.4 for h in range(12, 23)}
+    d.update(extra or {})
+    return d
+
+
+def _events_db(tmp_path, today=datetime(2026, 11, 15), weeks=8, dryer_weeks=(0, 2, 4, 6), oven_weeks=(), car_weeks=()):
+    """`weeks` past Sundays; the listed ones (0 = the most recent) have a dryer at 3 PM, an oven at 5 PM, or
+    a long car session. Plus a quiet Monday each week."""
+    db = HistoryStore(tmp_path / "ev.db")
+    for w in range(weeks):
+        sunday = (today - timedelta(days=7 * (w + 1))).date()
+        extra = {}
+        if w in dryer_weeks:
+            extra[15] = 4.5
+        if w in oven_weeks:
+            extra[17] = 2.4
+        if w in car_weeks:
+            extra.update({h: 7.4 for h in range(13, 18)})
+        _seed_loads(db, sunday, _event_day(extra))
+        _seed_loads(db, sunday + timedelta(days=1), _event_day())
+    return db
+
+
+def _readings(day, spec):
+    """5-minute (timestamp, kW) readings from 12:00 to 23:00 on `day`: spec is {(start_min_of_day, end_min): kW},
+    everything else 0.4."""
+    out = []
+    for minute in range(12 * 60, 23 * 60, 5):
+        kw = next((v for (a, z), v in spec.items() if a <= minute < z), 0.4)
+        out.append((datetime(day.year, day.month, day.day, minute // 60, minute % 60).isoformat(), kw))
+    return out
+
+
+def test_load_blocks_find_the_dryer_and_merge_an_ovens_cycling(tmp_path):
+    from franklinwh_scraper import loadevents
+    day = datetime(2026, 11, 8).date()
+    spec = {(15 * 60, 16 * 60): 4.5,                                                       # dryer, an hour
+            (17 * 60, 17 * 60 + 20): 2.6, (17 * 60 + 45, 18 * 60 + 15): 2.6}               # oven: a 25-minute dip between
+    dryer, oven = loadevents.day_blocks(_readings(day, spec))
+    assert dryer["start"] == 15.0 and dryer["minutes"] == 60 and abs(dryer["kw"] - 4.1) < 0.2
+    assert oven["start"] == 17.0 and 70 <= oven["minutes"] <= 85 and abs(oven["kw"] - 2.2) < 0.2
+
+
+def test_load_blocks_skip_a_car_session_and_tiny_blips(tmp_path):
+    from franklinwh_scraper import loadevents
+    day = datetime(2026, 11, 8).date()
+    assert loadevents.day_blocks(_readings(day, {(13 * 60, 18 * 60): 7.4})) == []         # 5 hours at 7.4 kW
+    assert loadevents.day_blocks(_readings(day, {(15 * 60, 15 * 60 + 10): 4.5})) == []    # a 10-minute blip
+
+
+def test_loadevents_learn_how_often_and_when_you_run_the_dryer(tmp_path):
+    from franklinwh_scraper import loadevents
+    learned = loadevents.learn(_events_db(tmp_path), datetime(2026, 11, 15).date())
+    assert 0 not in learned and 1 not in learned                                          # Monday is quiet
+    (ev,) = learned[6]                                                                     # Sunday
+    assert ev.start == 15.0 and ev.days == 4 and ev.of == 8 and abs(ev.share - 0.5) < 1e-6
+    assert abs(ev.kw - 4.1) < 0.2 and abs(ev.hours - 1.0) < 0.1
+
+
+def test_loadevents_need_enough_days_and_share(tmp_path):
+    from franklinwh_scraper import loadevents
+    today = datetime(2026, 11, 15).date()
+    assert loadevents.learn(_events_db(tmp_path, dryer_weeks=(0, 1)), today) == {}       # twice is not a habit
+    (tmp_path / "s").mkdir()
+    assert loadevents.learn(_events_db(tmp_path / "s", weeks=12, dryer_weeks=(9, 10, 11)), today) == {}   # 3 old ones of 12
+
+
+def test_loadevents_find_both_loads_and_leave_out_car_days(tmp_path):
+    from franklinwh_scraper import loadevents
+    today = datetime(2026, 11, 15).date()
+    db = _events_db(tmp_path, dryer_weeks=(0, 1, 2, 3), oven_weeks=(0, 1, 2, 3), car_weeks=(4,))
+    got = loadevents.learn(db, today)[6]
+    assert [e.start for e in got] == [15.0, 17.0]
+    car_day = (today - timedelta(days=7 * 5)).isoformat()
+    again = loadevents.learn(db, today, car_days={car_day: True})
+    assert again[6][0].of == 7 and car_day not in str(again)                              # the car day is not an occurrence
+
+
+def test_loadevents_ignore_days_the_house_was_not_recorded(tmp_path):
+    from franklinwh_scraper import loadevents
+    sparse = HistoryStore(tmp_path / "sparse.db")
+    sparse._conn.execute("INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,solar_kw,battery_soc,"
+                         "grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         ("2026-11-08T15:00:00", 6, 15, 4.5, 0, 50, 0, "normal", 0, 0))
+    sparse._conn.commit()
+    assert loadevents.learn(sparse, datetime(2026, 11, 15).date()) == {}
+    assert loadevents.learn(None, datetime(2026, 11, 15).date()) == {}
+
+
+def test_sundown_shows_the_outcome_on_your_usual_sunday(tmp_path):
+    now = datetime(2026, 11, 15, 11, 0)
+    bot, sent = _evening_bot(tmp_path, now, soc=60.0, forecast_solar=_SUNNY)
+    bot._hist_store = _events_db(tmp_path, today=datetime(2026, 11, 15))
+    _run_at(now, bot._send_sundown, "1")
+    assert "usual Sunday" in sent["text"] and "50%" in sent["text"]                        # "4 kW at 3 PM on 50% of Sundays"
+
+
+def test_sundown_has_no_usual_day_line_without_a_learned_pattern(tmp_path):
+    now = datetime(2026, 11, 15, 11, 0)
+    bot, sent = _evening_bot(tmp_path, now, soc=60.0, forecast_solar=_SUNNY)
+    _run_at(now, bot._send_sundown, "1")
+    assert "usual Sunday" not in sent["text"]
+
+
+def test_habits_command_lists_what_it_learned(tmp_path):
+    now = datetime(2026, 11, 15, 11, 0)
+    bot, sent = _evening_bot(tmp_path, now)
+    bot._hist_store = _events_db(tmp_path, today=datetime(2026, 11, 15))
+    _run_at(now, bot._send_habits, "1")
+    assert "Sunday" in sent["text"] and "3–4 PM" in sent["text"] and "4 of 8" in sent["text"]
+    _assert_left_aligned(sent["text"])
+
+
+def test_habits_command_says_so_when_nothing_is_learned_yet(tmp_path):
+    now = datetime(2026, 11, 15, 11, 0)
+    bot, sent = _evening_bot(tmp_path, now)
+    _run_at(now, bot._send_habits, "1")
+    assert "Nothing" in sent["text"]
+
+
+def test_ebplan_prefers_the_learned_loads_and_falls_back_to_config(tmp_path):
+    from franklinwh_scraper.chatbot import _habit_loads
+    now = datetime(2026, 11, 15, 10, 0)
+    db = _events_db(tmp_path, dryer_weeks=(0, 1, 2, 3, 4, 5))                              # 75% of Sundays
+    cfg = Config(habit_loads={"sunday": [["oven", "17:00", 1.5, 2.0]]})
+    got = _habit_loads(cfg, now, {}, db)
+    assert [ld["name"] for ld in got] == ["usual load"] and got[0]["start"] == 15.0         # the data leads
+    assert [ld["name"] for ld in _habit_loads(cfg, now, {}, None)] == ["oven"]              # nothing learned: the config
+    (tmp_path / "w").mkdir()
+    weak = _events_db(tmp_path / "w", dryer_weeks=(0, 2, 4, 6))
+    assert _habit_loads(Config(), now, {}, weak) == []                                      # 50% is not "usual" for /ebplan
+
+
+def test_loadevents_weigh_the_last_month_more_than_older_weeks(tmp_path):
+    from franklinwh_scraper import loadevents
+    today = datetime(2026, 11, 15).date()
+    started = loadevents.learn(_events_db(tmp_path, dryer_weeks=(0, 1, 2, 3)), today)[6][0]     # the 4 newest of 8
+    (tmp_path / "o").mkdir()
+    stopped = loadevents.learn(_events_db(tmp_path / "o", dryer_weeks=(4, 5, 6, 7)), today)[6][0]  # the 4 oldest
+    assert started.share > 0.6 > 0.4 > stopped.share
+    assert started.days == stopped.days == 4                                                  # counts stay plain
+
+
+def test_habits_is_routed_and_listed():
+    from franklinwh_scraper import chatbot as chatbot_mod
+    import inspect
+    src = inspect.getsource(chatbot_mod)
+    assert '"/habits": self._send_habits' in src and "/habits  —" in src
+
+
+# ── naming a routine: the one question it asks ───────────────────────────
+
+def _strong_sundays(tmp_path):
+    return _events_db(tmp_path, dryer_weeks=(0, 1, 2, 3, 4, 5))                            # 6 of 8 Sundays
+
+
+def test_pattern_question_asks_about_a_strong_unnamed_routine_once(tmp_path):
+    now = datetime(2026, 11, 15, 20, 10)
+    db = _strong_sundays(tmp_path)
+    st: dict = {}
+    msg = alerts._alert_pattern_question(st, "2026-11-15", now, db)
+    assert msg and "6 of the last 8 Sundays" in msg and "3 PM" in msg and "What is it" in msg
+    _assert_left_aligned(msg)
+    assert st["pattern_asked"] == ["6:15"]
+    assert [(e["kind"], e["answered"]) for e in st["question_log"]] == [("pattern", False)]
+    assert alerts._alert_pattern_question(st, "2026-11-15", now, db) is None                 # asked already
+
+
+def test_pattern_question_stays_quiet_when_it_should(tmp_path):
+    db = _strong_sundays(tmp_path)
+    now = datetime(2026, 11, 15, 20, 10)
+    assert alerts._alert_pattern_question({}, "2026-11-15", datetime(2026, 11, 15, 14, 0), db) is None   # wrong hour
+    assert alerts._alert_pattern_question({}, "2026-11-15", now, None) is None
+    assert alerts._alert_pattern_question({"pattern_names": {"6:15": "dryer"}}, "2026-11-15", now, db) is None
+    (tmp_path / "w").mkdir()
+    weak = _events_db(tmp_path / "w", dryer_weeks=(1, 5, 6, 7))                              # 5 of 12 weighted: not regular enough yet
+    assert alerts._alert_pattern_question({}, "2026-11-15", now, weak) is None
+
+
+def test_pattern_buttons_carry_the_key_and_the_appliance():
+    cbs = {b["callback_data"] for b in alerts._pattern_question_buttons("6:15")}
+    assert "pat:6:15:d" in cbs and "pat:6:15:o" in cbs and all(len(c) <= 64 for c in cbs)
+
+
+def test_naming_a_routine_stores_it_and_marks_the_question_answered(tmp_path):
+    from franklinwh_scraper.alerts import _load_peak_state
+    bot = TelegramChatBot(Config(), api_key="x")
+    bot._outdir = tmp_path
+    st: dict = {}
+    alerts._log_question(st, "pattern", "2026-11-15")
+    alerts._save_peak_state(tmp_path, st)
+    ok, reply = bot._set_pattern_name("6:15", "d")
+    assert ok and "dryer" in reply
+    got = _load_peak_state(tmp_path)
+    assert got["pattern_names"] == {"6:15": "dryer"} and got["question_log"][0]["answered"] is True
+    assert bot._set_pattern_name("6:15", "z")[0] is False and bot._set_pattern_name("junk", "d")[0] is False
+
+
+def test_a_named_routine_shows_its_name_in_habits_and_sundown(tmp_path):
+    now = datetime(2026, 11, 15, 11, 0)
+    bot, sent = _evening_bot(tmp_path, now, soc=60.0, forecast_solar=_SUNNY)
+    bot._hist_store = _strong_sundays(tmp_path)
+    alerts._save_peak_state(tmp_path, {"solar_cal_samples": [4.0, 4.2, 3.9], "pattern_names": {"6:15": "dryer"}})
+    _run_at(now, bot._send_habits, "1")
+    assert "dryer" in sent["text"]
+    _run_at(now, bot._send_sundown, "1")
+    assert "dryer" in sent["text"]
+
+
+def test_pattern_question_is_wired_into_the_dispatch_buttons_and_callbacks():
+    import inspect
+    from franklinwh_scraper import chatbot as chatbot_mod
+    assert '("pattern_question"' in inspect.getsource(alerts._check_peak_alerts)
+    assert "_pattern_question_buttons" in inspect.getsource(alerts._check_peak_alerts)
+    assert 'startswith("pat:")' in inspect.getsource(chatbot_mod)
+    assert "pattern_question" in alerts._AWAY_QUIET_ALERTS and "pattern" in alerts._QUESTION_ALERTS
+
+
+# ── the 12:30 alert counts the routine loads still to come before sundown ─
+
+def _habit_short(tmp_path, soc, with_habit, sun=0.5):
+    """A Friday 12:35 with a quiet history, plus (with_habit) a 4.5 kW dryer hour at 2 PM on every Friday."""
+    db = HistoryStore(tmp_path / ("hh.db" if with_habit else "hq.db"))
+    now = datetime(2026, 11, 6, 12, 35)
+    for i in range(1, 11 * 7):
+        day = (now - timedelta(days=i)).date()
+        d = _quiet_day()
+        if with_habit and day.weekday() == 4:
+            d[14] = 4.5
+        _seed_loads(db, day, d)
+    st = {"solar_cal_samples": [4.0, 4.2, 3.9]}
+    fc = _day_forecast(now.date(), {h: kw * sun for h, kw in _SUNNY.items()}, load=0.8, start_hour=7)
+    msg = alerts._alert_evening_short(st, "2026-11-06", now, _tracker_c(soc), Config(battery_capacity_kwh=13.6),
+                                      _GateOutlook(False, 25.0), fc, db)
+    return msg, st
+
+
+def test_evening_short_alert_counts_your_usual_afternoon_load(tmp_path):
+    for soc in range(5, 70, 3):
+        quiet_msg, _ = _habit_short(tmp_path, soc, with_habit=False)
+        habit_msg, _st = _habit_short(tmp_path, soc, with_habit=True)
+        if quiet_msg is None and habit_msg is not None:
+            assert "usual" in habit_msg                                                       # says it counted the routine
+            return
+    raise AssertionError("no battery level showed the habit changing the alert")

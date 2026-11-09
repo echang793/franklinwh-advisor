@@ -287,7 +287,7 @@ _LOAD_RE = re.compile(
     r"(?:\s+(?:for\s+)?(\d+(?:\.\d+)?)\s*(h|hr|hrs|m|min)\b)?")
 
 
-def _habit_loads(cfg, now: datetime, state: dict | None = None) -> list[dict]:
+def _habit_loads(cfg, now: datetime, state: dict | None = None, store=None) -> list[dict]:
     """The loads you usually run today, as {name, start, hours, kw}: the ones configured for this
     weekday (Config.habit_loads), else, given `state`, the ones learned from your answers to
     "what was that?" (appliances.learned_habit_loads)."""
@@ -296,6 +296,15 @@ def _habit_loads(cfg, now: datetime, state: dict | None = None) -> list[dict]:
         told = planned.get_plan(state, now.strftime("%Y-%m-%d"))
         if told:                                    # what you said you will run today beats the habit
             return told
+    if store is not None:
+        # The loads the history says you run on most of these days lead; what you typed or labelled
+        # is the fallback for a day nothing has been learned for.
+        from . import loadevents
+        names = (state or {}).get("pattern_names")
+        usual = [e for e in loadevents.learn(store, now.date(), (state or {}).get("car_day_labels"))
+                 .get(now.weekday(), []) if e.share >= loadevents.USUAL_SHARE]
+        if usual:
+            return [e.as_load(loadevents.name_for(names, e)) for e in usual]
     weekday = now.strftime("%A").lower()
     items = (getattr(cfg, "habit_loads", None) or {}).get(weekday)
     if not items and state:
@@ -536,6 +545,7 @@ class TelegramChatBot:
                             "/accuracy — how accurate /sundown and the solar forecast have been\n"
                             "/alerts   — what fired lately, what you snooze, what to turn off\n"
                             "/whatif kW [hours] [from H] — what a load (dryer 3 kW, AC) does to the sundown battery\n"
+                            "/habits  — the big loads (dryer, oven) your history says you run, by weekday\n"
                             "/plan dryer 4pm, oven 5pm — tell me what you'll run today; /sundown, /evening and /ebplan count it (/plan clear)\n"
                             "/cardays  — label which recent afternoons were the car\n"
                             "/ebplan [kWh] [load kW] [dryer|oven|ac [H] [Nh]] [from H] [to H|midnight] — EB charge needed for a grid-free window\n"
@@ -663,7 +673,7 @@ class TelegramChatBot:
                     _cmd = text.lower().strip().split("@")[0]
                     _simple = {"/accuracy": self._send_accuracy, "/today": self._send_today,
                                "/reserve": self._send_reserve, "/alerts": self._send_alerts,
-                               "/evening": self._send_evening}.get(_cmd)
+                               "/evening": self._send_evening, "/habits": self._send_habits}.get(_cmd)
                     if _simple is not None:
                         threading.Thread(target=_simple, args=(chat_id,), daemon=True).start()
                         continue
@@ -1097,6 +1107,30 @@ class TelegramChatBot:
             self._tls.capture = None
         return {"text": re.sub(r"<[^>]+>", "", text)}
 
+    def _send_habits(self, chat_id: str) -> None:
+        """/habits: the big loads the history says you run, by weekday (loadevents.py)."""
+        try:
+            from . import loadevents, planned
+            _stats, _fc, _ol, store, state = self._snapshot_for_report()
+            learned = loadevents.learn(store, datetime.now().date(), state.get("car_day_labels"))
+            if not learned:
+                self._send(chat_id, f"Nothing learned yet. A load counts once it shows up {loadevents.MIN_DAYS}+ times "
+                                    f"on at least {loadevents.MIN_SHARE * 100:.0f}% of a weekday, over the last "
+                                    f"{loadevents.LOOKBACK_DAYS} days.")
+                return
+            lines = ["🔁 <b>Loads you usually run</b> (from the load history, last "
+                     f"{loadevents.LOOKBACK_DAYS} days)"]
+            for wd in sorted(learned):
+                name = datetime(2000, 1, 3 + wd).strftime("%A")
+                for e in learned[wd]:
+                    label = loadevents.name_for(state.get("pattern_names"), e)
+                    lines.append(f"<b>{name}</b> {label} {planned.span(e.as_load())}: ~{e.kw:.1f} kW for {e.hours:.1f} h, "
+                                 f"{e.days} of {e.of} ({e.share * 100:.0f}%)")
+            self._send(chat_id, "\n".join(lines))
+        except Exception as e:
+            logger.warning("_send_habits error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
     def _send_plan(self, chat_id: str, args: dict | None = None) -> None:
         """/plan: keep the loads you say you will run today (dryer, oven, AC) and show what they do to
         the sundown battery. Counted by /sundown, /evening, /ebplan and the 12:30 alert (planned.py)."""
@@ -1466,6 +1500,25 @@ class TelegramChatBot:
                         car_str += f"\n📌 With your plan ({planned.describe(told)}): ~<b>{_pct(with_plan):.0f}%</b>"
             except Exception:
                 logger.warning("plan line failed", exc_info=True)
+            try:
+                from . import loadevents, planned
+                if not planned.get_plan(state, now.strftime("%Y-%m-%d")):
+                    now_h = now.hour + now.minute / 60.0
+                    names = state.get("pattern_names")
+                    usual = [e for e in loadevents.learn(store, now.date(), state.get("car_day_labels"))
+                             .get(now.weekday(), []) if e.start + e.hours > now_h]
+                    if usual:
+                        _b, with_usual, _dt = _planned_sundown(
+                            live_forecast, now, soc, cap, profile,
+                            [e.as_load(loadevents.name_for(names, e)) for e in usual],
+                            _effective_reserve_pct(self._cfg, store, now), _sunset_today(outlook, now))
+                        if with_usual is not None:
+                            wd = now.strftime("%A")
+                            parts = ", ".join(f"{loadevents.name_for(names, e)} {e.kw:.0f} kW at {planned.clock(e.start)}, "
+                                              f"{e.share * 100:.0f}% of {wd}s" for e in usual)
+                            car_str += f"\n🔁 If it's your usual {wd} ({parts}): ~<b>{_pct(with_usual):.0f}%</b>"
+            except Exception:
+                logger.warning("usual-day line failed", exc_info=True)
             if eb_profile is not None and sc["with_eb"] is not None:
                 size = f"typically ~{eb_profile.kwh:.1f} kWh from the grid"
                 if eb_profile.kwh_lo is not None:
@@ -1864,7 +1917,7 @@ class TelegramChatBot:
             usual = False
             typical = None
             if not loads:
-                loads = _habit_loads(cfg, now, state)
+                loads = _habit_loads(cfg, now, state, store)
                 usual = bool(loads)
             if not loads and args.get("load_kw") is None:
                 # Nothing named and no house load given: what this weekday usually looks like, learned.
@@ -2090,6 +2143,13 @@ class TelegramChatBot:
                 if code == "a":
                     self._ask_appliance(chat_id, key)
             return
+        if data.startswith("pat:"):
+            key, _, code = data[4:].rpartition(":")
+            ok, reply = self._set_pattern_name(key, code)
+            self._answer_callback_query(cq_id, "Got it" if ok else "Can't read that")
+            if ok:
+                self._send(chat_id, reply)
+            return
         if data.startswith("apl:"):
             key, _, code = data[4:].rpartition(":")
             ok, reply = self._set_appliance(key, code)
@@ -2146,6 +2206,26 @@ class TelegramChatBot:
                 return False, ""
             _save_peak_state(out, state)
         return True, f"Noted: that was the {name}." if name != "other" else "Noted."
+
+    def _set_pattern_name(self, key: str, code: str) -> tuple[bool, str]:
+        """Name a routine load ("6:15" = Sundays around 3 PM) as the dryer, the oven and so on."""
+        from pathlib import Path
+
+        from . import appliances
+        from .alerts import _mark_question_answered, _save_peak_state, _state_lock
+        name = appliances.NAMES.get(code)
+        if name is None or not re.fullmatch(r"[0-6]:\d{1,2}", key):
+            return False, ""
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        with _state_lock(out):
+            state = _load_peak_state(out)
+            names = state.get("pattern_names", {})
+            names[key] = name
+            state["pattern_names"] = dict(list(names.items())[-40:])
+            _mark_question_answered(state, "pattern")
+            _save_peak_state(out, state)
+        weekday = datetime(2000, 1, 3 + int(key.split(":")[0])).strftime("%A")
+        return True, f"Noted: the {weekday} {key.split(':')[1]}:00 routine is the {name}."
 
     def _set_spike_label(self, key: str, code: str) -> tuple[bool, str]:
         """Record what a big spike (identified by its start, YYYY-MM-DDTHH:MM) was."""

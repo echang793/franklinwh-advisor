@@ -57,11 +57,18 @@ def _clock(hour: float) -> tuple[str, str]:
     return label, "AM" if h < 12 else "PM"
 
 
+def clock(hour: float) -> str:
+    """A clock hour as "3 PM" or "3:30 PM"."""
+    label, mer = _clock(hour)
+    return f"{label} {mer}"
+
+
+def span(load: dict) -> str:
+    """When a load runs: "4–5 PM", or "11 AM–1 PM" across noon."""
+    (a, a_mer), (b, b_mer) = _clock(load["start"]), _clock(load["start"] + load["hours"])
+    return f"{a if a_mer == b_mer else f'{a} {a_mer}'}–{b} {b_mer}"
+
+
 def describe(loads: list[dict]) -> str:
     """"dryer 4–5 PM (4 kW), oven 5–7 PM (2.5 kW)"."""
-    parts = []
-    for ld in loads:
-        (a, a_mer), (b, b_mer) = _clock(ld["start"]), _clock(ld["start"] + ld["hours"])
-        start = a if a_mer == b_mer else f"{a} {a_mer}"
-        parts.append(f"{ld['name']} {start}–{b} {b_mer} ({ld['kw']:g} kW)")
-    return ", ".join(parts)
+    return ", ".join(f"{ld['name']} {span(ld)} ({ld['kw']:g} kW)" for ld in loads)

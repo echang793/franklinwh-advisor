@@ -1185,7 +1185,8 @@ def summarize_alert_log(entries: list[dict], now: datetime, days: int) -> list[d
 
 
 _QUESTION_LOG_CAP = 200
-_QUESTION_ALERTS = {"car": "car_question", "load": "load_question", "miss": "miss_question"}
+_QUESTION_ALERTS = {"car": "car_question", "load": "load_question", "miss": "miss_question",
+                    "pattern": "pattern_question"}
 _DIGEST_QUESTION_MIN = 8           # questions asked in the window before an answer rate means anything
 _DIGEST_QUESTION_SHARE = 0.25      # answered less often than this and it is noise
 
@@ -1198,10 +1199,11 @@ def _log_question(state: dict, kind: str, day: str) -> None:
     state["question_log"] = log[-_QUESTION_LOG_CAP:]
 
 
-def _mark_question_answered(state: dict, kind: str, day: str) -> None:
-    """Mark the oldest unanswered question of this kind and day as answered; no-op when there is none."""
+def _mark_question_answered(state: dict, kind: str, day: str | None = None) -> None:
+    """Mark the oldest unanswered question of this kind (and day, when given) as answered; no-op when
+    there is none."""
     for e in state.get("question_log", []):
-        if e.get("kind") == kind and e.get("day") == day and not e.get("answered"):
+        if e.get("kind") == kind and (day is None or e.get("day") == day) and not e.get("answered"):
             e["answered"] = True
             return
 
@@ -1331,7 +1333,8 @@ def _alert_miss_question(state: dict, today: str, now: datetime) -> str | None:
 
 
 # Prompts and nudges that mean nothing while nobody is home (state["away_since"], set by away_mode).
-_AWAY_QUIET_ALERTS = frozenset({"evening_short", "eb_timer", "car_question", "load_question", "ev_charge_window",
+_AWAY_QUIET_ALERTS = frozenset({"evening_short", "eb_timer", "car_question", "load_question", "pattern_question",
+                                "ev_charge_window",
                                 "ev_still_charging", "car_charge_started", "car_on_peak"})
 
 
@@ -2204,8 +2207,19 @@ def _alert_evening_short(state: dict, today: str, now: datetime, c, cfg, outlook
     raw_pct, sundown_dt, _export = quiet
     proj = max(0.0, min(100.0, raw_pct + _get_sundown_bias(state)))
     margin = ebguide.plan_margin(state.get("plan_log", []))
-    from . import planned
+    from . import loadevents, planned
     plan = planned.get_plan(state, today)
+    usual_note = ""
+    if not plan:                    # loads you run on most of these days and have not run yet count too
+        now_h = now.hour + now.minute / 60.0
+        usual = [e for e in loadevents.learn(store, now.date(), state.get("car_day_labels")).get(now.weekday(), [])
+                 if e.share >= loadevents.USUAL_SHARE and e.start + e.hours > now_h]
+        if usual:
+            _b, with_usual, _dt = _planned_sundown(live, now, c.battery_soc_pct, cap, profile,
+                                                   [e.as_load() for e in usual], floor, _sunset_today(outlook, now))
+            if with_usual is not None:
+                proj = max(0.0, min(100.0, with_usual + _get_sundown_bias(state)))
+                usual_note = f" (counting your usual {now.strftime('%A')} load)"
     plan_kwh = planned.evening_kwh(plan)                    # what you said you will run, on top of a usual night
     typ = evening.target_pct(me.median_kwh + plan_kwh, cap, floor, margin)
     hvy = evening.target_pct(me.heavy_kwh + plan_kwh, cap, floor, margin)
@@ -2225,7 +2239,7 @@ def _alert_evening_short(state: dict, today: str, now: datetime, c, cfg, outlook
     top_up = (f"Grid top-up: ~{kwh:.1f} kWh (~{minutes:.0f} min), ~${kwh * rate_at(now):.2f} now; {when}.\n")
     return (f"🌆 <b>Tonight may run short</b>\n"
             f"{me.name} evenings use ~{me.median_kwh:.1f} kWh (a heavy one {me.heavy_kwh:.1f}). The forecast has the "
-            f"battery at ~{proj:.0f}% at sundown (~{sundown_dt.strftime('%-I:%M %p')}), {how}: "
+            f"battery at ~{proj:.0f}% at sundown (~{sundown_dt.strftime('%-I:%M %p')}){usual_note}, {how}: "
             f"you want ~{hvy:.0f}% for a heavy night, ~{typ:.0f}% for a typical one"
             + (f" (counting your plan: {planned.describe(plan)}).\n" if plan_kwh > 0 else ".\n") +
             f"Battery is {c.battery_soc_pct:.0f}% now. Grid power is cheapest until 2 PM.\n"
@@ -5056,6 +5070,37 @@ def _alert_self_sufficiency_streak(state: dict, today: str, now: datetime, store
     )
 
 
+def _pattern_question_buttons(key: str) -> list[dict]:
+    """One-tap names for a routine load (callback pat:<weekday>:<hour>:<code>)."""
+    from . import appliances
+    return [{"text": text, "callback_data": f"pat:{key}:{code}"} for code, text in appliances.choices()]
+
+
+def _alert_pattern_question(state: dict, today: str, now: datetime, store) -> str | None:
+    """Around 8 PM: if the load history shows a routine big load (loadevents.py) that you have not
+    named, ask what it is, once per routine and at most one question a day. Everything works without
+    the answer; the name only makes /habits and /sundown read better."""
+    if store is None or now.hour != 20 or state.get("pattern_question_date") == today:
+        return None
+    from . import loadevents, planned
+    names, asked = state.get("pattern_names", {}), state.get("pattern_asked", [])
+    cands = [(e, loadevents.pattern_key(e)) for evs in loadevents.learn(store, now.date(), state.get("car_day_labels")).values()
+             for e in evs if e.share >= loadevents.QUESTION_SHARE and e.days >= loadevents.QUESTION_DAYS]
+    cands = [(e, k) for e, k in cands if k not in names and k not in asked]
+    if not cands:
+        return None
+    ev, key = max(cands, key=lambda c: c[0].share * c[0].days)
+    state["pattern_asked"] = (asked + [key])[-40:]
+    state["pattern_question_date"] = today
+    state["pattern_question_key"] = key
+    _log_question(state, "pattern", today)
+    weekday = datetime(2000, 1, 3 + ev.weekday).strftime("%A")
+    return (f"🔁 <b>FranklinWH: is this a routine?</b>\n"
+            f"On {ev.days} of the last {ev.of} {weekday}s there was a ~{ev.kw:.0f} kW load for about "
+            f"{round(ev.hours * 60)} min, starting around {planned.clock(ev.start)}. What is it? "
+            f"One tap and I'll plan around it by name.")
+
+
 def _alert_away_mode(state: dict, today: str, now: datetime, store) -> str | None:
     """Mornings 8-10: notice that the house has been at standby load for days (away.py) and hold the
     nags until it picks up again; say so once when it does. Silent otherwise."""
@@ -5866,6 +5911,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store, cfg)),
             ("bill_pace",            lambda: _alert_bill_pace(state, today, now, store, cfg)),
             ("away_mode",            lambda: _alert_away_mode(state, today, now, store)),
+            ("pattern_question",     lambda: _alert_pattern_question(state, today, now, store)),
             ("bill_reconciliation",  lambda: _alert_bill_reconciliation(state, today, now, cfg, store)),
             ("rate_plan_optimality", lambda: _alert_rate_plan_optimality(state, today, now, store)),
             ("heat_wave_prep",       lambda: _alert_heat_wave_prep(state, today, now, c, outlook)),
@@ -5922,6 +5968,8 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             extra = {"extra_buttons": btns} if btns else {}
         elif name == "miss_question" and state.get("miss_question_day"):
             extra = {"extra_buttons": _miss_question_buttons(state["miss_question_day"])}
+        elif name == "pattern_question" and state.get("pattern_question_key"):
+            extra = {"extra_buttons": _pattern_question_buttons(state["pattern_question_key"])}
         elif name == "load_question" and state.get("load_question_key"):
             extra = {"extra_buttons": _spike_question_buttons(state["load_question_key"])}
         _send_alert(body, cfg, urgent=urgent, alert_name=name, **extra)
