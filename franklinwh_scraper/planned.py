@@ -41,6 +41,16 @@ def clear_plan(state: dict, today: str) -> None:
     state.pop(_KEY + today, None)
 
 
+def set_none(state: dict, today: str) -> None:
+    """You said there are no big loads today: an empty plan that still counts as an answer."""
+    state[_KEY + today] = []
+
+
+def declared(state: dict, today: str) -> bool:
+    """True once you have answered for today, with loads (set_plan) or with none (set_none)."""
+    return isinstance(state.get(_KEY + today), list)
+
+
 def evening_kwh(loads: list[dict], after_hour: float = EVENING_START_HOUR) -> float:
     """kWh the planned loads draw from `after_hour` to midnight."""
     total = 0.0

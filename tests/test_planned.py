@@ -37,3 +37,14 @@ def test_evening_kwh_counts_only_what_runs_after_the_cutoff():
 def test_describe_lists_each_load_with_its_time_and_power():
     text = planned.describe([DRYER, OVEN])
     assert "dryer 4–5 PM (4 kW)" in text and "oven 5–7 PM (2.5 kW)" in text
+
+
+def test_a_declared_empty_plan_is_not_the_same_as_no_plan():
+    st: dict = {}
+    assert planned.declared(st, "2026-11-08") is False
+    planned.set_none(st, "2026-11-08")
+    assert planned.declared(st, "2026-11-08") is True and planned.get_plan(st, "2026-11-08") == []
+    planned.set_plan(st, "2026-11-08", [DRYER])
+    assert planned.declared(st, "2026-11-08") is True and len(planned.get_plan(st, "2026-11-08")) == 1
+    planned.clear_plan(st, "2026-11-08")
+    assert planned.declared(st, "2026-11-08") is False

@@ -1070,7 +1070,7 @@ def test_send_sundown_projects_soc_to_last_solar_hour(tmp_path):
     bot._usage_forecast = forecast
 
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
 
     real_datetime = chatbot_mod.datetime
     try:
@@ -1132,7 +1132,7 @@ def test_send_sundown_estimates_surplus_solar_export(tmp_path):
     bot._usage_forecast = forecast
 
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
 
     real_datetime = chatbot_mod.datetime
     try:
@@ -1184,7 +1184,7 @@ def test_send_sundown_omits_export_line_when_battery_never_fills(tmp_path):
     bot._usage_forecast = forecast
 
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
 
     real_datetime = chatbot_mod.datetime
     try:
@@ -1223,7 +1223,7 @@ def test_send_ebtarget_works_any_time_any_sky(tmp_path):
     _save_peak_state(tmp_path, {"solar_cal_samples": [3.5, 3.6, 3.4]})
 
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
 
     real_datetime = chatbot_mod.datetime
     try:
@@ -1256,7 +1256,7 @@ def test_send_ebtarget_reports_no_data_yet(tmp_path):
     _save_peak_state(tmp_path, {})  # no solar_cal_samples -> no calibration yet
 
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
 
     real_datetime = chatbot_mod.datetime
     try:
@@ -2041,7 +2041,7 @@ def test_send_sundown_writes_state_under_the_shared_lock(monkeypatch, tmp_path):
     bot = TelegramChatBot(Config(battery_capacity_kwh=13.6, output_dir=str(tmp_path)), api_key="x")
     bot._stats = _types.SimpleNamespace(current=_types.SimpleNamespace(battery_soc_pct=50.0))
     bot._usage_forecast = forecast
-    bot._send = lambda chat_id, text: None
+    bot._send = lambda chat_id, text, reply_markup=None: None
 
     real_datetime = chatbot_mod.datetime
     try:
@@ -2092,7 +2092,7 @@ def test_send_sundown_live_anchors_current_load_when_store_available(monkeypatch
     bot._usage_forecast = _forecast()
     bot._hist_store = object()  # any non-None sentinel — code only checks `is not None`
     bot._outlook = None
-    bot._send = lambda chat_id, text: None
+    bot._send = lambda chat_id, text, reply_markup=None: None
 
     real_datetime = chatbot_mod.datetime
     try:
@@ -2144,7 +2144,7 @@ def test_send_sundown_applies_learned_bias_correction(tmp_path):
     # test to the bias-correction path rather than also exercising live-anchor.
 
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
 
     real_datetime = chatbot_mod.datetime
     try:
@@ -2204,7 +2204,7 @@ def test_chatbot_history_uses_outdir_override(tmp_path):
 
     bot = TelegramChatBot(Config(output_dir=str(cfg_dir)), api_key="x", outdir=real_dir)
     sent = []
-    bot._send = lambda chat_id, text: sent.append(text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.append(text)
 
     bot._send_history("123")
     # Must have looked in real_dir (no db there), not cfg_dir (db present).
@@ -9271,7 +9271,7 @@ def _evroom_bot(tmp_path, soc, **cfg_kw):
     bot._stats = types.SimpleNamespace(current=types.SimpleNamespace(battery_soc_pct=soc, home_load_kw=1.0))
     bot._usage_forecast = forecast
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
     return bot, now, sent
 
 
@@ -9542,7 +9542,7 @@ def _sundown_bot_with_pattern(tmp_path, monkeypatch, now):
     bot._hist_store = db
     bot._outlook = None
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
     return bot, sent
 
 
@@ -9913,7 +9913,7 @@ def test_send_sundown_offers_the_morning_top_off_case_with_a_range_before_late_m
     bot._hist_store = db
     bot._outlook = None
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
     _run_at(now, bot._send_sundown, "123")
     text = sent["text"]
     assert "🌅" in text and "top off this morning" in text
@@ -9943,7 +9943,7 @@ def test_send_evroom_mentions_the_usual_morning_top_off(tmp_path, monkeypatch):
     bot._hist_store = db
     bot._outlook = None
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
     _run_at(now, bot._send_evroom, "123", None)
     text = sent["text"]
     assert "🌅 Usual morning top-off" in text and "3.2 kWh" in text
@@ -10001,7 +10001,7 @@ def test_evroom_no_longer_describes_overnight_charges_as_draining_the_battery(tm
     bot._hist_store = db
     bot._outlook = None
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
     _run_at(now, bot._send_evroom, "123", None)
     assert "overnight" not in sent["text"].lower()
 
@@ -10229,7 +10229,7 @@ def _ebplan_bot(tmp_path, now, soc=22.0, load=0.4):
     bot._outlook = outlook
     bot._hist_store = db
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
     return bot, sent
 
 
@@ -10684,7 +10684,7 @@ def _run_send_sundown(tmp_path, current, saved_state=None, hour=12, minute=40, s
     bot._usage_forecast = forecast
     bot._hist_store = store
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
     real = chatbot_mod.datetime
 
     class _FakeDatetime(real):
@@ -10859,7 +10859,7 @@ def _bot_with(tmp_path, soc=50.0, forecast=None, store=None, saved_state=None):
     bot._usage_forecast = forecast
     bot._hist_store = store
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
     return bot, sent
 
 
@@ -12815,7 +12815,7 @@ def test_send_sundown_starts_a_watch_for_a_corrected_projection(tmp_path):
     bot._stats = _types.SimpleNamespace(current=_types.SimpleNamespace(battery_soc_pct=27.0))
     bot._usage_forecast = forecast
     sent = {}
-    bot._send = lambda chat_id, text: sent.__setitem__("text", text)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.__setitem__("text", text)
     real_datetime = chatbot_mod.datetime
     try:
         class _FakeDatetime(real_datetime):
@@ -13465,3 +13465,166 @@ def test_evening_short_alert_counts_your_usual_afternoon_load(tmp_path):
             assert "usual" in habit_msg                                                       # says it counted the routine
             return
     raise AssertionError("no battery level showed the habit changing the alert")
+
+
+# ── the bot offers the next step instead of waiting for a typed command ──
+
+def _callbacks(markup):
+    return [b["callback_data"] for row in (markup or {}).get("inline_keyboard", []) for b in row]
+
+
+def test_nav_buttons_offer_the_other_views_and_skip_the_current_one():
+    cbs = [b["callback_data"] for b in alerts._nav_buttons(exclude=("sundown",))]
+    assert "cmd:evening" in cbs and "cmd:ebplan" in cbs and "cmd:plan" in cbs and "cmd:sundown" not in cbs
+    assert all(len(c) <= 64 for c in cbs)
+
+
+def test_plan_prompt_offers_your_usual_day_when_one_is_learned(tmp_path):
+    now = datetime(2026, 11, 15, 8, 0)
+    rows = alerts._plan_prompt_rows({}, _strong_sundays(tmp_path), now)
+    cbs = [b["callback_data"] for row in rows for b in row]
+    assert "plan:usual" in cbs and "plan:none" in cbs and "plan:dryer" in cbs and "plan:oven" in cbs
+    usual = next(b for row in rows for b in row if b["callback_data"] == "plan:usual")
+    assert "Sunday" in usual["text"]
+
+
+def test_plan_prompt_without_a_learned_day_still_offers_the_quick_picks(tmp_path):
+    cbs = [b["callback_data"] for row in alerts._plan_prompt_rows({}, HistoryStore(tmp_path / "e.db"),
+                                                                    datetime(2026, 11, 15, 8, 0)) for b in row]
+    assert "plan:usual" not in cbs and "plan:none" in cbs and "plan:dryer" in cbs
+
+
+def test_plan_prompt_is_gone_once_you_have_answered(tmp_path):
+    st: dict = {}
+    from franklinwh_scraper import planned
+    planned.set_none(st, "2026-11-15")
+    assert alerts._plan_prompt_rows(st, _strong_sundays(tmp_path), datetime(2026, 11, 15, 8, 0)) == []
+
+
+def test_alert_extra_buttons_can_be_several_rows(monkeypatch):
+    sent: dict = {}
+    monkeypatch.setattr(alerts, "notify_telegram", lambda body, tok, chat, reply_markup=None: sent.update(kb=reply_markup))
+    cfg = Config(telegram_bot_token="t", telegram_chat_id="1", output_dir="/nonexistent-dir-for-test")
+    alerts._send_alert("hi", cfg, alert_name="bill_pace", extra_buttons=[[{"text": "a", "callback_data": "x:1"}],
+                                                                           [{"text": "b", "callback_data": "x:2"}]])
+    assert _callbacks(sent["kb"])[:2] == ["x:1", "x:2"]
+    alerts._send_alert("hi", cfg, alert_name="bill_pace", extra_buttons=[{"text": "a", "callback_data": "x:1"}])
+    assert _callbacks(sent["kb"])[0] == "x:1"                                           # a flat row still works
+
+
+def test_the_morning_alert_and_the_corrections_carry_the_next_step_buttons():
+    import inspect
+    src = inspect.getsource(alerts._check_peak_alerts)
+    assert "_plan_prompt_rows" in src and "_nav_buttons" in src
+
+
+def test_replies_end_with_buttons_for_the_next_step(tmp_path):
+    now = datetime(2026, 11, 6, 13, 20)
+    bot, sent = _evening_bot(tmp_path, now, soc=60.0, forecast_solar=_SUNNY)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.update(text=text, kb=reply_markup)
+    _run_at(now, bot._send_sundown, "1")
+    cbs = _callbacks(sent["kb"])
+    assert "cmd:evening" in cbs and "cmd:ebplan" in cbs and "cmd:plan" in cbs and "cmd:sundown" not in cbs
+    _run_at(now, bot._send_evening, "1")
+    assert "cmd:sundown" in _callbacks(sent["kb"]) and "cmd:evening" not in _callbacks(sent["kb"])
+    _run_at(now, bot._send_habits, "1")
+    assert "cmd:sundown" in _callbacks(sent["kb"])
+
+
+def test_plan_with_nothing_planned_offers_the_quick_picks(tmp_path):
+    now = datetime(2026, 11, 15, 9, 0)
+    bot, sent = _evening_bot(tmp_path, now)
+    bot._hist_store = _strong_sundays(tmp_path)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.update(text=text, kb=reply_markup)
+    _run_at(now, bot._send_plan, "1", {})
+    cbs = _callbacks(sent["kb"])
+    assert "plan:usual" in cbs and "plan:none" in cbs
+
+
+class _InlineThread:
+    def __init__(self, target=None, args=(), daemon=None, **kw):
+        self._t, self._a = target, args
+
+    def start(self):
+        self._t(*self._a)
+
+
+def _press_button(bot, data, monkeypatch, chat="1"):
+    from franklinwh_scraper import chatbot as chatbot_mod
+    monkeypatch.setattr(chatbot_mod.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(bot, "_answer_callback_query", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "_is_authorized", lambda c: True)
+    bot._handle_callback_query({"id": "q", "data": data, "message": {"chat": {"id": int(chat)}}})
+
+
+def test_tapping_a_view_button_runs_that_command(tmp_path, monkeypatch):
+    bot = TelegramChatBot(Config(), api_key="x")
+    ran = []
+    for name in ("sundown", "evening", "habits"):
+        monkeypatch.setattr(bot, f"_send_{name}", lambda chat_id, n=name: ran.append(n))
+    monkeypatch.setattr(bot, "_send_ebplan", lambda chat_id, args=None: ran.append("ebplan"))
+    monkeypatch.setattr(bot, "_send_plan", lambda chat_id, args=None: ran.append("plan"))
+    for n in ("sundown", "evening", "ebplan", "plan", "habits"):
+        _press_button(bot, f"cmd:{n}", monkeypatch)
+    assert ran == ["sundown", "evening", "ebplan", "plan", "habits"]
+    _press_button(bot, "cmd:bogus", monkeypatch)                                                 # unknown: ignored, no crash
+
+
+def test_tapping_plan_buttons_sets_the_plan(tmp_path, monkeypatch):
+    from franklinwh_scraper import planned
+    from franklinwh_scraper.alerts import _load_peak_state
+    now = datetime(2026, 11, 15, 8, 0)
+    bot, sent = _evening_bot(tmp_path, now)
+    bot._hist_store = _strong_sundays(tmp_path)
+    bot._send = lambda chat_id, text, reply_markup=None: sent.update(text=text, kb=reply_markup)
+    from franklinwh_scraper import chatbot as chatbot_mod
+    real = chatbot_mod.datetime
+
+    class _Fake(real):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    monkeypatch.setattr(chatbot_mod, "datetime", _Fake)
+    _press_button(bot, "plan:usual", monkeypatch)
+    plan = planned.get_plan(_load_peak_state(tmp_path), "2026-11-15")
+    assert len(plan) == 1 and plan[0]["start"] == 15.0 and abs(plan[0]["kw"] - 4.1) < 0.2
+    _press_button(bot, "plan:none", monkeypatch)
+    st = _load_peak_state(tmp_path)
+    assert planned.declared(st, "2026-11-15") and planned.get_plan(st, "2026-11-15") == []
+    assert "no big loads" in sent["text"].lower()
+    _press_button(bot, "plan:dryer", monkeypatch)
+    assert [ld["name"] for ld in planned.get_plan(_load_peak_state(tmp_path), "2026-11-15")] == ["dryer"]
+
+
+def test_saying_no_big_loads_stops_the_usual_day_assumptions(tmp_path):
+    from franklinwh_scraper import planned
+    from franklinwh_scraper.chatbot import _habit_loads
+    now = datetime(2026, 11, 15, 10, 0)
+    db = _strong_sundays(tmp_path)
+    st: dict = {}
+    assert _habit_loads(Config(), now, st, db)                                          # a usual Sunday is assumed...
+    planned.set_none(st, "2026-11-15")
+    assert _habit_loads(Config(), now, st, db) == []                                    # ...until you say otherwise
+
+
+def test_the_command_menu_is_registered_with_telegram(monkeypatch):
+    from franklinwh_scraper import chatbot as chatbot_mod
+    seen = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"{}"
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"], seen["body"] = req.full_url, json.loads(req.data)
+        return _Resp()
+    monkeypatch.setattr(chatbot_mod, "urlopen", fake_urlopen)
+    bot = TelegramChatBot(Config(telegram_bot_token="tok"), api_key="x")
+    bot._register_commands()
+    assert seen["url"].endswith("/setMyCommands")
+    names = {c["command"] for c in seen["body"]["commands"]}
+    assert {"sundown", "evening", "ebplan", "plan", "habits", "bill", "alerts"} <= names
+    assert all(len(c["description"]) <= 256 and c["command"].islower() for c in seen["body"]["commands"])
+    import inspect
+    assert "self._register_commands()" in inspect.getsource(chatbot_mod.TelegramChatBot.run)

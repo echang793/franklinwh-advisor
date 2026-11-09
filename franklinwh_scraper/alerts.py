@@ -995,8 +995,9 @@ def _send_alert(body: str, cfg: Config, urgent: bool = False, alert_name: str | 
         notify_imessage_text(body, cfg.imessage_phone)
     if cfg.telegram_bot_token and cfg.telegram_chat_id:
         kb = _alert_keyboard(alert_name) if (alert_name and alert_name not in _ALWAYS_ON_ALERTS) else None
-        if extra_buttons:  # alert-specific answer buttons go first, above mute/snooze
-            kb = {"inline_keyboard": [extra_buttons] + (kb["inline_keyboard"] if kb else [])}
+        if extra_buttons:  # alert-specific answer buttons go first, above mute/snooze (one row, or a list of rows)
+            rows = extra_buttons if isinstance(extra_buttons[0], list) else [extra_buttons]
+            kb = {"inline_keyboard": rows + (kb["inline_keyboard"] if kb else [])}
         notify_telegram(body, cfg.telegram_bot_token, cfg.telegram_chat_id, reply_markup=kb)
     if cfg.smtp_host and cfg.email_to:
         notify_email(body, cfg)
@@ -2210,7 +2211,7 @@ def _alert_evening_short(state: dict, today: str, now: datetime, c, cfg, outlook
     from . import loadevents, planned
     plan = planned.get_plan(state, today)
     usual_note = ""
-    if not plan:                    # loads you run on most of these days and have not run yet count too
+    if not planned.declared(state, today):   # loads you run on most of these days and have not run yet count too
         now_h = now.hour + now.minute / 60.0
         usual = [e for e in loadevents.learn(store, now.date(), state.get("car_day_labels")).get(now.weekday(), [])
                  if e.share >= loadevents.USUAL_SHARE and e.start + e.hours > now_h]
@@ -5070,6 +5071,32 @@ def _alert_self_sufficiency_streak(state: dict, today: str, now: datetime, store
     )
 
 
+_NAV_VIEWS = (("sundown", "🌇 Sundown"), ("evening", "🌆 Evening"), ("ebplan", "🔋 EB plan"), ("plan", "📌 Plan"))
+
+
+def _nav_buttons(exclude: tuple = ()) -> list[dict]:
+    """A row of one-tap views (callback cmd:<name>), so the next step is offered, not typed."""
+    return [{"text": text, "callback_data": f"cmd:{name}"} for name, text in _NAV_VIEWS if name not in exclude]
+
+
+def _plan_prompt_rows(state: dict, store, now: datetime) -> list[list[dict]]:
+    """Buttons for "what will you run today?": your learned usual day (when there is one), no big loads,
+    or a quick dryer / oven. [] once you have answered for today."""
+    from . import loadevents, planned
+    if planned.declared(state, now.strftime("%Y-%m-%d")):
+        return []
+    first = [{"text": "🚫 No big loads", "callback_data": "plan:none"}]
+    try:
+        usual = [e for e in loadevents.learn(store, now.date(), state.get("car_day_labels")).get(now.weekday(), [])
+                 if e.share >= loadevents.USUAL_SHARE]
+    except Exception:
+        usual = []
+    if usual:
+        names = " + ".join(loadevents.name_for(state.get("pattern_names"), e) for e in usual)
+        first.insert(0, {"text": f"📌 Usual {now.strftime('%A')} ({names})", "callback_data": "plan:usual"})
+    return [first, [{"text": "➕ Dryer", "callback_data": "plan:dryer"}, {"text": "➕ Oven", "callback_data": "plan:oven"}]]
+
+
 def _pattern_question_buttons(key: str) -> list[dict]:
     """One-tap names for a routine load (callback pat:<weekday>:<hour>:<code>)."""
     from . import appliances
@@ -5968,6 +5995,10 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             extra = {"extra_buttons": btns} if btns else {}
         elif name == "miss_question" and state.get("miss_question_day"):
             extra = {"extra_buttons": _miss_question_buttons(state["miss_question_day"])}
+        elif name == "morning_preview":
+            extra = {"extra_buttons": _plan_prompt_rows(state, store, now) + [_nav_buttons()]}
+        elif name in ("evening_short", "sundown_watch"):
+            extra = {"extra_buttons": [_nav_buttons()]}
         elif name == "pattern_question" and state.get("pattern_question_key"):
             extra = {"extra_buttons": _pattern_question_buttons(state["pattern_question_key"])}
         elif name == "load_question" and state.get("load_question_key"):

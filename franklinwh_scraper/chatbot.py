@@ -293,9 +293,8 @@ def _habit_loads(cfg, now: datetime, state: dict | None = None, store=None) -> l
     "what was that?" (appliances.learned_habit_loads)."""
     if state:
         from . import planned
-        told = planned.get_plan(state, now.strftime("%Y-%m-%d"))
-        if told:                                    # what you said you will run today beats the habit
-            return told
+        if planned.declared(state, now.strftime("%Y-%m-%d")):   # what you said you will run today (even "nothing")
+            return planned.get_plan(state, now.strftime("%Y-%m-%d"))
     if store is not None:
         # The loads the history says you run on most of these days lead; what you typed or labelled
         # is the fallback for a day nothing has been learned for.
@@ -500,6 +499,7 @@ class TelegramChatBot:
 
     def run(self) -> None:
         logger.info("Telegram chatbot started")
+        self._register_commands()
         base = f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}"
         while True:
             try:
@@ -1107,6 +1107,68 @@ class TelegramChatBot:
             self._tls.capture = None
         return {"text": re.sub(r"<[^>]+>", "", text)}
 
+    def _nav_markup(self, exclude: tuple = ()) -> dict:
+        """One row of buttons for the other views, under a reply, so the next step is a tap."""
+        from .alerts import _nav_buttons
+        return {"inline_keyboard": [_nav_buttons(exclude)]}
+
+    def _run_command(self, chat_id: str, name: str) -> None:
+        """What a cmd:<name> button does: the same as typing the command."""
+        run = {"sundown": self._send_sundown, "evening": self._send_evening, "habits": self._send_habits,
+               "ebplan": lambda c: self._send_ebplan(c, {}), "plan": lambda c: self._send_plan(c, {})}.get(name)
+        if run is not None:
+            run(chat_id)
+
+    def _tap_plan(self, chat_id: str, what: str) -> None:
+        """A plan:<what> button: usual (the learned loads still ahead today), none, dryer or oven."""
+        from pathlib import Path
+
+        from . import loadevents, planned
+        from .alerts import _save_peak_state, _state_lock
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        if what == "none":
+            with _state_lock(out):
+                state = _load_peak_state(out)
+                planned.set_none(state, today)
+                _save_peak_state(out, state)
+            self._send(chat_id, "📌 Noted: no big loads today. I won't assume your usual day.",
+                       reply_markup=self._nav_markup(("plan",)))
+            return
+        if what == "usual":
+            state = _load_peak_state(out)
+            now_h = now.hour + now.minute / 60.0
+            loads = [e.as_load(loadevents.name_for(state.get("pattern_names"), e))
+                     for e in loadevents.learn(self._hist_store, now.date(), state.get("car_day_labels"))
+                     .get(now.weekday(), []) if e.share >= loadevents.USUAL_SHARE and e.start + e.hours > now_h]
+            if not loads:
+                self._send(chat_id, "Nothing usual left for today. Tap what you'll run, or type /plan dryer 4pm.")
+                return
+        else:
+            default = _LOAD_DEFAULTS.get(what)
+            if default is None:
+                return
+            start, hours, kw = default
+            loads = [{"name": what, "start": float(start), "hours": hours, "kw": kw}]
+        self._send_plan(chat_id, {"loads": loads})
+
+    def _register_commands(self) -> None:
+        """Fill Telegram's "/" menu so the commands can be picked instead of remembered."""
+        commands = [("status", "Battery, solar and grid right now"), ("sundown", "Battery level at sundown"),
+                    ("evening", "What tonight needs and what you will have"), ("ebplan", "When to run Emergency Backup"),
+                    ("plan", "Tell me what you will run today"), ("habits", "The big loads I have learned"),
+                    ("today", "The day so far"), ("reserve", "What to charge to overnight"),
+                    ("bill", "This billing cycle against the last"), ("alerts", "What I sent lately"),
+                    ("accuracy", "How accurate the projections have been"), ("mute", "Pause non-safety alerts")]
+        payload = json.dumps({"commands": [{"command": c, "description": d} for c, d in commands]}).encode()
+        req = Request(f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}/setMyCommands", data=payload,
+                      headers={"Content-Type": "application/json"})
+        try:
+            urlopen(req, timeout=10)
+        except Exception as e:
+            logger.warning("Chatbot setMyCommands error: %s", e)
+
     def _send_habits(self, chat_id: str) -> None:
         """/habits: the big loads the history says you run, by weekday (loadevents.py)."""
         try:
@@ -1116,7 +1178,7 @@ class TelegramChatBot:
             if not learned:
                 self._send(chat_id, f"Nothing learned yet. A load counts once it shows up {loadevents.MIN_DAYS}+ times "
                                     f"on at least {loadevents.MIN_SHARE * 100:.0f}% of a weekday, over the last "
-                                    f"{loadevents.LOOKBACK_DAYS} days.")
+                                    f"{loadevents.LOOKBACK_DAYS} days.", reply_markup=self._nav_markup(("plan",)))
                 return
             lines = ["🔁 <b>Loads you usually run</b> (from the load history, last "
                      f"{loadevents.LOOKBACK_DAYS} days)"]
@@ -1126,7 +1188,7 @@ class TelegramChatBot:
                     label = loadevents.name_for(state.get("pattern_names"), e)
                     lines.append(f"<b>{name}</b> {label} {planned.span(e.as_load())}: ~{e.kw:.1f} kW for {e.hours:.1f} h, "
                                  f"{e.days} of {e.of} ({e.share * 100:.0f}%)")
-            self._send(chat_id, "\n".join(lines))
+            self._send(chat_id, "\n".join(lines), reply_markup=self._nav_markup(("plan",)))
         except Exception as e:
             logger.warning("_send_habits error: %s", e)
             self._send(chat_id, f"Error: {e}")
@@ -1157,9 +1219,13 @@ class TelegramChatBot:
                     _save_peak_state(out, state)
             loads = planned.get_plan(state, today)
             if not loads:
-                self._send(chat_id, "📌 Nothing planned for today. Tell me what you'll run, e.g. "
-                                    "/plan dryer 4pm, oven 5pm for 2h (dryer, oven, kitchen and ac are known), "
-                                    "and /sundown, /evening and /ebplan will count it. /plan clear removes it.")
+                from .alerts import _nav_buttons, _plan_prompt_rows
+                rows = _plan_prompt_rows(state, self._hist_store, now)
+                self._send(chat_id, ("📌 No big loads planned for today." if planned.declared(state, today) else
+                                     "📌 Nothing planned for today. Tap what you'll run, or type e.g. "
+                                     "/plan dryer 4pm, oven 5pm for 2h.")
+                           + " /plan clear resets it.",
+                           reply_markup={"inline_keyboard": rows + [_nav_buttons(("plan",))]})
                 return
             lines = [f"📌 <b>Today's plan:</b> {planned.describe(loads)}"]
             stats, forecast, outlook, store, state = self._snapshot_for_report()
@@ -1177,7 +1243,7 @@ class TelegramChatBot:
                 else:
                     lines.append("Solar is done for today, so there is no sundown number to change; "
                                  "/evening and /ebplan still count it.")
-            self._send(chat_id, "\n".join(lines))
+            self._send(chat_id, "\n".join(lines), reply_markup=self._nav_markup(("plan",)))
         except Exception as e:
             logger.warning("_send_plan error: %s", e)
             self._send(chat_id, f"Error: {e}")
@@ -1502,7 +1568,7 @@ class TelegramChatBot:
                 logger.warning("plan line failed", exc_info=True)
             try:
                 from . import loadevents, planned
-                if not planned.get_plan(state, now.strftime("%Y-%m-%d")):
+                if not planned.declared(state, now.strftime("%Y-%m-%d")):
                     now_h = now.hour + now.minute / 60.0
                     names = state.get("pattern_names")
                     usual = [e for e in loadevents.learn(store, now.date(), state.get("car_day_labels"))
@@ -1550,7 +1616,8 @@ class TelegramChatBot:
                 f"{car_str}"
                 f"{export_str}\n"
                 f"<i>{live_forecast.confidence.title()} confidence, {live_forecast.data_days}d data — actual weather/load will vary.</i>"
-                f"{followup}"
+                f"{followup}",
+                reply_markup=self._nav_markup(("sundown",)),
             )
         except Exception as e:
             logger.warning("_send_sundown error: %s", e)
@@ -1638,7 +1705,7 @@ class TelegramChatBot:
                     f"{level(p.median_kwh):.0f}% / {level(p.heavy_kwh):.0f}%"
                     for wd, p in sorted(profiles.items())]
             lines.append("📅 Typical / heavy level, by day: " + " · ".join(week))
-            self._send(chat_id, "\n".join(lines))
+            self._send(chat_id, "\n".join(lines), reply_markup=self._nav_markup(("evening",)))
         except Exception as e:
             logger.warning("_send_evening error: %s", e)
             self._send(chat_id, f"Error: {e}")
@@ -2004,7 +2071,7 @@ class TelegramChatBot:
                          f"allow for the sun already charging; grid rate now "
                          f"${rate:.3f}/kWh."
                          + ("" if in_window else f" Stop EB by {fmt(start_h)} — it gets pricier after.") + "</i>")
-            self._send(chat_id, "\n".join(lines))
+            self._send(chat_id, "\n".join(lines), reply_markup=self._nav_markup(("ebplan",)))
         except Exception as e:
             logger.warning("_send_ebplan error: %s", e)
             self._send(chat_id, f"Error: {e}")
@@ -2142,6 +2209,14 @@ class TelegramChatBot:
                 self._send(chat_id, reply)
                 if code == "a":
                     self._ask_appliance(chat_id, key)
+            return
+        if data.startswith("cmd:"):
+            self._answer_callback_query(cq_id)
+            threading.Thread(target=self._run_command, args=(chat_id, data[4:]), daemon=True).start()
+            return
+        if data.startswith("plan:"):
+            self._answer_callback_query(cq_id, "Got it")
+            threading.Thread(target=self._tap_plan, args=(chat_id, data[5:]), daemon=True).start()
             return
         if data.startswith("pat:"):
             key, _, code = data[4:].rpartition(":")
