@@ -5,19 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FranklinWH Energy Advisor</title>
 <link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#070c08">
+<meta name="theme-color" content="#050507">
 <link rel="icon" href="/icon-192.png">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="FranklinWH">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/html-to-image@1.11.11/dist/html-to-image.js"></script>
 <script src="/sunpath.js?v=5"></script>
 <style>
-html,body{margin:0;padding:0;background:#070c08;}
-a{color:#57e389;text-decoration:none}a:hover{color:#8df0b0;text-decoration:underline}
+html,body{margin:0;padding:0;background:#050507;}
+a{color:#3ddc97;text-decoration:none}a:hover{color:#7af0bd;text-decoration:underline}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
 @keyframes sweepX{0%{transform:translateX(-100%);opacity:0}15%{opacity:1}100%{transform:translateX(100vw);opacity:0}}
@@ -26,35 +26,37 @@ a{color:#57e389;text-decoration:none}a:hover{color:#8df0b0;text-decoration:under
 @keyframes rise{0%{opacity:0;transform:translateY(14px) scale(.97)}60%{transform:translateY(-2px) scale(1.005)}100%{opacity:1;transform:translateY(0) scale(1)}}
 @keyframes chev{0%,100%{opacity:.15;transform:translateX(0)}50%{opacity:1;transform:translateX(3px)}}
 @keyframes burst{0%{transform:scale(.2);opacity:.9}100%{transform:scale(3);opacity:0}}
-@keyframes glowPulse{0%,100%{box-shadow:0 0 18px rgba(87,227,137,.25)}50%{box-shadow:0 0 42px rgba(87,227,137,.55)}}
-body{min-height:100vh;background:radial-gradient(1200px 600px at 70% -10%, #0d1a0f 0%, #070c08 55%);font-family:'Space Grotesk',sans-serif;color:#e6f2e8;padding:0 0 48px 0;position:relative;overflow-x:hidden;}
-.mono{font-family:'JetBrains Mono',monospace;}
-.card{background:#101711;border:1px solid #1c2a1e;border-radius:16px;padding:24px;position:relative;}
-.plabel{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.18em;color:#5f7263;}
-.grip{position:absolute;top:3px;left:50%;transform:translateX(-50%);font-size:13px;letter-spacing:2px;color:#3f5244;cursor:grab;user-select:none;touch-action:none;z-index:6;padding:2px 14px;}
-.grip:hover{color:#57e389;}
-.hidebtn{position:absolute;top:6px;right:12px;font-size:12px;color:#3f5244;cursor:pointer;z-index:6;padding:2px 6px;user-select:none;}
-.hidebtn:hover{color:#ff8a7a;}
-.focusbtn{position:absolute;top:6px;right:36px;font-size:12px;color:#3f5244;cursor:pointer;z-index:6;padding:2px 6px;user-select:none;}
-.focusbtn:hover{color:#57e389;}
-.focusbtn.on{color:#57e389;}
-.widebtn{position:absolute;top:6px;right:60px;font-size:12px;color:#3f5244;cursor:pointer;z-index:6;padding:2px 6px;user-select:none;}
-.widebtn:hover{color:#57e389;}
-.widebtn.on{color:#57e389;}
-.chip{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;padding:5px 11px;border-radius:999px;border:1px solid #1c2a1e;background:transparent;color:#5f7263;cursor:pointer;transition:all .25s;}
-.chip.on{background:rgba(87,227,137,.12);border-color:#2e5c3a;color:#57e389;}
-.simchip{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.08em;color:#f5b942;background:rgba(245,185,66,.06);border:1px solid #4a3a12;border-radius:999px;padding:7px 14px;cursor:pointer;}
-.simchip:hover{background:rgba(245,185,66,.16);border-color:#6b5216;}
-.toolbtn{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.08em;color:#7d937f;background:transparent;border:1px solid #1c2a1e;border-radius:999px;padding:7px 14px;cursor:pointer;}
-.toolbtn:hover{color:#57e389;border-color:#2e5c3a;}
-.snapbtn{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.08em;color:#8fb4ff;background:rgba(143,180,255,.05);border:1px solid #1e2c4a;border-radius:999px;padding:7px 14px;cursor:pointer;}
-.snapbtn:hover{background:rgba(143,180,255,.12);border-color:#2c4270;}
-.tabbtn{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;padding:6px 12px;border-radius:999px;border:1px solid #1c2a1e;background:transparent;color:#5f7263;cursor:pointer;transition:all .3s;}
-.tabbtn.on{background:rgba(87,227,137,.12);border-color:#2e5c3a;color:#57e389;}
-.tile{background:#0c130d;border:1px solid #18261b;border-radius:10px;padding:14px;}
-pre.digest{font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.7;color:#9db8a2;background:#0c130d;border:1px solid #18261b;border-radius:10px;padding:14px;margin:12px 0 0 0;overflow-x:auto;}
+@keyframes glowPulse{0%,100%{box-shadow:0 0 18px rgba(61,220,151,.25)}50%{box-shadow:0 0 42px rgba(61,220,151,.55)}}
+body{min-height:100vh;background:#050507;font-family:Inter,system-ui,sans-serif;color:#f2f2f5;padding:0 0 48px 0;position:relative;overflow-x:hidden;}
+.mono{font-family:'Space Grotesk',sans-serif;font-variant-numeric:tabular-nums;}
+.card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:28px;padding:26px;position:relative;-webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);transition:border-color .4s,box-shadow .4s;animation:cardin .9s cubic-bezier(.2,.8,.2,1) backwards;}
+.card:hover{border-color:rgba(255,255,255,.2);box-shadow:0 24px 60px rgba(0,0,0,.4);}
+.card:before{content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(100deg,transparent 42%,rgba(255,255,255,.07) 50%,transparent 58%);background-size:300% 100%;background-position:150% 0;animation:sheenbg 11s ease-in-out infinite;}
+.plabel{font-family:Inter,system-ui,sans-serif;font-size:12px;font-weight:500;letter-spacing:.14em;color:#a6a6b0;}
+.grip{position:absolute;top:3px;left:50%;transform:translateX(-50%);font-size:13px;letter-spacing:2px;color:#6e6e7a;cursor:grab;user-select:none;touch-action:none;z-index:6;padding:2px 14px;}
+.grip:hover{color:#fff;}
+.hidebtn{position:absolute;top:6px;right:12px;font-size:12px;color:#6e6e7a;cursor:pointer;z-index:6;padding:2px 6px;user-select:none;}
+.hidebtn:hover{color:#ff6b8b;}
+.focusbtn{position:absolute;top:6px;right:36px;font-size:12px;color:#6e6e7a;cursor:pointer;z-index:6;padding:2px 6px;user-select:none;}
+.focusbtn:hover{color:#fff;}
+.focusbtn.on{color:#fff;}
+.widebtn{position:absolute;top:6px;right:60px;font-size:12px;color:#6e6e7a;cursor:pointer;z-index:6;padding:2px 6px;user-select:none;}
+.widebtn:hover{color:#fff;}
+.widebtn.on{color:#fff;}
+.chip{font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:.12em;padding:5px 11px;border-radius:999px;border:1px solid #2a2a31;background:transparent;color:#9a9aa6;cursor:pointer;transition:all .25s;}
+.chip.on{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff;}
+.simchip{font-family:'Space Grotesk',sans-serif;font-size:11px;letter-spacing:.08em;color:#ffc247;background:rgba(255,194,71,.06);border:1px solid #4a3d18;border-radius:999px;padding:7px 14px;cursor:pointer;}
+.simchip:hover{background:rgba(255,194,71,.16);border-color:#6b5420;}
+.toolbtn{font-family:'Space Grotesk',sans-serif;font-size:11px;letter-spacing:.08em;color:#b0b0ba;background:transparent;border:1px solid #2a2a31;border-radius:999px;padding:7px 14px;cursor:pointer;}
+.toolbtn:hover{color:#fff;border-color:rgba(255,255,255,.35);}
+.snapbtn{font-family:'Space Grotesk',sans-serif;font-size:11px;letter-spacing:.08em;color:#5eb2ff;background:rgba(94,178,255,.05);border:1px solid #1f3250;border-radius:999px;padding:7px 14px;cursor:pointer;}
+.snapbtn:hover{background:rgba(94,178,255,.12);border-color:#2c4a74;}
+.tabbtn{font-family:'Space Grotesk',sans-serif;font-size:10px;letter-spacing:.12em;padding:6px 12px;border-radius:999px;border:1px solid #2a2a31;background:transparent;color:#9a9aa6;cursor:pointer;transition:all .3s;}
+.tabbtn.on{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.3);color:#fff;}
+.tile{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:14px;}
+pre.digest{font-family:'Space Grotesk',sans-serif;font-size:12px;line-height:1.7;color:#c8c8d0;background:#15151a;border:1px solid #26262c;border-radius:10px;padding:14px;margin:12px 0 0 0;overflow-x:auto;}
 @media (max-width:919px){.grip{font-size:17px}.hidebtn,.focusbtn,.widebtn{font-size:15px}}
-input[type=range]{accent-color:#57e389;height:14px;cursor:pointer;}
+input[type=range]{accent-color:#fff;height:14px;cursor:pointer;}
 @media print{
 body{background:#fff;}
 .grip,.hidebtn,.focusbtn,.widebtn,#toolbar,#sticky,#hints,#dragpill,#minimap,#dropind,#hd-unread,#managebd,#managemodal{display:none !important;}
@@ -68,90 +70,109 @@ body.wall #toolbar,body.wall #hints,body.wall #hd-unread,body.wall .grip,body.wa
 body.wall .focusbtn,body.wall .widebtn{display:none!important}
 body.wall{min-height:0!important;padding-bottom:0!important}
 body.wall main#grid{max-width:none}
+
+/* Glass look: neutral glass tiles, color only where it carries meaning. */
+@keyframes cardin{from{opacity:0;transform:translateY(40px) scale(.95);filter:blur(10px)}}
+@keyframes sheenbg{0%{background-position:150% 0}55%,100%{background-position:-50% 0}}
+@keyframes drift{from{transform:translate(0,0) scale(1)}to{transform:translate(9%,12%) scale(1.3)}}
+@keyframes chargeflow{from{transform:translateY(100%)}to{transform:translateY(-100%)}}
+@keyframes boltpulse{0%,100%{opacity:.55;transform:scale(.94)}50%{opacity:1;transform:scale(1.06)}}
+body:before,body:after{content:'';position:fixed;z-index:-1;width:60vw;height:50vh;border-radius:50%;pointer-events:none;animation:drift 20s ease-in-out infinite alternate}
+body:before{left:-12vw;top:-8vh;background:radial-gradient(closest-side,rgba(110,150,220,.14),rgba(110,150,220,0))}
+body:after{right:-14vw;bottom:-6vh;background:radial-gradient(closest-side,rgba(150,140,200,.12),rgba(150,140,200,0));animation-direction:alternate-reverse}
+.charge{position:absolute;left:0;right:0;bottom:0;height:100%;background:linear-gradient(to top,transparent 0%,rgba(255,255,255,.4) 50%,transparent 100%);animation:chargeflow 2.6s ease-in-out infinite}
+.bolt{position:absolute;left:50%;top:50%;width:32px;height:32px;margin:-16px 0 0 -16px;filter:drop-shadow(0 0 8px rgba(5,5,7,.6));animation:boltpulse 2.4s ease-in-out infinite}
+main#grid>.card:nth-child(1){animation-delay:.05s}main#grid>.card:nth-child(2){animation-delay:.12s}main#grid>.card:nth-child(3){animation-delay:.19s}
+main#grid>.card:nth-child(4){animation-delay:.26s}main#grid>.card:nth-child(5){animation-delay:.33s}main#grid>.card:nth-child(6){animation-delay:.4s}
+main#grid>.card:nth-child(7){animation-delay:.47s}main#grid>.card:nth-child(8){animation-delay:.54s}main#grid>.card:nth-child(n+9){animation-delay:.6s}
+@media (prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
+body.wall .card{animation:none}
+/* The alert list is every alert in full: cap it so one panel cannot make the page thousands of pixels tall. */
+#al-list{max-height:560px;overflow-y:auto;padding-right:6px;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.2) transparent}
 </style>
 </head>
 <body>
-<div id="flicker" style="position:fixed;inset:0;background:#3a0d0d;pointer-events:none;z-index:60;display:none;"></div>
-<div id="sweep" style="position:fixed;top:0;left:0;width:220px;height:2px;background:linear-gradient(90deg,transparent,#57e389,transparent);z-index:50;opacity:0;"></div>
+<div id="flicker" style="position:fixed;inset:0;background:#2e0d18;pointer-events:none;z-index:60;display:none;"></div>
+<div id="sweep" style="position:fixed;top:0;left:0;width:220px;height:2px;background:linear-gradient(90deg,transparent,#3ddc97,transparent);z-index:50;opacity:0;"></div>
 
-<div id="sticky" style="position:fixed;top:0;left:0;right:0;z-index:45;display:none;align-items:center;flex-wrap:wrap;gap:14px;padding:10px 24px;background:rgba(7,12,8,.86);backdrop-filter:blur(12px);border-bottom:1px solid #16211a;font-family:'JetBrains Mono',monospace;font-size:12px;animation:rise .3s ease-out;">
-  <span style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:14px;color:#e6f2e8;">FranklinWH</span>
-  <span style="display:inline-block;width:110px;height:6px;border-radius:999px;background:#18231a;position:relative;overflow:hidden;"><span id="st-bar" style="position:absolute;top:0;left:0;bottom:0;width:0%;border-radius:999px;background:linear-gradient(90deg,#1f7a44,#57e389);"></span></span>
-  <span id="st-soc" style="color:#57e389;font-weight:700;"></span>
-  <span id="st-solar" style="color:#5f7263;"></span>
-  <span id="st-load" style="color:#5f7263;"></span>
-  <span id="st-saved" style="color:#57e389;"></span>
-  <span id="st-status" style="margin-left:auto;color:#57e389;"></span>
+<div id="sticky" style="position:fixed;top:0;left:0;right:0;z-index:45;display:none;align-items:center;flex-wrap:wrap;gap:14px;padding:10px 24px;background:rgba(5,5,7,.86);backdrop-filter:blur(12px);border-bottom:1px solid #26262c;font-family:'Space Grotesk',sans-serif;font-size:12px;animation:rise .3s ease-out;">
+  <span style="font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:14px;color:#f2f2f5;">FranklinWH</span>
+  <span style="display:inline-block;width:110px;height:6px;border-radius:999px;background:#26262c;position:relative;overflow:hidden;"><span id="st-bar" style="position:absolute;top:0;left:0;bottom:0;width:0%;border-radius:999px;background:linear-gradient(90deg,#2fbf85,#3ddc97);"></span></span>
+  <span id="st-soc" style="color:#3ddc97;font-weight:700;"></span>
+  <span id="st-solar" style="color:#9a9aa6;"></span>
+  <span id="st-load" style="color:#9a9aa6;"></span>
+  <span id="st-saved" style="color:#3ddc97;"></span>
+  <span id="st-status" style="margin-left:auto;color:#3ddc97;"></span>
 </div>
 
-<header style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;max-width:1240px;margin:0 auto;padding:28px 24px 20px 24px;border-bottom:1px solid #16211a;">
-  <div style="font-size:22px;font-weight:700;letter-spacing:-0.01em;">FranklinWH <span id="hd-brand" style="color:#57e389;">Energy Advisor</span></div>
-  <div class="mono" style="display:flex;align-items:center;gap:10px;font-size:12px;letter-spacing:.14em;color:#6d8272;flex-wrap:wrap;">
+<header style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;max-width:1240px;margin:0 auto;padding:28px 24px 20px 24px;border-bottom:1px solid #26262c;">
+  <div style="font-size:22px;font-weight:700;letter-spacing:-0.01em;">FranklinWH <span id="hd-brand" style="color:#3ddc97;">Energy Advisor</span></div>
+  <div class="mono" style="display:flex;align-items:center;gap:10px;font-size:12px;letter-spacing:.14em;color:#a0a0ac;flex-wrap:wrap;">
     <span id="hd-datetime"></span>
-    <span style="color:#2a3a2e;">·</span>
-    <span id="hd-status-wrap" style="display:inline-flex;align-items:center;gap:7px;color:#57e389;">
-      <span id="hd-dot" style="width:7px;height:7px;border-radius:50%;background:#57e389;animation:pulse 1.6s ease-in-out infinite;box-shadow:0 0 8px #57e389;"></span>
+    <span style="color:#4a4a56;">·</span>
+    <span id="hd-status-wrap" style="display:inline-flex;align-items:center;gap:7px;color:#3ddc97;">
+      <span id="hd-dot" style="width:7px;height:7px;border-radius:50%;background:#3ddc97;animation:pulse 1.6s ease-in-out infinite;box-shadow:0 0 8px #3ddc97;"></span>
       <span id="hd-status">POLLING OK</span>
     </span>
-    <span id="hd-apierrors" title="" style="display:none;color:#f5b942;">⚠ API ERRORS</span>
-    <span style="color:#2a3a2e;">·</span>
-    <span id="hd-poll" style="color:#4c5f50;">LAST POLL — · NEXT —</span>
-    <span style="color:#2a3a2e;">·</span>
-    <span style="color:#57e389;">SAVED TODAY <b id="hd-saved" style="font-weight:700;">$0.00</b></span>
-    <button id="hd-unread" style="display:none;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:#07160b;background:#57e389;border:none;border-radius:999px;padding:5px 11px;cursor:pointer;box-shadow:0 0 12px rgba(87,227,137,.5);animation:pulse 1.6s ease-in-out infinite;" title="Unread alerts — click to view"></button>
+    <span id="hd-apierrors" title="" style="display:none;color:#ffc247;">⚠ API ERRORS</span>
+    <span style="color:#4a4a56;">·</span>
+    <span id="hd-poll" style="color:#8a8a96;">LAST POLL — · NEXT —</span>
+    <span style="color:#4a4a56;">·</span>
+    <span style="color:#3ddc97;">SAVED TODAY <b id="hd-saved" style="font-weight:700;">$0.00</b></span>
+    <button id="hd-unread" style="display:none;font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;color:#050507;background:#3ddc97;border:none;border-radius:999px;padding:5px 11px;cursor:pointer;box-shadow:0 0 12px rgba(61,220,151,.5);animation:pulse 1.6s ease-in-out infinite;" title="Unread alerts — click to view"></button>
   </div>
 </header>
 
 <div id="toolbar" style="max-width:1240px;margin:0 auto;padding:14px 24px 0 24px;display:flex;flex-wrap:wrap;align-items:center;gap:10px;"></div>
 
-<div id="hints" style="display:none;position:fixed;left:20px;bottom:20px;z-index:66;width:280px;background:rgba(10,15,11,.97);border:1px solid #2e5c3a;border-radius:14px;padding:16px;box-shadow:0 16px 40px rgba(0,0,0,.6);animation:rise .4s ease-out;">
-  <div class="mono" style="font-size:10px;letter-spacing:.18em;color:#57e389;font-weight:700;">GETTING AROUND</div>
-  <div style="font-size:12.5px;color:#9db8a2;line-height:1.8;margin-top:10px;">⠿ drag a panel anywhere — live drop preview<br>✕ hide · ⤢ expand · H hides hovered panel<br>drag across charts to scrub, or ← → ↑ ↓<br>what-if slider re-plans the battery live</div>
-  <button id="hints-ok" class="mono" style="margin-top:12px;font-size:10px;letter-spacing:.12em;font-weight:700;color:#07160b;background:#57e389;border:none;border-radius:8px;padding:8px 16px;cursor:pointer;width:100%;">GOT IT</button>
+<div id="hints" style="display:none;position:fixed;left:20px;bottom:20px;z-index:66;width:280px;background:rgba(10,10,13,.97);border:1px solid #2c6b52;border-radius:14px;padding:16px;box-shadow:0 16px 40px rgba(0,0,0,.6);animation:rise .4s ease-out;">
+  <div class="mono" style="font-size:10px;letter-spacing:.18em;color:#3ddc97;font-weight:700;">GETTING AROUND</div>
+  <div style="font-size:12.5px;color:#c8c8d0;line-height:1.8;margin-top:10px;">⠿ drag a panel anywhere — live drop preview<br>✕ hide · ⤢ expand · H hides hovered panel<br>drag across charts to scrub, or ← → ↑ ↓<br>what-if slider re-plans the battery live</div>
+  <button id="hints-ok" class="mono" style="margin-top:12px;font-size:10px;letter-spacing:.12em;font-weight:700;color:#050507;background:#3ddc97;border:none;border-radius:8px;padding:8px 16px;cursor:pointer;width:100%;">GOT IT</button>
 </div>
 
-<div id="dragpill" style="display:none;position:fixed;z-index:70;pointer-events:none;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.14em;font-weight:700;color:#07160b;background:#57e389;border-radius:999px;padding:6px 12px;transform:translate(14px,14px);box-shadow:0 8px 24px rgba(0,0,0,.5);"></div>
-<div id="minimap" style="display:none;position:fixed;right:20px;bottom:20px;z-index:65;width:230px;background:rgba(10,15,11,.96);border:1px solid #26382b;border-radius:12px;padding:12px;box-shadow:0 12px 36px rgba(0,0,0,.6);pointer-events:none;animation:rise .25s ease-out;">
+<div id="dragpill" style="display:none;position:fixed;z-index:70;pointer-events:none;font-family:'Space Grotesk',sans-serif;font-size:10px;letter-spacing:.14em;font-weight:700;color:#050507;background:#3ddc97;border-radius:999px;padding:6px 12px;transform:translate(14px,14px);box-shadow:0 8px 24px rgba(0,0,0,.5);"></div>
+<div id="minimap" style="display:none;position:fixed;right:20px;bottom:20px;z-index:65;width:230px;background:rgba(10,10,13,.96);border:1px solid #34343c;border-radius:12px;padding:12px;box-shadow:0 12px 36px rgba(0,0,0,.6);pointer-events:none;animation:rise .25s ease-out;">
   <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;">
-    <span class="mono" style="font-size:9px;letter-spacing:.18em;color:#5f7263;">DROP PREVIEW</span>
-    <span class="mono" style="font-size:8px;letter-spacing:.1em;color:#3f5244;">RELEASE TO APPLY</span>
+    <span class="mono" style="font-size:9px;letter-spacing:.18em;color:#9a9aa6;">DROP PREVIEW</span>
+    <span class="mono" style="font-size:8px;letter-spacing:.1em;color:#6e6e7a;">RELEASE TO APPLY</span>
   </div>
   <div style="display:flex;gap:4px;align-items:flex-start;">
     <div id="mini-l" style="flex:1;display:flex;flex-direction:column;gap:4px;"></div>
     <div id="mini-r" style="flex:1;display:flex;flex-direction:column;gap:4px;"></div>
   </div>
 </div>
-<div id="dropind" style="display:none;position:fixed;height:4px;border-radius:999px;background:#57e389;box-shadow:0 0 14px rgba(87,227,137,.8);z-index:60;pointer-events:none;transition:top .18s ease, left .18s ease, width .18s ease;"></div>
+<div id="dropind" style="display:none;position:fixed;height:4px;border-radius:999px;background:#3ddc97;box-shadow:0 0 14px rgba(61,220,151,.8);z-index:60;pointer-events:none;transition:top .18s ease, left .18s ease, width .18s ease;"></div>
 
-<div id="managebd" style="display:none;position:fixed;inset:0;z-index:80;background:rgba(4,7,5,.72);backdrop-filter:blur(2px);"></div>
-<div id="managemodal" style="display:none;position:fixed;z-index:81;top:50%;left:50%;transform:translate(-50%,-50%);width:min(480px,92vw);max-height:80vh;overflow-y:auto;background:#101711;border:1px solid #1c2a1e;border-radius:16px;padding:22px;box-shadow:0 24px 60px rgba(0,0,0,.6);animation:rise .3s ease-out;">
+<div id="managebd" style="display:none;position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.72);backdrop-filter:blur(2px);"></div>
+<div id="managemodal" style="display:none;position:fixed;z-index:81;top:50%;left:50%;transform:translate(-50%,-50%);width:min(480px,92vw);max-height:80vh;overflow-y:auto;background:#121216;border:1px solid #2a2a31;border-radius:16px;padding:22px;box-shadow:0 24px 60px rgba(0,0,0,.6);animation:rise .3s ease-out;">
   <div style="display:flex;justify-content:space-between;align-items:center;">
-    <div class="plabel" style="color:#57e389;">MANAGE PANELS</div>
-    <span id="manage-close" style="cursor:pointer;color:#5f7263;font-size:14px;" title="Close">✕</span>
+    <div class="plabel" style="color:#3ddc97;">MANAGE PANELS</div>
+    <span id="manage-close" style="cursor:pointer;color:#9a9aa6;font-size:14px;" title="Close">✕</span>
   </div>
   <div id="manage-list" style="display:flex;flex-direction:column;gap:8px;margin-top:16px;"></div>
 </div>
 
 <div id="banner-outage" style="display:none;max-width:1240px;margin:18px auto 0 auto;padding:0 24px;">
-  <div style="background:linear-gradient(90deg,#2a0d0a,#1c0b08);border:1px solid #6e2019;border-radius:16px;padding:18px 24px;display:flex;flex-wrap:wrap;align-items:center;gap:18px;animation:rise .5s cubic-bezier(.2,.9,.3,1.2);">
+  <div style="background:linear-gradient(90deg,#26101a,#1c0c14);border:1px solid #6e2a3a;border-radius:16px;padding:18px 24px;display:flex;flex-wrap:wrap;align-items:center;gap:18px;animation:rise .5s cubic-bezier(.2,.9,.3,1.2);">
     <span style="font-size:26px;">🔴</span>
     <div style="flex:1;min-width:220px;">
-      <div class="mono" style="font-size:12px;letter-spacing:.18em;color:#ff8a7a;font-weight:700;">GRID DOWN · RUNNING ON BATTERY</div>
-      <div style="font-size:14px;color:#d9a8a0;margin-top:4px;">Backup ~<b class="tte" style="color:#ffb4a8;"></b> at current load · Conserve: turn off AC, EV, dryer, pool pump.</div>
+      <div class="mono" style="font-size:12px;letter-spacing:.18em;color:#ff6b8b;font-weight:700;">GRID DOWN · RUNNING ON BATTERY</div>
+      <div style="font-size:14px;color:#d9a8b4;margin-top:4px;">Backup ~<b class="tte" style="color:#ffa3b5;"></b> at current load · Conserve: turn off AC, EV, dryer, pool pump.</div>
     </div>
-    <div class="mono tte" style="font-size:22px;font-weight:700;color:#ff8a7a;"></div>
+    <div class="mono tte" style="font-size:22px;font-weight:700;color:#ff6b8b;"></div>
   </div>
 </div>
 <div id="banner-peak" style="display:none;max-width:1240px;margin:18px auto 0 auto;padding:0 24px;">
-  <div style="background:linear-gradient(90deg,#241a06,#171106);border:1px solid #6b5216;border-radius:16px;padding:18px 24px;display:flex;flex-wrap:wrap;align-items:center;gap:18px;animation:rise .5s cubic-bezier(.2,.9,.3,1.2), glowPulse 3s ease-in-out infinite;">
+  <div style="background:linear-gradient(90deg,#1f1a0c,#17140a);border:1px solid #6b5420;border-radius:16px;padding:18px 24px;display:flex;flex-wrap:wrap;align-items:center;gap:18px;animation:rise .5s cubic-bezier(.2,.9,.3,1.2), glowPulse 3s ease-in-out infinite;">
     <span style="font-size:26px;">⚡</span>
     <div style="flex:1;min-width:220px;">
-      <div class="mono" id="peak-title" style="font-size:12px;letter-spacing:.18em;color:#f5b942;font-weight:700;">ON-PEAK ACTIVE · 4–9 PM</div>
-      <div style="font-size:14px;color:#cbb27a;margin-top:4px;">Battery holding the line — covering <b id="peak-load" style="color:#f5d18a;"></b> home load · grid import <b id="peak-grid" style="color:#f5d18a;"></b></div>
+      <div class="mono" id="peak-title" style="font-size:12px;letter-spacing:.18em;color:#ffc247;font-weight:700;">ON-PEAK ACTIVE · 4–9 PM</div>
+      <div style="font-size:14px;color:#d9c08a;margin-top:4px;">Battery holding the line — covering <b id="peak-load" style="color:#ffd27a;"></b> home load · grid import <b id="peak-grid" style="color:#ffd27a;"></b></div>
     </div>
     <div style="text-align:right;">
-      <div class="mono" style="font-size:10px;letter-spacing:.18em;color:#8a7440;">ENDS IN</div>
-      <div class="mono" id="peak-cd" style="font-size:22px;font-weight:700;color:#f5b942;"></div>
+      <div class="mono" style="font-size:10px;letter-spacing:.18em;color:#a38b4e;">ENDS IN</div>
+      <div class="mono" id="peak-cd" style="font-size:22px;font-weight:700;color:#ffc247;"></div>
     </div>
   </div>
 </div>
@@ -171,7 +192,7 @@ const WALL_COLS = {battery:1, forecast:1, flow:2, touclock:3, vpp:3};   // anyth
 const WALL_RELOAD_MS = 6 * 3600 * 1000;   // fresh page every 6 h: no memory creep, picks up dashboard updates
 const CAP0 = 13.6;
 const $ = id => document.getElementById(id);
-const M = "'JetBrains Mono',monospace";
+const M = "'Space Grotesk',sans-serif";
 const PANEL_IDS = ['battery','history','flow','bill','forecast','sundown','mode','ebplan','touclock','accuracy','batteryhealth','attribution','savings','alerts','digests','ev','vpp','sunpath'];
 const PANEL_LABELS = {battery:'BATTERY',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',sundown:'SUNDOWN',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',attribution:'ATTRIBUTION',savings:'SAVINGS',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING',vpp:'VPP EVENT',sunpath:'SUN PATH'};
 
@@ -222,17 +243,24 @@ function mkPanel(id, inner){
 
 mkPanel('battery', `
   <div class="plabel">BATTERY STATE OF CHARGE</div>
-  <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:16px;margin-top:14px;">
-    <div id="b-soc" style="font-size:76px;font-weight:700;line-height:1;color:#57e389;text-shadow:0 0 34px rgba(87,227,137,.35);transition:color .6s;">—%</div>
-    <div id="b-status" class="mono" style="font-size:13px;color:#7d937f;"></div>
-  </div>
-  <div style="margin-top:22px;height:12px;border-radius:999px;background:#18231a;position:relative;overflow:hidden;">
-    <div id="b-bar" style="position:absolute;top:0;left:0;bottom:0;width:0%;border-radius:999px;background:linear-gradient(90deg,#1f7a44,#57e389);transition:width .5s ease;box-shadow:0 0 16px rgba(87,227,137,.35);overflow:hidden;">
-      <div style="position:absolute;inset:0;background:linear-gradient(100deg,transparent 30%,rgba(255,255,255,.35) 50%,transparent 70%);background-size:200% 100%;animation:shimmer 2.4s linear infinite;"></div>
+  <div style="display:flex;align-items:center;flex-wrap:wrap;gap:28px;margin-top:16px;">
+    <div style="display:flex;flex-direction:column;align-items:center;flex:none;" aria-hidden="true">
+      <div style="width:34px;height:9px;border-radius:5px 5px 0 0;background:rgba(255,255,255,.28);"></div>
+      <div style="position:relative;box-sizing:border-box;width:92px;height:214px;border-radius:26px;border:2px solid rgba(255,255,255,.28);padding:5px;background:rgba(255,255,255,.04);">
+        <div style="position:relative;width:100%;height:100%;border-radius:20px;overflow:hidden;background:rgba(255,255,255,.06);">
+          <div id="b-bar" style="position:absolute;left:0;right:0;bottom:0;height:0%;overflow:hidden;background:linear-gradient(to top,#2fbf85,#3ddc97);transition:height .9s cubic-bezier(.2,.8,.2,1);"><div id="b-charge" class="charge" style="display:none;"></div></div>
+          <div style="position:absolute;inset:0;background:repeating-linear-gradient(to top,transparent 0,transparent 17px,#0c0e11 17px,#0c0e11 20px);"></div>
+          <svg id="b-bolt" class="bolt" viewBox="0 0 24 24" style="display:none;"><path d="M13 2L4 14h6l-1 8 9-12h-6z" fill="#fff" stroke="#0c0e11" stroke-width="1.2" stroke-linejoin="round"/></svg>
+        </div>
+      </div>
     </div>
-  </div>
-  <div class="mono" style="display:flex;justify-content:space-between;margin-top:10px;font-size:11px;color:#4c5f50;">
-    <span id="b-kwh"></span><span id="b-tte"></span>
+    <div style="flex:1 1 200px;min-width:0;">
+      <div id="b-soc" style="font-family:'Space Grotesk',sans-serif;font-size:88px;font-weight:300;letter-spacing:-.04em;line-height:1;color:#3ddc97;transition:color .6s;">—%</div>
+      <div id="b-status" class="mono" style="font-size:13px;color:#b0b0ba;margin-top:10px;"></div>
+      <div class="mono" style="display:flex;justify-content:space-between;gap:12px;margin-top:18px;font-size:12px;color:#a0a0ac;">
+        <span id="b-kwh"></span><span id="b-tte"></span>
+      </div>
+    </div>
   </div>`);
 
 mkPanel('history', `
@@ -240,130 +268,130 @@ mkPanel('history', `
     <div class="plabel">LAST 24 HOURS</div>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
       <button id="h-cmp" class="chip">↔ VS YESTERDAY</button>
-      <div id="h-info" class="mono" style="font-size:10px;letter-spacing:.08em;color:#57e389;">24H · 15-MIN SAMPLES · DRAG TO SCRUB</div>
+      <div id="h-info" class="mono" style="font-size:10px;letter-spacing:.08em;color:#3ddc97;">24H · 15-MIN SAMPLES · DRAG TO SCRUB</div>
     </div>
   </div>
   <div id="h-scrub" style="position:relative;margin-top:14px;cursor:crosshair;touch-action:none;">
-    <div id="h-cursor" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(217,245,226,.5);pointer-events:none;z-index:2;"></div>
+    <div id="h-cursor" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(236,236,241,.5);pointer-events:none;z-index:2;"></div>
     <div style="display:flex;flex-direction:column;gap:10px;">
-      <div><div class="mono" style="font-size:9px;letter-spacing:.14em;color:#4c5f50;margin-bottom:3px;">SOC %</div>
-        <svg viewBox="0 0 400 52" preserveAspectRatio="none" style="display:block;width:100%;height:44px;"><path id="hp-socY" fill="none" stroke="#9db8a2" stroke-width="1.2" stroke-dasharray="4 3" opacity="0"></path><path id="hp-soc" fill="none" stroke="#57e389" stroke-width="1.6"></path></svg></div>
-      <div><div class="mono" style="font-size:9px;letter-spacing:.14em;color:#4c5f50;margin-bottom:3px;">SOLAR kW</div>
-        <svg viewBox="0 0 400 52" preserveAspectRatio="none" style="display:block;width:100%;height:44px;"><path id="hp-solarY" fill="none" stroke="#9db8a2" stroke-width="1.2" stroke-dasharray="4 3" opacity="0"></path><path id="hp-solar" fill="none" stroke="#8df0b0" stroke-width="1.6"></path></svg></div>
-      <div><div class="mono" style="font-size:9px;letter-spacing:.14em;color:#4c5f50;margin-bottom:3px;">HOME LOAD kW</div>
-        <svg viewBox="0 0 400 52" preserveAspectRatio="none" style="display:block;width:100%;height:44px;"><path id="hp-loadY" fill="none" stroke="#9db8a2" stroke-width="1.2" stroke-dasharray="4 3" opacity="0"></path><path id="hp-load" fill="none" stroke="#d9f5e2" stroke-width="1.4" opacity="0.8"></path></svg></div>
+      <div><div class="mono" style="font-size:9px;letter-spacing:.14em;color:#8a8a96;margin-bottom:3px;">SOC %</div>
+        <svg viewBox="0 0 400 52" preserveAspectRatio="none" style="display:block;width:100%;height:44px;"><path id="hp-socY" fill="none" stroke="#c8c8d0" stroke-width="1.2" stroke-dasharray="4 3" opacity="0"></path><path id="hp-soc" fill="none" stroke="#3ddc97" stroke-width="1.6"></path></svg></div>
+      <div><div class="mono" style="font-size:9px;letter-spacing:.14em;color:#8a8a96;margin-bottom:3px;">SOLAR kW</div>
+        <svg viewBox="0 0 400 52" preserveAspectRatio="none" style="display:block;width:100%;height:44px;"><path id="hp-solarY" fill="none" stroke="#c8c8d0" stroke-width="1.2" stroke-dasharray="4 3" opacity="0"></path><path id="hp-solar" fill="none" stroke="#7af0bd" stroke-width="1.6"></path></svg></div>
+      <div><div class="mono" style="font-size:9px;letter-spacing:.14em;color:#8a8a96;margin-bottom:3px;">HOME LOAD kW</div>
+        <svg viewBox="0 0 400 52" preserveAspectRatio="none" style="display:block;width:100%;height:44px;"><path id="hp-loadY" fill="none" stroke="#c8c8d0" stroke-width="1.2" stroke-dasharray="4 3" opacity="0"></path><path id="hp-load" fill="none" stroke="#ececf1" stroke-width="1.4" opacity="0.8"></path></svg></div>
     </div>
   </div>`);
 
 mkPanel('flow', `
   <div style="display:flex;justify-content:space-between;align-items:center;">
     <div class="plabel">LIVE ENERGY FLOW</div>
-    <div class="mono" style="font-size:10px;letter-spacing:.14em;color:#3f5244;">kW · REAL-TIME</div>
+    <div class="mono" style="font-size:10px;letter-spacing:.14em;color:#6e6e7a;">kW · REAL-TIME</div>
   </div>
   <canvas id="flowcv" style="width:100%;height:250px;display:block;margin-top:8px;"></canvas>`);
 
 mkPanel('bill', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel" id="bill-title">BILL PROJECTION</div>
-    <div class="mono" id="bill-day" style="font-size:10px;letter-spacing:.1em;color:#3f5244;"></div>
+    <div class="mono" id="bill-day" style="font-size:10px;letter-spacing:.1em;color:#6e6e7a;"></div>
   </div>
-  <div style="margin-top:14px;height:6px;border-radius:999px;background:#18231a;position:relative;overflow:hidden;">
-    <div id="bill-prog" style="position:absolute;top:0;left:0;bottom:0;width:0%;border-radius:999px;background:linear-gradient(90deg,#1f7a44,#57e389);"></div>
+  <div style="margin-top:14px;height:6px;border-radius:999px;background:#26262c;position:relative;overflow:hidden;">
+    <div id="bill-prog" style="position:absolute;top:0;left:0;bottom:0;width:0%;border-radius:999px;background:linear-gradient(90deg,#2fbf85,#3ddc97);"></div>
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px;">
-    <div><div id="bill-mtd" style="font-size:30px;font-weight:700;color:#e6f2e8;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">net cost month-to-date</div></div>
-    <div><div id="bill-proj" style="font-size:30px;font-weight:700;color:#f5d18a;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">projected end of cycle</div></div>
+    <div><div id="bill-mtd" style="font-size:30px;font-weight:700;color:#f2f2f5;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#9a9aa6;margin-top:4px;">net cost month-to-date</div></div>
+    <div><div id="bill-proj" style="font-size:30px;font-weight:700;color:#ffd27a;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#9a9aa6;margin-top:4px;">projected end of cycle</div></div>
   </div>
   <div style="display:flex;flex-direction:column;gap:10px;margin-top:18px;">
     <div style="display:flex;align-items:center;gap:10px;">
-      <span class="mono" style="font-size:9px;letter-spacing:.12em;color:#7d937f;width:66px;">THIS CYCLE</span>
-      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="bill-curbar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#1f7a44,#57e389);"></div></div>
-      <span id="bill-curval" class="mono" style="font-size:10px;color:#9db8a2;width:52px;text-align:right;"></span>
+      <span class="mono" style="font-size:9px;letter-spacing:.12em;color:#b0b0ba;width:66px;">THIS CYCLE</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#26262c;overflow:hidden;"><div id="bill-curbar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#2fbf85,#3ddc97);"></div></div>
+      <span id="bill-curval" class="mono" style="font-size:10px;color:#c8c8d0;width:52px;text-align:right;"></span>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span class="mono" style="font-size:9px;letter-spacing:.12em;color:#5f7263;width:66px;">PRIOR</span>
-      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="bill-priorbar" style="width:100%;height:100%;border-radius:6px;background:#2a3a2e;"></div></div>
-      <span id="bill-priorval" class="mono" style="font-size:10px;color:#7d937f;width:52px;text-align:right;"></span>
+      <span class="mono" style="font-size:9px;letter-spacing:.12em;color:#9a9aa6;width:66px;">PRIOR</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#26262c;overflow:hidden;"><div id="bill-priorbar" style="width:100%;height:100%;border-radius:6px;background:#4a4a56;"></div></div>
+      <span id="bill-priorval" class="mono" style="font-size:10px;color:#b0b0ba;width:52px;text-align:right;"></span>
     </div>
   </div>
-  <div id="bill-foot" class="mono" style="font-size:11px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+  <div id="bill-foot" class="mono" style="font-size:11px;color:#a0a0ac;margin-top:14px;line-height:1.6;"></div>`);
 
 mkPanel('forecast', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel">SOLAR FORECAST · NEXT 12H</div>
-    <div class="mono" style="font-size:10px;letter-spacing:.1em;color:#3f5244;">● SOC PROJECTION</div>
+    <div class="mono" style="font-size:10px;letter-spacing:.1em;color:#6e6e7a;">● SOC PROJECTION</div>
   </div>
   <div id="f-scrub" style="position:relative;margin-top:18px;height:150px;display:flex;align-items:flex-end;gap:6px;cursor:crosshair;touch-action:none;">
-    <div id="f-band" style="display:none;position:absolute;top:-6px;bottom:18px;background:rgba(245,185,66,.06);border-left:1px dashed #4a3a12;border-right:1px dashed #4a3a12;pointer-events:none;">
-      <div class="mono" style="position:absolute;top:-2px;left:6px;font-size:9px;letter-spacing:.16em;color:#8a7440;">ON-PEAK</div>
+    <div id="f-band" style="display:none;position:absolute;top:-6px;bottom:18px;background:rgba(255,194,71,.06);border-left:1px dashed #4a3d18;border-right:1px dashed #4a3d18;pointer-events:none;">
+      <div class="mono" style="position:absolute;top:-2px;left:6px;font-size:9px;letter-spacing:.16em;color:#a38b4e;">ON-PEAK</div>
     </div>
     <div id="f-bars" style="display:contents;"></div>
-    <div id="f-tip" style="display:none;position:absolute;bottom:150px;transform:translateX(-50%);background:#0c130d;border:1px solid #2a3f2e;border-radius:10px;padding:10px 14px;white-space:nowrap;z-index:5;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.5);"></div>
+    <div id="f-tip" style="display:none;position:absolute;bottom:150px;transform:translateX(-50%);background:#15151a;border:1px solid #34343c;border-radius:10px;padding:10px 14px;white-space:nowrap;z-index:5;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.5);"></div>
   </div>
   <div style="display:flex;align-items:center;gap:12px;margin-top:16px;flex-wrap:wrap;">
-    <span class="mono" style="font-size:10px;letter-spacing:.14em;color:#5f7263;">WHAT-IF · CLOUD COVER</span>
+    <span class="mono" style="font-size:10px;letter-spacing:.14em;color:#9a9aa6;">WHAT-IF · CLOUD COVER</span>
     <input id="f-cc" type="range" min="0" max="100" step="5" value="0" style="flex:1;min-width:120px;">
-    <span id="f-ccval" class="mono" style="font-size:11px;font-weight:700;color:#57e389;min-width:40px;text-align:right;">0%</span>
+    <span id="f-ccval" class="mono" style="font-size:11px;font-weight:700;color:#3ddc97;min-width:40px;text-align:right;">0%</span>
   </div>
-  <div id="f-health" class="mono" style="font-size:10px;color:#4c5f50;margin-top:10px;"></div>`);
+  <div id="f-health" class="mono" style="font-size:10px;color:#8a8a96;margin-top:10px;"></div>`);
 
 
 mkPanel('sundown', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel">SUNDOWN PROJECTION</div>
-    <div id="sd-time" class="mono" style="font-size:10px;letter-spacing:.1em;color:#3f5244;"></div>
+    <div id="sd-time" class="mono" style="font-size:10px;letter-spacing:.1em;color:#6e6e7a;"></div>
   </div>
   <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:14px;margin-top:14px;">
-    <div id="sd-pct" style="font-size:54px;font-weight:700;line-height:1;color:#57e389;transition:color .6s;">—%</div>
-    <div id="sd-sub" class="mono" style="font-size:12px;color:#7d937f;"></div>
+    <div id="sd-pct" style="font-size:54px;font-weight:700;line-height:1;color:#3ddc97;transition:color .6s;">—%</div>
+    <div id="sd-sub" class="mono" style="font-size:12px;color:#b0b0ba;"></div>
   </div>
-  <div id="sd-gauge" style="position:relative;height:14px;border-radius:7px;background:#18231a;margin-top:18px;"></div>
-  <div id="sd-ticks" class="mono" style="font-size:10px;color:#5f7263;margin-top:8px;"></div>
+  <div id="sd-gauge" style="position:relative;height:14px;border-radius:7px;background:#26262c;margin-top:18px;"></div>
+  <div id="sd-ticks" class="mono" style="font-size:10px;color:#9a9aa6;margin-top:8px;"></div>
   <div id="sd-verdict" class="mono" style="font-size:11.5px;margin-top:12px;line-height:1.6;"></div>
   <div id="sd-scen" style="margin-top:16px;display:flex;flex-direction:column;gap:9px;"></div>
-  <div id="sd-watch" class="mono" style="margin-top:16px;font-size:11px;line-height:1.7;color:#7d937f;"></div>
-  <div id="sd-foot" class="mono" style="font-size:10px;color:#4c5f50;margin-top:12px;line-height:1.6;"></div>`);
+  <div id="sd-watch" class="mono" style="margin-top:16px;font-size:11px;line-height:1.7;color:#b0b0ba;"></div>
+  <div id="sd-foot" class="mono" style="font-size:10px;color:#8a8a96;margin-top:12px;line-height:1.6;"></div>`);
 mkPanel('mode', `
-  <div id="m-burst" style="display:none;position:absolute;top:50%;left:70%;width:160px;height:160px;margin:-80px 0 0 -80px;border-radius:50%;background:radial-gradient(circle,rgba(87,227,137,.5),transparent 70%);animation:burst .9s ease-out forwards;pointer-events:none;"></div>
+  <div id="m-burst" style="display:none;position:absolute;top:50%;left:70%;width:160px;height:160px;margin:-80px 0 0 -80px;border-radius:50%;background:radial-gradient(circle,rgba(61,220,151,.5),transparent 70%);animation:burst .9s ease-out forwards;pointer-events:none;"></div>
   <div class="plabel">RECOMMENDED MODE</div>
   <div style="display:flex;align-items:center;flex-wrap:wrap;gap:14px;margin-top:18px;">
-    <span id="m-from" class="mono" style="font-size:13px;padding:9px 18px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;background:transparent;transition:all .5s;">—</span>
-    <span style="display:inline-flex;gap:2px;font-size:15px;color:#57e389;">
+    <span id="m-from" class="mono" style="font-size:13px;padding:9px 18px;border-radius:999px;border:1px solid #4a4a56;color:#c8c8d0;background:transparent;transition:all .5s;">—</span>
+    <span style="display:inline-flex;gap:2px;font-size:15px;color:#3ddc97;">
       <span style="animation:chev 1.1s ease-in-out infinite;">›</span>
       <span style="animation:chev 1.1s ease-in-out .18s infinite;">›</span>
       <span style="animation:chev 1.1s ease-in-out .36s infinite;">›</span>
     </span>
-    <span id="m-to" class="mono" style="font-size:13px;font-weight:700;padding:9px 18px;border-radius:999px;background:#57e389;color:#07160b;border:1px solid #57e389;box-shadow:0 0 22px rgba(87,227,137,.35);transition:all .5s;">—</span>
+    <span id="m-to" class="mono" style="font-size:13px;font-weight:700;padding:9px 18px;border-radius:999px;background:#3ddc97;color:#050507;border:1px solid #3ddc97;box-shadow:0 0 22px rgba(61,220,151,.35);transition:all .5s;">—</span>
   </div>
-  <div id="m-reason" style="font-size:13px;color:#7d937f;margin-top:16px;line-height:1.55;"></div>
+  <div id="m-reason" style="font-size:13px;color:#b0b0ba;margin-top:16px;line-height:1.55;"></div>
   <div id="m-applyrow" style="display:none;align-items:center;gap:16px;margin-top:18px;flex-wrap:wrap;">
-    <button id="m-apply" class="mono" style="font-size:12px;letter-spacing:.1em;font-weight:700;padding:11px 22px;border-radius:10px;border:1px solid #57e389;background:#57e389;color:#07160b;cursor:pointer;transition:all .4s;">APPLY</button>
+    <button id="m-apply" class="mono" style="font-size:12px;letter-spacing:.1em;font-weight:700;padding:11px 22px;border-radius:10px;border:1px solid #3ddc97;background:#3ddc97;color:#050507;cursor:pointer;transition:all .4s;">APPLY</button>
     <div id="m-sav" style="display:none;animation:rise .5s cubic-bezier(.2,.9,.3,1.2);">
-      <div class="mono" style="font-size:10px;letter-spacing:.16em;color:#4c5f50;">EST. SAVINGS TODAY</div>
-      <div id="m-savval" class="mono" style="font-size:22px;font-weight:700;color:#57e389;"></div>
+      <div class="mono" style="font-size:10px;letter-spacing:.16em;color:#8a8a96;">EST. SAVINGS TODAY</div>
+      <div id="m-savval" class="mono" style="font-size:22px;font-weight:700;color:#3ddc97;"></div>
     </div>
   </div>`);
 
 mkPanel('ebplan', `
   <div class="plabel">EMERGENCY-BACKUP CHARGE PLAN</div>
   <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:18px;">
-    <div class="tile"><div id="eb-soc4" style="font-size:24px;font-weight:700;color:#b9d8be;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">est. SoC @ 4 pm</div></div>
-    <div class="tile"><div id="eb-net" style="font-size:24px;font-weight:700;color:#b9d8be;">— <span style="font-size:14px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">net peak draw</div></div>
-    <div class="tile"><div id="eb-short" style="font-size:24px;font-weight:700;color:#57e389;">— <span style="font-size:14px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">EB shortfall</div></div>
+    <div class="tile"><div id="eb-soc4" style="font-size:24px;font-weight:700;color:#dcdce2;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#9a9aa6;margin-top:4px;">est. SoC @ 4 pm</div></div>
+    <div class="tile"><div id="eb-net" style="font-size:24px;font-weight:700;color:#dcdce2;">— <span style="font-size:14px;color:#b0b0ba;">kWh</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#9a9aa6;margin-top:4px;">net peak draw</div></div>
+    <div class="tile"><div id="eb-short" style="font-size:24px;font-weight:700;color:#3ddc97;">— <span style="font-size:14px;color:#b0b0ba;">kWh</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#9a9aa6;margin-top:4px;">EB shortfall</div></div>
   </div>
-  <div id="eb-msg" class="mono" style="font-size:11.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>
-  <div style="border-top:1px solid #18261b;margin-top:16px;padding-top:14px;display:flex;flex-direction:column;gap:10px;">
+  <div id="eb-msg" class="mono" style="font-size:11.5px;color:#a0a0ac;margin-top:14px;line-height:1.6;"></div>
+  <div style="border-top:1px solid #26262c;margin-top:16px;padding-top:14px;display:flex;flex-direction:column;gap:10px;">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-      <span class="mono" style="font-size:10px;letter-spacing:.1em;color:#5f7263;">WILL I MAKE IT</span>
-      <input id="wm-hours" type="number" min="1" max="24" value="8" style="width:48px;background:#0c130d;border:1px solid #18261b;border-radius:6px;color:#e6f2e8;font-family:'JetBrains Mono',monospace;font-size:11px;padding:4px 6px;">
-      <span class="mono" style="font-size:10px;color:#5f7263;">hours</span>
+      <span class="mono" style="font-size:10px;letter-spacing:.1em;color:#9a9aa6;">WILL I MAKE IT</span>
+      <input id="wm-hours" type="number" min="1" max="24" value="8" style="width:48px;background:#15151a;border:1px solid #26262c;border-radius:6px;color:#f2f2f5;font-family:'Space Grotesk',sans-serif;font-size:11px;padding:4px 6px;">
+      <span class="mono" style="font-size:10px;color:#9a9aa6;">hours</span>
       <button id="wm-check" class="chip">CHECK</button>
     </div>
     <div id="wm-result" class="mono" style="font-size:11px;line-height:1.6;"></div>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-      <span class="mono" style="font-size:10px;letter-spacing:.1em;color:#5f7263;">TIME TO</span>
-      <input id="until-target" type="number" min="0" max="100" value="80" style="width:48px;background:#0c130d;border:1px solid #18261b;border-radius:6px;color:#e6f2e8;font-family:'JetBrains Mono',monospace;font-size:11px;padding:4px 6px;">
-      <span class="mono" style="font-size:10px;color:#5f7263;">%</span>
+      <span class="mono" style="font-size:10px;letter-spacing:.1em;color:#9a9aa6;">TIME TO</span>
+      <input id="until-target" type="number" min="0" max="100" value="80" style="width:48px;background:#15151a;border:1px solid #26262c;border-radius:6px;color:#f2f2f5;font-family:'Space Grotesk',sans-serif;font-size:11px;padding:4px 6px;">
+      <span class="mono" style="font-size:10px;color:#9a9aa6;">%</span>
       <button id="until-check" class="chip">CHECK</button>
     </div>
     <div id="until-result" class="mono" style="font-size:11px;line-height:1.6;"></div>
@@ -373,19 +401,19 @@ mkPanel('touclock', `
   <div class="plabel">TOU RATE CLOCK · EV-TOU-5</div>
   <div style="display:flex;align-items:center;gap:26px;flex-wrap:wrap;margin-top:18px;">
     <div style="position:relative;width:168px;height:168px;flex-shrink:0;">
-      <div id="tc-ring" style="position:absolute;inset:0;border-radius:50%;background:conic-gradient(#2e5c3a 0% 100%);"></div>
-      <div style="position:absolute;inset:22px;border-radius:50%;background:#101711;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;">
-        <div id="tc-time" class="mono" style="font-size:16px;font-weight:700;color:#e6f2e8;"></div>
-        <div id="tc-period" class="mono" style="font-size:8.5px;letter-spacing:.1em;color:#57e389;font-weight:700;"></div>
-        <div id="tc-rate" class="mono" style="font-size:10px;color:#7d937f;"></div>
+      <div id="tc-ring" style="position:absolute;inset:0;border-radius:50%;background:conic-gradient(#2c6b52 0% 100%);"></div>
+      <div style="position:absolute;inset:22px;border-radius:50%;background:#121216;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;">
+        <div id="tc-time" class="mono" style="font-size:16px;font-weight:700;color:#f2f2f5;"></div>
+        <div id="tc-period" class="mono" style="font-size:8.5px;letter-spacing:.1em;color:#3ddc97;font-weight:700;"></div>
+        <div id="tc-rate" class="mono" style="font-size:10px;color:#b0b0ba;"></div>
       </div>
       <div id="tc-hand" style="position:absolute;left:50%;top:50%;width:2px;height:78px;margin-left:-1px;transform:rotate(0deg);transform-origin:50% 0;pointer-events:none;">
-        <div style="position:absolute;top:-78px;left:0;width:2px;height:26px;background:#d9f5e2;box-shadow:0 0 6px rgba(217,245,226,.9);border-radius:2px;"></div>
+        <div style="position:absolute;top:-78px;left:0;width:2px;height:26px;background:#ececf1;box-shadow:0 0 6px rgba(236,236,241,.9);border-radius:2px;"></div>
       </div>
-      <div class="mono" style="position:absolute;top:-14px;left:50%;transform:translateX(-50%);font-size:8px;color:#4c5f50;">12A</div>
-      <div class="mono" style="position:absolute;top:50%;right:-22px;transform:translateY(-50%);font-size:8px;color:#4c5f50;">6A</div>
-      <div class="mono" style="position:absolute;bottom:-14px;left:50%;transform:translateX(-50%);font-size:8px;color:#4c5f50;">12P</div>
-      <div class="mono" style="position:absolute;top:50%;left:-22px;transform:translateY(-50%);font-size:8px;color:#4c5f50;">6P</div>
+      <div class="mono" style="position:absolute;top:-14px;left:50%;transform:translateX(-50%);font-size:8px;color:#8a8a96;">12A</div>
+      <div class="mono" style="position:absolute;top:50%;right:-22px;transform:translateY(-50%);font-size:8px;color:#8a8a96;">6A</div>
+      <div class="mono" style="position:absolute;bottom:-14px;left:50%;transform:translateX(-50%);font-size:8px;color:#8a8a96;">12P</div>
+      <div class="mono" style="position:absolute;top:50%;left:-22px;transform:translateY(-50%);font-size:8px;color:#8a8a96;">6P</div>
     </div>
     <div id="tc-legend" class="mono" style="display:flex;flex-direction:column;gap:10px;font-size:11px;min-width:170px;"></div>
   </div>`);
@@ -393,66 +421,66 @@ mkPanel('touclock', `
 mkPanel('accuracy', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel">SOLAR FORECAST ACCURACY · 7D</div>
-    <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#3f5244;">▢ PREDICTED · ▦ ACTUAL</div>
+    <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#6e6e7a;">▢ PREDICTED · ▦ ACTUAL</div>
   </div>
   <div id="acc-bars" style="display:flex;align-items:flex-end;gap:12px;margin-top:18px;height:96px;"></div>
-  <div id="acc-foot" class="mono" style="font-size:10.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+  <div id="acc-foot" class="mono" style="font-size:10.5px;color:#a0a0ac;margin-top:14px;line-height:1.6;"></div>`);
 
 mkPanel('batteryhealth', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel">BATTERY HEALTH · EFFECTIVE CAPACITY</div>
-    <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#3f5244;">WEEKLY MEDIAN · 12W</div>
+    <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#6e6e7a;">WEEKLY MEDIAN · 12W</div>
   </div>
   <div id="bh-bars" style="display:flex;align-items:flex-end;gap:8px;margin-top:18px;height:96px;"></div>
-  <div id="bh-foot" class="mono" style="font-size:10.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+  <div id="bh-foot" class="mono" style="font-size:10.5px;color:#a0a0ac;margin-top:14px;line-height:1.6;"></div>`);
 
 mkPanel('attribution', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel">SELF-SUFFICIENCY · WHERE POWER CAME FROM</div>
-    <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#3f5244;">▮ BATTERY · ▮ SOLAR · ▮ GRID</div>
+    <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#6e6e7a;">▮ BATTERY · ▮ SOLAR · ▮ GRID</div>
   </div>
   <div id="attr-window" style="display:flex;gap:6px;margin-top:10px;"></div>
   <div id="attr-bars" style="display:flex;align-items:flex-end;gap:8px;margin-top:18px;height:110px;"></div>
-  <div id="attr-foot" class="mono" style="font-size:10.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+  <div id="attr-foot" class="mono" style="font-size:10.5px;color:#a0a0ac;margin-top:14px;line-height:1.6;"></div>`);
 
 mkPanel('savings', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel">SAVINGS · BATTERY + SOLAR</div>
-    <div class="mono" id="sav-window" style="font-size:10px;letter-spacing:.1em;color:#3f5244;"></div>
+    <div class="mono" id="sav-window" style="font-size:10px;letter-spacing:.1em;color:#6e6e7a;"></div>
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px;">
-    <div><div id="sav-window-total" style="font-size:30px;font-weight:700;color:#57e389;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">saved this window</div></div>
-    <div><div id="sav-lifetime" style="font-size:30px;font-weight:700;color:#f5d18a;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">lifetime tracked</div></div>
+    <div><div id="sav-window-total" style="font-size:30px;font-weight:700;color:#3ddc97;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#9a9aa6;margin-top:4px;">saved this window</div></div>
+    <div><div id="sav-lifetime" style="font-size:30px;font-weight:700;color:#ffd27a;">—</div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#9a9aa6;margin-top:4px;">lifetime tracked</div></div>
   </div>
   <div style="display:flex;flex-direction:column;gap:10px;margin-top:18px;">
     <div style="display:flex;align-items:center;gap:10px;">
-      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#f5b942;width:96px;">ON-PEAK</span>
-      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="sav-onpeak-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#8a6a1e,#f5b942);"></div></div>
-      <span id="sav-onpeak-val" class="mono" style="font-size:10px;color:#f5d18a;width:52px;text-align:right;"></span>
+      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#ffc247;width:96px;">ON-PEAK</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#26262c;overflow:hidden;"><div id="sav-onpeak-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#8a6d28,#ffc247);"></div></div>
+      <span id="sav-onpeak-val" class="mono" style="font-size:10px;color:#ffd27a;width:52px;text-align:right;"></span>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#9db8a2;width:96px;">OFF-PEAK</span>
-      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="sav-offpeak-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#2e5c3a,#57e389);"></div></div>
-      <span id="sav-offpeak-val" class="mono" style="font-size:10px;color:#9db8a2;width:52px;text-align:right;"></span>
+      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#c8c8d0;width:96px;">OFF-PEAK</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#26262c;overflow:hidden;"><div id="sav-offpeak-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#2c6b52,#3ddc97);"></div></div>
+      <span id="sav-offpeak-val" class="mono" style="font-size:10px;color:#c8c8d0;width:52px;text-align:right;"></span>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#7d937f;width:96px;">SUPER OFF-PEAK</span>
-      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="sav-sop-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#17351f,#2e5c3a);"></div></div>
-      <span id="sav-sop-val" class="mono" style="font-size:10px;color:#7d937f;width:52px;text-align:right;"></span>
+      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#b0b0ba;width:96px;">SUPER OFF-PEAK</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#26262c;overflow:hidden;"><div id="sav-sop-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#143a2c,#2c6b52);"></div></div>
+      <span id="sav-sop-val" class="mono" style="font-size:10px;color:#b0b0ba;width:52px;text-align:right;"></span>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
-      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#8fb4ff;width:96px;">EXPORT CREDIT</span>
-      <div style="flex:1;height:12px;border-radius:6px;background:#18231a;overflow:hidden;"><div id="sav-export-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#1e2c4a,#8fb4ff);"></div></div>
-      <span id="sav-export-val" class="mono" style="font-size:10px;color:#8fb4ff;width:52px;text-align:right;"></span>
+      <span class="mono" style="font-size:9px;letter-spacing:.1em;color:#5eb2ff;width:96px;">EXPORT CREDIT</span>
+      <div style="flex:1;height:12px;border-radius:6px;background:#26262c;overflow:hidden;"><div id="sav-export-bar" style="width:0%;height:100%;border-radius:6px;background:linear-gradient(90deg,#1f3250,#5eb2ff);"></div></div>
+      <span id="sav-export-val" class="mono" style="font-size:10px;color:#5eb2ff;width:52px;text-align:right;"></span>
     </div>
   </div>
-  <div id="sav-foot" class="mono" style="font-size:10.5px;color:#6d8272;margin-top:14px;line-height:1.6;"></div>`);
+  <div id="sav-foot" class="mono" style="font-size:10.5px;color:#a0a0ac;margin-top:14px;line-height:1.6;"></div>`);
 
 mkPanel('alerts', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel">ALERTS · LIVE</div>
-    <div class="mono" style="display:inline-flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;color:#57e389;">
-      <span style="width:6px;height:6px;border-radius:50%;background:#57e389;animation:pulse 1.6s ease-in-out infinite;"></span>@franklinwh_advisor_bot
+    <div class="mono" style="display:inline-flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;color:#3ddc97;">
+      <span style="width:6px;height:6px;border-radius:50%;background:#3ddc97;animation:pulse 1.6s ease-in-out infinite;"></span>@franklinwh_advisor_bot
     </div>
   </div>
   <div id="al-filters" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:14px;"></div>
@@ -471,36 +499,36 @@ mkPanel('digests', `
 
 mkPanel('ev', `
   <div class="plabel">EV CHARGING</div>
-  <div id="ev-empty" class="mono" style="font-size:11px;color:#4c5f50;margin-top:18px;"></div>
+  <div id="ev-empty" class="mono" style="font-size:11px;color:#8a8a96;margin-top:18px;"></div>
   <div id="ev-body" style="display:none;">
     <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:18px;">
-      <div class="tile"><div id="ev-noev" style="font-size:24px;font-weight:700;color:#b9d8be;">— <span style="font-size:14px;color:#7d937f;">%</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">without EV @ <span id="ev-hour">—</span></div></div>
-      <div class="tile"><div id="ev-withev" style="font-size:24px;font-weight:700;color:#57e389;">— <span style="font-size:14px;color:#7d937f;">%</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;margin-top:4px;">with EV (to <span id="ev-kw">—</span>% floor)</div></div>
+      <div class="tile"><div id="ev-noev" style="font-size:24px;font-weight:700;color:#dcdce2;">— <span style="font-size:14px;color:#b0b0ba;">%</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#9a9aa6;margin-top:4px;">without EV @ <span id="ev-hour">—</span></div></div>
+      <div class="tile"><div id="ev-withev" style="font-size:24px;font-weight:700;color:#3ddc97;">— <span style="font-size:14px;color:#b0b0ba;">%</span></div><div class="mono" style="font-size:10px;letter-spacing:.08em;color:#9a9aa6;margin-top:4px;">with EV (to <span id="ev-kw">—</span>% floor)</div></div>
     </div>
-    <div id="ev-ctl" style="display:none;border-top:1px solid #18261b;margin-top:16px;padding-top:14px;">
+    <div id="ev-ctl" style="display:none;border-top:1px solid #26262c;margin-top:16px;padding-top:14px;">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-        <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#5f7263;">TESLA CONTROLLER</div>
-        <span id="ev-mode" class="mono" style="font-size:10px;letter-spacing:.08em;padding:3px 10px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;">—</span>
+        <div class="mono" style="font-size:10px;letter-spacing:.08em;color:#9a9aa6;">TESLA CONTROLLER</div>
+        <span id="ev-mode" class="mono" style="font-size:10px;letter-spacing:.08em;padding:3px 10px;border-radius:999px;border:1px solid #4a4a56;color:#c8c8d0;">—</span>
       </div>
-      <div id="ev-status" class="mono" style="font-size:11.5px;color:#6d8272;margin-top:10px;line-height:1.6;"></div>
+      <div id="ev-status" class="mono" style="font-size:11.5px;color:#a0a0ac;margin-top:10px;line-height:1.6;"></div>
       <div id="ev-decisions" style="display:flex;flex-direction:column;gap:8px;margin-top:12px;"></div>
     </div>
   </div>`);
 
 mkPanel('vpp', `
   <div class="plabel">VPP EVENT</div>
-  <div id="vpp-empty" class="mono" style="font-size:11px;color:#4c5f50;margin-top:18px;"></div>
+  <div id="vpp-empty" class="mono" style="font-size:11px;color:#8a8a96;margin-top:18px;"></div>
   <div id="vpp-body" style="display:none;">
     <div style="display:flex;align-items:center;gap:10px;margin-top:18px;flex-wrap:wrap;">
-      <span id="vpp-status" class="mono" style="font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;">—</span>
-      <span id="vpp-window" class="mono" style="font-size:11px;color:#6d8272;">—</span>
+      <span id="vpp-status" class="mono" style="font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;border:1px solid #4a4a56;color:#c8c8d0;">—</span>
+      <span id="vpp-window" class="mono" style="font-size:11px;color:#a0a0ac;">—</span>
     </div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px;">
-      <div class="tile"><div id="vpp-export" style="font-size:22px;font-weight:700;color:#8fb4ff;">— <span style="font-size:13px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:9.5px;letter-spacing:.06em;color:#5f7263;margin-top:4px;">exported</div></div>
-      <div class="tile"><div id="vpp-discharge" style="font-size:22px;font-weight:700;color:#57e389;">— <span style="font-size:13px;color:#7d937f;">kWh</span></div><div class="mono" style="font-size:9.5px;letter-spacing:.06em;color:#5f7263;margin-top:4px;">discharged</div></div>
-      <div class="tile"><div id="vpp-payout" style="font-size:22px;font-weight:700;color:#f5d18a;">— <span style="font-size:13px;color:#7d937f;">$</span></div><div class="mono" style="font-size:9.5px;letter-spacing:.06em;color:#5f7263;margin-top:4px;">toward gift card</div></div>
+      <div class="tile"><div id="vpp-export" style="font-size:22px;font-weight:700;color:#5eb2ff;">— <span style="font-size:13px;color:#b0b0ba;">kWh</span></div><div class="mono" style="font-size:9.5px;letter-spacing:.06em;color:#9a9aa6;margin-top:4px;">exported</div></div>
+      <div class="tile"><div id="vpp-discharge" style="font-size:22px;font-weight:700;color:#3ddc97;">— <span style="font-size:13px;color:#b0b0ba;">kWh</span></div><div class="mono" style="font-size:9.5px;letter-spacing:.06em;color:#9a9aa6;margin-top:4px;">discharged</div></div>
+      <div class="tile"><div id="vpp-payout" style="font-size:22px;font-weight:700;color:#ffd27a;">— <span style="font-size:13px;color:#b0b0ba;">$</span></div><div class="mono" style="font-size:9.5px;letter-spacing:.06em;color:#9a9aa6;margin-top:4px;">toward gift card</div></div>
     </div>
-    <div class="mono" style="font-size:9.5px;color:#4c5f50;margin-top:10px;">Payment metric not confirmed — both shown. DSGS pays annually via Visa gift card, not per event.</div>
+    <div class="mono" style="font-size:9.5px;color:#8a8a96;margin-top:10px;">Payment metric not confirmed — both shown. DSGS pays annually via Visa gift card, not per event.</div>
   </div>`);
 
 const sunpathPanel = mkPanel('sunpath', SunPath.html);
@@ -513,7 +541,7 @@ function buildToolbar(){
   if (DEMO) {
     const collapsed = localStorage.getItem('fwh-sim-bar') === '0';
     const lbl = document.createElement('button');
-    lbl.className = 'mono'; lbl.style.cssText = 'font-size:10px;letter-spacing:.2em;color:#4c5f50;background:transparent;border:none;padding:0;cursor:pointer;';
+    lbl.className = 'mono'; lbl.style.cssText = 'font-size:10px;letter-spacing:.2em;color:#8a8a96;background:transparent;border:none;padding:0;cursor:pointer;';
     lbl.textContent = 'SIMULATE ' + (collapsed ? '▸' : '▾');
     lbl.addEventListener('click', () => { localStorage.setItem('fwh-sim-bar', collapsed ? '1' : '0'); buildToolbar(); });
     tb.appendChild(lbl);
@@ -521,12 +549,12 @@ function buildToolbar(){
       addBtn('simchip', '⏩ 4 PM PEAK', () => doJump(16,0));
       addBtn('simchip', '🌅 SUNRISE', () => doJump(6,10));
       addBtn('simchip', '🌙 SUPER OFF-PEAK', () => doJump(0,5));
-      if (S.jumped) addBtn('mono', '⏪ BACK TO LIVE', backToLive).style.cssText = 'font-size:11px;letter-spacing:.08em;font-weight:700;color:#07160b;background:#57e389;border:1px solid #57e389;border-radius:999px;padding:7px 14px;cursor:pointer;animation:rise .3s ease-out;';
+      if (S.jumped) addBtn('mono', '⏪ BACK TO LIVE', backToLive).style.cssText = 'font-size:11px;letter-spacing:.08em;font-weight:700;color:#050507;background:#3ddc97;border:1px solid #3ddc97;border-radius:999px;padding:7px 14px;cursor:pointer;animation:rise .3s ease-out;';
       const sp = document.createElement('span'); sp.style.cssText = 'display:inline-flex;align-items:center;gap:4px;margin-left:4px;';
-      sp.innerHTML = '<span class="mono" style="font-size:10px;letter-spacing:.2em;color:#4c5f50;">SPEED:</span>'; tb.appendChild(sp);
+      sp.innerHTML = '<span class="mono" style="font-size:10px;letter-spacing:.2em;color:#8a8a96;">SPEED:</span>'; tb.appendChild(sp);
       [['⏸',0],['1×',1],['60×',60]].forEach(([l,v]) => { const b = document.createElement('button'); b.className = 'chip' + (S.speed===v?' on':''); b.textContent = l; b.addEventListener('click', () => { S.speed = v; buildToolbar(); }); sp.appendChild(b); });
       const ob = addBtn('mono', S.outage ? '🟢 RESTORE GRID' : '🔌 SIMULATE GRID OUTAGE', toggleOutage);
-      ob.style.cssText = 'font-size:11px;letter-spacing:.08em;color:' + (S.outage?'#57e389':'#ff8a7a') + ';background:rgba(240,90,80,.05);border:1px solid #4a1c18;border-radius:999px;padding:7px 14px;cursor:pointer;';
+      ob.style.cssText = 'font-size:11px;letter-spacing:.08em;color:' + (S.outage?'#3ddc97':'#ff6b8b') + ';background:rgba(255,92,124,.05);border:1px solid #4a2230;border-radius:999px;padding:7px 14px;cursor:pointer;';
       addBtn('toolbtn', '⚙ MANAGE', openManage);
       addPresetSelect(tb);
       addBtn('toolbtn', '⟲ RESET LAYOUT', resetLayout);
@@ -542,8 +570,8 @@ function buildToolbar(){
   }
   const hidden = getHidden();
   if (hidden.length) {
-    const sp = document.createElement('span'); sp.className = 'mono'; sp.style.cssText = 'font-size:10px;letter-spacing:.14em;color:#5f7263;margin-left:6px;'; sp.textContent = 'HIDDEN:'; tb.appendChild(sp);
-    hidden.forEach(id => { const b = document.createElement('button'); b.style.cssText = "font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;padding:4px 10px;border-radius:999px;border:1px dashed #2e5c3a;background:transparent;color:#7d937f;cursor:pointer;"; b.textContent = PANEL_LABELS[id] + ' +'; b.title = 'Show panel'; b.addEventListener('click', () => hidePanel(id, false)); tb.appendChild(b); });
+    const sp = document.createElement('span'); sp.className = 'mono'; sp.style.cssText = 'font-size:10px;letter-spacing:.14em;color:#9a9aa6;margin-left:6px;'; sp.textContent = 'HIDDEN:'; tb.appendChild(sp);
+    hidden.forEach(id => { const b = document.createElement('button'); b.style.cssText = "font-family:'Space Grotesk',sans-serif;font-size:9px;letter-spacing:.1em;padding:4px 10px;border-radius:999px;border:1px dashed #2c6b52;background:transparent;color:#b0b0ba;cursor:pointer;"; b.textContent = PANEL_LABELS[id] + ' +'; b.title = 'Show panel'; b.addEventListener('click', () => hidePanel(id, false)); tb.appendChild(b); });
   }
 }
 // View presets — curated hidden-panel sets. Any manual show/hide (via
@@ -565,7 +593,7 @@ function applyPreset(key){
 function addPresetSelect(tb){
   const sel = document.createElement('select');
   sel.className = 'mono';
-  sel.style.cssText = "font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.1em;color:#7d937f;background:#0c130d;border:1px solid #1c2a1e;border-radius:999px;padding:7px 12px;cursor:pointer;";
+  sel.style.cssText = "font-family:'Space Grotesk',sans-serif;font-size:10px;letter-spacing:.1em;color:#b0b0ba;background:#15151a;border:1px solid #2a2a31;border-radius:999px;padding:7px 12px;cursor:pointer;";
   sel.innerHTML = `<option value="custom">VIEW: CUSTOM</option>
     <option value="storm">${PRESETS.storm.label}</option>
     <option value="billing">${PRESETS.billing.label}</option>
@@ -579,7 +607,7 @@ function snapshot(){
   const lib = window.htmlToImage;
   if (!lib) { snapMsg = '⚠ OFFLINE'; buildToolbar(); setTimeout(()=>{snapMsg=null;buildToolbar();},2200); return; }
   snapMsg = '⏳ RENDERING…'; buildToolbar();
-  lib.toPng(document.body, { backgroundColor:'#0a0f0b', pixelRatio:2 })
+  lib.toPng(document.body, { backgroundColor:'#050507', pixelRatio:2 })
     .then(url => { const a=document.createElement('a'); a.href=url; a.download='franklinwh-dashboard.png'; a.click(); snapMsg='✓ SAVED'; })
     .catch(() => { snapMsg='⚠ FAILED'; })
     .finally(() => { buildToolbar(); setTimeout(()=>{snapMsg=null;buildToolbar();},2200); });
@@ -622,7 +650,7 @@ function applyPanelStyles(){
     el.style.order = foc ? -1 : (WALL ? WALL_PANELS.indexOf(id) : idx * 2 + (c === 2 ? 1 : 0));
     el.style.gridColumn = (foc || (wid && !S.narrow)) ? '1 / -1' : (S.narrow ? 'auto' : String(c));
     el.style.gridRowEnd = 'span ' + (S.spans[id] || 50);
-    el.style.outline = S.flashId === id ? '3px solid #57e389' : S.dragId === id ? '2px dashed #57e389' : (foc ? '1px solid #2e5c3a' : '0 solid transparent');
+    el.style.outline = S.flashId === id ? '3px solid #3ddc97' : S.dragId === id ? '2px dashed #3ddc97' : (foc ? '1px solid #2c6b52' : '0 solid transparent');
     el.style.outlineOffset = '2px';
     el.querySelector('.focusbtn').classList.toggle('on', foc);
     el.querySelector('.widebtn').classList.toggle('on', wid);
@@ -663,10 +691,10 @@ function renderManage(){
   rows.forEach(r => {
     const isHidden = hidden.includes(r.id);
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;align-items:center;gap:8px;background:#0c130d;border:1px solid #18261b;border-radius:10px;padding:8px 12px;';
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;background:#15151a;border:1px solid #26262c;border-radius:10px;padding:8px 12px;';
     row.innerHTML = `
-      <span class="mono" style="flex:1;font-size:11px;letter-spacing:.08em;color:${isHidden?'#4c5f50':'#cfe8d4'};">${PANEL_LABELS[r.id]}</span>
-      <span class="mono" style="font-size:9px;letter-spacing:.08em;color:#5f7263;">COL ${r.col==='left'?'1':'2'}</span>
+      <span class="mono" style="flex:1;font-size:11px;letter-spacing:.08em;color:${isHidden?'#8a8a96':'#e4e4ea'};">${PANEL_LABELS[r.id]}</span>
+      <span class="mono" style="font-size:9px;letter-spacing:.08em;color:#9a9aa6;">COL ${r.col==='left'?'1':'2'}</span>
       <button data-act="up" class="chip" style="padding:4px 8px;" title="Move up" ${r.idx===0?'disabled':''}>↑</button>
       <button data-act="down" class="chip" style="padding:4px 8px;" title="Move down" ${r.idx===r.count-1?'disabled':''}>↓</button>
       <button data-act="swap" class="chip" style="padding:4px 8px;" title="Move to other column">⇄</button>
@@ -748,7 +776,7 @@ function renderMinimap(){
   const mk = ids => ids.filter(id => !hidden.includes(id)).map(id => {
     const on = id === S.dragId;
     const h = Math.max(16, Math.min(64, Math.round(((S.spans[id] || 50) * 8) / 16)));
-    return `<div style="height:${h}px;background:${on?'rgba(87,227,137,.22)':'rgba(255,255,255,.04)'};border:1px solid ${on?'#57e389':'#26382b'};border-radius:4px;display:flex;align-items:center;justify-content:center;overflow:hidden;transition:all .15s;"><span class="mono" style="font-size:7px;letter-spacing:.05em;color:${on?'#57e389':'#5f7263'};white-space:nowrap;">${PANEL_LABELS[id]}</span></div>`;
+    return `<div style="height:${h}px;background:${on?'rgba(61,220,151,.22)':'rgba(255,255,255,.04)'};border:1px solid ${on?'#3ddc97':'#34343c'};border-radius:4px;display:flex;align-items:center;justify-content:center;overflow:hidden;transition:all .15s;"><span class="mono" style="font-size:7px;letter-spacing:.05em;color:${on?'#3ddc97':'#9a9aa6'};white-space:nowrap;">${PANEL_LABELS[id]}</span></div>`;
   }).join('');
   $('mini-l').innerHTML = mk(lay.left); $('mini-r').innerHTML = mk(lay.right);
 }
@@ -801,8 +829,8 @@ $('hints-ok').addEventListener('click', () => { localStorage.setItem('fwh-hints-
 $('hd-unread').addEventListener('click', () => jumpToPanel('__ALERTS__'));
 
 // ── Rendering ────────────────────────────────────────────────────────
-function accentColor(){ return S.gridStatus !== 'normal' ? '#ff8a7a' : S.onPeak ? '#f5b942' : '#57e389'; }
-function accentGlow(){ return S.gridStatus !== 'normal' ? 'rgba(255,138,122,.35)' : S.onPeak ? 'rgba(245,185,66,.35)' : 'rgba(87,227,137,.35)'; }
+function accentColor(){ return S.gridStatus !== 'normal' ? '#ff6b8b' : S.onPeak ? '#ffc247' : '#3ddc97'; }
+function accentGlow(){ return S.gridStatus !== 'normal' ? 'rgba(255,107,139,.35)' : S.onPeak ? 'rgba(255,194,71,.35)' : 'rgba(61,220,151,.35)'; }
 function tteHours(){ return (S.soc/100*S.cap) / Math.max(0.35, S.load - Math.min(S.solar, S.load)); }
 function tteStr(){ const h = tteHours(); return h > 24 ? '24+ hr' : h.toFixed(1) + ' hr'; }
 
@@ -816,10 +844,10 @@ function renderHeader(){
   // this, a dead webapi process looks identical to "everything's fine."
   const offline = !DEMO && S.fetchFailStreak >= 3;
   let label, col;
-  if (!DEMO && !S.hasData && !offline) { label = 'CONNECTING…'; col = '#5f7263'; }
-  else if (offline) { label = 'SERVER UNREACHABLE'; col = '#f5b942'; }
-  else if (out) { label = 'GRID DOWN'; col = '#ff8a7a'; }
-  else { label = 'POLLING OK'; col = '#57e389'; }
+  if (!DEMO && !S.hasData && !offline) { label = 'CONNECTING…'; col = '#9a9aa6'; }
+  else if (offline) { label = 'SERVER UNREACHABLE'; col = '#ffc247'; }
+  else if (out) { label = 'GRID DOWN'; col = '#ff6b8b'; }
+  else { label = 'POLLING OK'; col = '#3ddc97'; }
   $('hd-status').textContent = label;
   $('hd-status-wrap').style.color = col; $('hd-dot').style.background = col; $('hd-dot').style.boxShadow = '0 0 8px ' + col;
   const lp = S.lastPoll ? fmtTime(new Date(S.lastPoll)) + ':' + String(new Date(S.lastPoll).getSeconds()).padStart(2,'0') : '—';
@@ -834,21 +862,22 @@ function renderLerp(){
     // Nothing real to show yet — a bare "0%"/"0.0 kW" here would be
     // indistinguishable from a genuinely empty battery, so show an explicit
     // placeholder instead until the first successful poll lands.
-    $('b-soc').textContent = '—%'; $('b-soc').style.color = '#5f7263';
-    $('b-bar').style.width = '0%';
+    $('b-soc').textContent = '—%'; $('b-soc').style.color = '#9a9aa6';
+    $('b-bar').style.height = '0%'; $('b-charge').style.display = 'none'; $('b-bolt').style.display = 'none';
     $('b-kwh').textContent = `— / ${S.cap} kWh`;
     $('b-tte').textContent = 'waiting for first reading…';
     $('b-status').textContent = '';
     $('st-bar').style.width = '0%';
-    $('st-soc').textContent = '—%'; $('st-soc').style.color = '#5f7263';
+    $('st-soc').textContent = '—%'; $('st-soc').style.color = '#9a9aa6';
     $('st-solar').textContent = '☀ —'; $('st-load').textContent = '⌂ —';
     return;
   }
   const acc = accentColor();
   $('b-soc').textContent = D.soc.toFixed(0) + '%';
   $('b-soc').style.color = acc; $('b-soc').style.textShadow = '0 0 34px ' + accentGlow();
-  $('b-bar').style.width = D.soc.toFixed(0) + '%';
-  $('b-bar').style.background = `linear-gradient(90deg,#1f7a44,${acc})`;
+  $('b-bar').style.height = D.soc.toFixed(0) + '%';
+  $('b-bar').style.background = `linear-gradient(to top,#2fbf85,${acc})`;
+  const charging = S.chg > 0.05; $('b-charge').style.display = charging ? 'block' : 'none'; $('b-bolt').style.display = charging ? 'block' : 'none';
   $('b-kwh').textContent = `${D.kwh.toFixed(1)} / ${S.cap} kWh`;
   $('b-tte').textContent = 'backup ~' + tteStr();
   $('b-status').textContent = S.chg > 0.05 ? `↑ charging · solar ${D.solar.toFixed(1)} kW` : S.dis > 0.05 ? `↓ discharging · ${S.dis.toFixed(1)} kW` : `· idle · solar ${D.solar.toFixed(1)} kW`;
@@ -859,7 +888,7 @@ function renderLerp(){
   $('st-load').textContent = '⌂ ' + D.load.toFixed(1) + ' kW';
   $('st-saved').textContent = '$' + D.saved.toFixed(2);
   const out = S.gridStatus !== 'normal';
-  $('st-status').textContent = out ? 'GRID DOWN' : 'POLLING OK'; $('st-status').style.color = out ? '#ff8a7a' : '#57e389';
+  $('st-status').textContent = out ? 'GRID DOWN' : 'POLLING OK'; $('st-status').style.color = out ? '#ff6b8b' : '#3ddc97';
   document.querySelectorAll('#banner-outage .tte').forEach(el => el.textContent = tteStr());
   if ($('m-sav').style.display !== 'none') $('m-savval').textContent = '$' + D.savings.toFixed(2);
 }
@@ -868,7 +897,7 @@ function renderBanners(){
   $('banner-outage').style.display = out ? 'block' : 'none';
   $('banner-peak').style.display = (!out && S.onPeak) ? 'block' : 'none';
   const battEl = grid.querySelector('[data-panel="battery"]');
-  battEl.style.borderColor = out ? '#6e2019' : S.onPeak ? '#6b5216' : '#1c2a1e';
+  battEl.style.borderColor = out ? '#6e2a3a' : S.onPeak ? '#6b5420' : '#2a2a31';
   if (S.onPeak) {
     const t = nowT();
     const rate = S.tou ? '$' + S.tou.rate.toFixed(3) : '$0.529';
@@ -932,7 +961,7 @@ function adjForecast(){
 function renderForecast(){
   const fc = adjForecast();
   const bars = $('f-bars');
-  if (!fc.length) { bars.innerHTML = '<div class="mono" style="font-size:11px;color:#4c5f50;align-self:center;width:100%;text-align:center;">collecting data — forecast activates after 3 days</div>'; $('f-band').style.display='none'; return; }
+  if (!fc.length) { bars.innerHTML = '<div class="mono" style="font-size:11px;color:#8a8a96;align-self:center;width:100%;text-align:center;">collecting data — forecast activates after 3 days</div>'; $('f-band').style.display='none'; return; }
   const maxKw = Math.max(0.5, ...fc.map(f => f.kw), ...S.forecast.map(f => f.solar_kw));
   // on-peak band from entries
   const first = fc.findIndex(f => f.on_peak), last = fc.map(f=>f.on_peak).lastIndexOf(true);
@@ -942,21 +971,21 @@ function renderForecast(){
     const barH = Math.max(3, Math.round(f.kw / maxKw * 92));
     const socY = 18 + Math.round((f.socAdj - 50)/50*100);
     const op = S.scrubIdx === -1 ? 1 : (S.scrubIdx === i ? 1 : 0.35);
-    const filt = S.scrubIdx === i ? 'drop-shadow(0 0 8px rgba(87,227,137,.8)) brightness(1.25)' : 'none';
+    const filt = S.scrubIdx === i ? 'drop-shadow(0 0 8px rgba(61,220,151,.8)) brightness(1.25)' : 'none';
     return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:6px;height:100%;position:relative;">
-      <div style="position:absolute;bottom:${socY}px;left:50%;transform:translateX(-50%);width:5px;height:5px;border-radius:50%;background:#d9f5e2;box-shadow:0 0 6px rgba(217,245,226,.8);pointer-events:none;"></div>
-      <div style="width:100%;height:${barH}px;min-height:3px;border-radius:5px 5px 2px 2px;background:linear-gradient(180deg,#57e389,#1f7a44);opacity:${op};transition:opacity .15s,filter .15s;filter:${filt};"></div>
-      <div class="mono" style="font-size:9px;color:#4c5f50;">${f.label}</div></div>`;
+      <div style="position:absolute;bottom:${socY}px;left:50%;transform:translateX(-50%);width:5px;height:5px;border-radius:50%;background:#ececf1;box-shadow:0 0 6px rgba(236,236,241,.8);pointer-events:none;"></div>
+      <div style="width:100%;height:${barH}px;min-height:3px;border-radius:5px 5px 2px 2px;background:linear-gradient(180deg,#3ddc97,#2fbf85);opacity:${op};transition:opacity .15s,filter .15s;filter:${filt};"></div>
+      <div class="mono" style="font-size:9px;color:#8a8a96;">${f.label}</div></div>`;
   }).join('');
   const tip = $('f-tip');
   if (S.scrubIdx >= 0 && fc[S.scrubIdx]) {
     const f = fc[S.scrubIdx];
     tip.style.display = 'block';
     tip.style.left = ((S.scrubIdx + 0.5)/fc.length*100).toFixed(1) + '%';
-    const pc = f.on_peak ? '#f5b942' : '#57e389';
-    tip.innerHTML = `<div class="mono" style="font-size:11px;font-weight:700;color:#e6f2e8;">${f.label}M · <span style="color:${pc};">${f.period}</span></div>
-      <div class="mono" style="font-size:11px;color:#7d937f;margin-top:4px;">solar ${f.kw.toFixed(1)} kW · $${f.rate.toFixed(3)}/kWh</div>
-      <div class="mono" style="font-size:11px;color:#57e389;margin-top:2px;">projected SoC ${f.socAdj}%</div>`;
+    const pc = f.on_peak ? '#ffc247' : '#3ddc97';
+    tip.innerHTML = `<div class="mono" style="font-size:11px;font-weight:700;color:#f2f2f5;">${f.label}M · <span style="color:${pc};">${f.period}</span></div>
+      <div class="mono" style="font-size:11px;color:#b0b0ba;margin-top:4px;">solar ${f.kw.toFixed(1)} kW · $${f.rate.toFixed(3)}/kWh</div>
+      <div class="mono" style="font-size:11px;color:#3ddc97;margin-top:2px;">projected SoC ${f.socAdj}%</div>`;
   } else tip.style.display = 'none';
   renderEB(fc);
   const fh = S.forecastHealth;
@@ -972,7 +1001,7 @@ function renderForecast(){
 }
 $('f-scrub').addEventListener('pointermove', e => { const n = Math.max(1, S.forecast.length); const r = e.currentTarget.getBoundingClientRect(); S.scrubIdx = Math.max(0, Math.min(n-1, Math.floor((e.clientX-r.left)/r.width*n))); renderForecast(); });
 $('f-scrub').addEventListener('pointerleave', () => { S.scrubIdx = -1; renderForecast(); });
-$('f-cc').addEventListener('input', e => { S.cc = +e.target.value; $('f-ccval').textContent = S.cc + '%'; $('f-ccval').style.color = S.cc > 60 ? '#f5b942' : '#57e389'; renderForecast(); });
+$('f-cc').addEventListener('input', e => { S.cc = +e.target.value; $('f-ccval').textContent = S.cc + '%'; $('f-ccval').style.color = S.cc > 60 ? '#ffc247' : '#3ddc97'; renderForecast(); });
 
 function renderEB(fc){
   const eb = S.eb;
@@ -994,10 +1023,10 @@ function renderEB(fc){
   const target = Math.min(S.cap, net + 0.10*S.cap);
   const short = S.cc > 0 ? Math.max(0, target - avail) : (eb.shortfall_kwh ?? 0);
   $('eb-soc4').textContent = soc4 + '%';
-  $('eb-net').innerHTML = net.toFixed(1) + ' <span style="font-size:14px;color:#7d937f;">kWh</span>';
-  $('eb-short').innerHTML = short.toFixed(1) + ' <span style="font-size:14px;color:#7d937f;">kWh</span>';
-  $('eb-short').style.color = short > 0.05 ? '#f5b942' : '#57e389';
-  $('eb-msg').style.color = short > 0.05 ? '#cbb27a' : '#6d8272';
+  $('eb-net').innerHTML = net.toFixed(1) + ' <span style="font-size:14px;color:#b0b0ba;">kWh</span>';
+  $('eb-short').innerHTML = short.toFixed(1) + ' <span style="font-size:14px;color:#b0b0ba;">kWh</span>';
+  $('eb-short').style.color = short > 0.05 ? '#ffc247' : '#3ddc97';
+  $('eb-msg').style.color = short > 0.05 ? '#d9c08a' : '#a0a0ac';
   $('eb-msg').textContent = short > 0.05
     ? `⚠ EB shortfall${S.cc>0?' under this cloud scenario':''} — schedule ${short.toFixed(1)} kWh grid charge in the next super off-peak window ($0.117/kWh).`
     : (eb.hint_str || '✓ No EB charge needed — battery projects past the 10% buffer.');
@@ -1020,37 +1049,37 @@ function renderSundown(){
   const clear = () => { gauge.innerHTML = ''; ticks.textContent = ''; verdict.textContent = ''; scen.innerHTML = ''; foot.textContent = ''; };
   const watchLine = w => {
     if (!w || w.initial_pct == null) return '';
-    const parts = [`First said <b style="color:#b9d8be;">${Math.round(w.initial_pct)}%</b> at ${w.initial_at ? t12(w.initial_at) : '—'}`];
+    const parts = [`First said <b style="color:#dcdce2;">${Math.round(w.initial_pct)}%</b> at ${w.initial_at ? t12(w.initial_at) : '—'}`];
     (w.corrections || []).forEach(c => parts.push(`${c.grid ? '⚡ ' : ''}${Math.round(c.to)}% at ${t12(c.at)}`));
     let line = parts.join(' → ');
     if (w.actual_pct != null) {
       const d = w.actual_pct - w.initial_pct;
       const grid = (w.corrections || []).some(c => c.grid);
-      line += `<br>Actual at sundown: <b style="color:#b9d8be;">${Math.round(w.actual_pct)}%</b> (${d >= 0 ? '+' : ''}${Math.round(d)} pt${grid ? ' · ⚡ you topped up from the grid, so not a forecast miss' : ''})`;
+      line += `<br>Actual at sundown: <b style="color:#dcdce2;">${Math.round(w.actual_pct)}%</b> (${d >= 0 ? '+' : ''}${Math.round(d)} pt${grid ? ' · ⚡ you topped up from the grid, so not a forecast miss' : ''})`;
     }
     return line;
   };
-  if (!r) { pctEl.textContent = '—%'; pctEl.style.color = '#4c5f50'; sub.textContent = 'loading…'; $('sd-time').textContent = ''; clear(); watch.innerHTML = ''; return; }
+  if (!r) { pctEl.textContent = '—%'; pctEl.style.color = '#8a8a96'; sub.textContent = 'loading…'; $('sd-time').textContent = ''; clear(); watch.innerHTML = ''; return; }
   if (!r.ok) {
     pctEl.textContent = r.reason === 'solar_done' && r.soc != null ? Math.round(r.soc) + '%' : '—';
-    pctEl.style.color = '#7d937f';
+    pctEl.style.color = '#b0b0ba';
     sub.textContent = r.reason === 'solar_done' ? 'solar is done for today' : r.reason === 'no_forecast' ? 'not enough usage history yet' : 'projection unavailable';
     $('sd-time').textContent = ''; clear(); watch.innerHTML = watchLine(r.watch);
     return;
   }
   const t = r.targets;
-  const col = !t ? '#57e389' : t.verdict === 'heavy' ? '#57e389' : t.verdict === 'typical' ? '#f5b942' : '#ff8a7a';
+  const col = !t ? '#3ddc97' : t.verdict === 'heavy' ? '#3ddc97' : t.verdict === 'typical' ? '#ffc247' : '#ff6b8b';
   pctEl.textContent = Math.round(r.projected_pct) + '%'; pctEl.style.color = col;
   $('sd-time').textContent = '~' + t12(r.sundown_at);
   sub.textContent = `now ${Math.round(r.soc)}% · ${r.band ? `likely ${Math.round(r.band.lo)}–${Math.round(r.band.hi)}%` : 'quiet afternoon'}`;
   const pos = v => Math.max(0, Math.min(100, v)) + '%';
   gauge.innerHTML =
-    (r.band ? `<div style="position:absolute;top:0;bottom:0;left:${pos(r.band.lo)};width:${Math.max(0, Math.min(100, r.band.hi) - Math.max(0, r.band.lo))}%;background:rgba(87,227,137,.16);border-radius:7px;"></div>` : '') +
-    `<div style="position:absolute;top:0;left:0;bottom:0;width:${pos(r.projected_pct)};border-radius:7px;background:linear-gradient(90deg,#1f7a44,${col});box-shadow:0 0 14px ${col}55;"></div>` +
-    (t ? `<div title="typical ${t.weekday} night" style="position:absolute;top:-3px;bottom:-3px;left:${pos(t.typical_pct)};width:2px;background:#f5b942;"></div>` +
-         `<div title="heavy ${t.weekday} night" style="position:absolute;top:-3px;bottom:-3px;left:${pos(t.heavy_pct)};width:2px;background:#ff8a7a;"></div>` : '');
+    (r.band ? `<div style="position:absolute;top:0;bottom:0;left:${pos(r.band.lo)};width:${Math.max(0, Math.min(100, r.band.hi) - Math.max(0, r.band.lo))}%;background:rgba(61,220,151,.16);border-radius:7px;"></div>` : '') +
+    `<div style="position:absolute;top:0;left:0;bottom:0;width:${pos(r.projected_pct)};border-radius:7px;background:linear-gradient(90deg,#2fbf85,${col});box-shadow:0 0 14px ${col}55;"></div>` +
+    (t ? `<div title="typical ${t.weekday} night" style="position:absolute;top:-3px;bottom:-3px;left:${pos(t.typical_pct)};width:2px;background:#ffc247;"></div>` +
+         `<div title="heavy ${t.weekday} night" style="position:absolute;top:-3px;bottom:-3px;left:${pos(t.heavy_pct)};width:2px;background:#ff6b8b;"></div>` : '');
   if (t) {
-    ticks.innerHTML = `<span style="color:#f5b942;">▏${Math.round(t.typical_pct)}%</span> typical ${escapeHtml(t.weekday)} night (${t.typical_kwh.toFixed(1)} kWh) · <span style="color:#ff8a7a;">▏${Math.round(t.heavy_pct)}%</span> heavy (${t.heavy_kwh.toFixed(1)} kWh)` + (t.plan_kwh > 0 ? ` · +${t.plan_kwh.toFixed(1)} kWh planned` : '');
+    ticks.innerHTML = `<span style="color:#ffc247;">▏${Math.round(t.typical_pct)}%</span> typical ${escapeHtml(t.weekday)} night (${t.typical_kwh.toFixed(1)} kWh) · <span style="color:#ff6b8b;">▏${Math.round(t.heavy_pct)}%</span> heavy (${t.heavy_kwh.toFixed(1)} kWh)` + (t.plan_kwh > 0 ? ` · +${t.plan_kwh.toFixed(1)} kWh planned` : '');
     const gap = r.projected_pct - t.heavy_pct, short = t.typical_pct - r.projected_pct;
     verdict.style.color = col;
     verdict.textContent = t.verdict === 'heavy' ? `✓ Covers even a heavy night (${Math.round(gap)} pts to spare).`
@@ -1059,11 +1088,11 @@ function renderSundown(){
   } else { ticks.textContent = ''; verdict.textContent = ''; }
   scen.innerHTML = (r.scenarios || []).map(s => {
     const d = s.pct - r.projected_pct;
-    const c = s.pct >= (t ? t.heavy_pct : 50) ? '#57e389' : s.pct >= (t ? t.typical_pct : 30) ? '#f5b942' : '#ff8a7a';
+    const c = s.pct >= (t ? t.heavy_pct : 50) ? '#3ddc97' : s.pct >= (t ? t.typical_pct : 30) ? '#ffc247' : '#ff6b8b';
     return `<div style="display:flex;align-items:center;gap:10px;">
-      <div class="mono" style="flex:1.4;font-size:11px;color:#9db8a2;line-height:1.35;">${escapeHtml(s.label)}</div>
-      <div style="flex:1;height:8px;border-radius:4px;background:#18231a;overflow:hidden;"><div style="width:${pos(s.pct)};height:100%;background:${c};"></div></div>
-      <div class="mono" style="width:76px;text-align:right;font-size:11px;color:${c};font-weight:700;">${Math.round(s.pct)}% <span style="color:#5f7263;font-weight:400;">${d >= 0 ? '+' : ''}${Math.round(d)}</span></div></div>`;
+      <div class="mono" style="flex:1.4;font-size:11px;color:#c8c8d0;line-height:1.35;">${escapeHtml(s.label)}</div>
+      <div style="flex:1;height:8px;border-radius:4px;background:#26262c;overflow:hidden;"><div style="width:${pos(s.pct)};height:100%;background:${c};"></div></div>
+      <div class="mono" style="width:76px;text-align:right;font-size:11px;color:${c};font-weight:700;">${Math.round(s.pct)}% <span style="color:#9a9aa6;font-weight:400;">${d >= 0 ? '+' : ''}${Math.round(d)}</span></div></div>`;
   }).join('');
   watch.innerHTML = watchLine(r.watch);
   foot.textContent = `${r.confidence ? r.confidence + ' confidence · ' : ''}${r.data_days}d of history${r.bias ? ` · learned correction ${r.bias >= 0 ? '+' : ''}${r.bias.toFixed(1)} pts` : ''} · the sun and your loads decide the rest.`;
@@ -1071,33 +1100,33 @@ function renderSundown(){
 function renderAccuracy(){
   const days = S.acc;
   const errTh = 10;
-  if (!days.length) { $('acc-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#4c5f50;align-self:center;width:100%;text-align:center;">no prediction history yet</div>'; $('acc-foot').textContent=''; return; }
+  if (!days.length) { $('acc-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#8a8a96;align-self:center;width:100%;text-align:center;">no prediction history yet</div>'; $('acc-foot').textContent=''; return; }
   const mx = Math.max(...days.map(d => Math.max(d.predicted, d.actual)), 1);
   $('acc-bars').innerHTML = days.map(d => {
     const dl = d.predicted > 0 ? (d.actual - d.predicted)/d.predicted*100 : 0;
     const beyond = Math.abs(dl) > errTh;
-    const col = beyond ? '#f5b942' : '#57e389';
+    const col = beyond ? '#ffc247' : '#3ddc97';
     return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:5px;height:100%;">
       <div class="mono" style="font-size:9px;color:${col};">${beyond?'⚠ ':''}${dl>=0?'+':''}${dl.toFixed(0)}%</div>
       <div style="display:flex;align-items:flex-end;gap:3px;width:100%;justify-content:center;flex:1;">
-        <div style="width:38%;height:${Math.round(d.predicted/mx*64)}px;border:1px solid #2e5c3a;border-radius:3px 3px 0 0;background:transparent;"></div>
-        <div style="width:38%;height:${Math.round(d.actual/mx*64)}px;border-radius:3px 3px 0 0;background:linear-gradient(180deg,#57e389,#1f7a44);"></div>
+        <div style="width:38%;height:${Math.round(d.predicted/mx*64)}px;border:1px solid #2c6b52;border-radius:3px 3px 0 0;background:transparent;"></div>
+        <div style="width:38%;height:${Math.round(d.actual/mx*64)}px;border-radius:3px 3px 0 0;background:linear-gradient(180deg,#3ddc97,#2fbf85);"></div>
       </div>
-      <div class="mono" style="font-size:9px;color:#4c5f50;">${d.label}</div></div>`;
+      <div class="mono" style="font-size:9px;color:#8a8a96;">${d.label}</div></div>`;
   }).join('');
   const mean = days.reduce((a,d) => a + (d.predicted > 0 ? Math.abs((d.actual-d.predicted)/d.predicted*100) : 0), 0)/days.length;
   $('acc-foot').textContent = `🎯 Mean error ±${mean.toFixed(1)}% · per-hour bias correction map active (learned from every poll).`;
 }
 function renderBatteryHealth(){
   const weeks = S.batteryHealth || [];
-  if (!weeks.length) { $('bh-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#4c5f50;align-self:center;width:100%;text-align:center;">not enough discharge history yet</div>'; $('bh-foot').textContent=''; return; }
+  if (!weeks.length) { $('bh-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#8a8a96;align-self:center;width:100%;text-align:center;">not enough discharge history yet</div>'; $('bh-foot').textContent=''; return; }
   const mx = Math.max(...weeks.map(w => w.capacity_kwh), 1);
   $('bh-bars').innerHTML = weeks.map(w => {
-    const col = w.pct_of_nameplate < 85 ? '#f5b942' : '#57e389';
+    const col = w.pct_of_nameplate < 85 ? '#ffc247' : '#3ddc97';
     return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:5px;height:100%;">
       <div class="mono" style="font-size:9px;color:${col};">${w.pct_of_nameplate.toFixed(0)}%</div>
-      <div style="width:60%;height:${Math.round(w.capacity_kwh/mx*64)}px;border-radius:3px 3px 0 0;background:linear-gradient(180deg,#57e389,#1f7a44);"></div>
-      <div class="mono" style="font-size:9px;color:#4c5f50;">${w.label}</div></div>`;
+      <div style="width:60%;height:${Math.round(w.capacity_kwh/mx*64)}px;border-radius:3px 3px 0 0;background:linear-gradient(180deg,#3ddc97,#2fbf85);"></div>
+      <div class="mono" style="font-size:9px;color:#8a8a96;">${w.label}</div></div>`;
   }).join('');
   const first = weeks[0], last = weeks[weeks.length-1];
   const drift = last.pct_of_nameplate - first.pct_of_nameplate;
@@ -1113,11 +1142,11 @@ function setAttrWindow(days){
 function renderAttribution(){
   $('attr-window').innerHTML = ATTR_WINDOWS.map(([d,label]) => {
     const active = S.attrWindowDays === d;
-    return `<button onclick="setAttrWindow(${d})" class="mono" style="font-size:9px;letter-spacing:.06em;padding:3px 8px;border-radius:4px;cursor:pointer;border:1px solid ${active?'#57e389':'#2a3a2e'};background:${active?'#193322':'transparent'};color:${active?'#8df0b0':'#5f7263'};">${label}</button>`;
+    return `<button onclick="setAttrWindow(${d})" class="mono" style="font-size:9px;letter-spacing:.06em;padding:3px 8px;border-radius:4px;cursor:pointer;border:1px solid ${active?'#3ddc97':'#4a4a56'};background:${active?'#143a2c':'transparent'};color:${active?'#7af0bd':'#9a9aa6'};">${label}</button>`;
   }).join('');
 
   const raw = S.attribution || [];
-  if (!raw.length) { $('attr-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#4c5f50;align-self:center;width:100%;text-align:center;">no attribution data yet</div>'; $('attr-foot').textContent=''; return; }
+  if (!raw.length) { $('attr-bars').innerHTML = '<div class="mono" style="font-size:11px;color:#8a8a96;align-self:center;width:100%;text-align:center;">no attribution data yet</div>'; $('attr-foot').textContent=''; return; }
 
   // Bucket into at most ~16 bars so 90D/ALL stay readable — daily data is
   // still exact, just summed/re-derived per bucket for display. 14D/30D
@@ -1141,15 +1170,15 @@ function renderAttribution(){
   const mx = Math.max(...days.map(d => d.total_kwh), 1);
   const segH = kwh => Math.max(0, Math.round(kwh / mx * 84));
   $('attr-bars').innerHTML = days.map(d => {
-    const col = d.self_sufficiency_pct >= 95 ? '#57e389' : d.self_sufficiency_pct >= 80 ? '#f5d18a' : '#f5b942';
+    const col = d.self_sufficiency_pct >= 95 ? '#3ddc97' : d.self_sufficiency_pct >= 80 ? '#ffd27a' : '#ffc247';
     return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:5px;height:100%;">
       <div class="mono" style="font-size:9px;color:${col};">${d.self_sufficiency_pct.toFixed(0)}%</div>
       <div style="width:70%;display:flex;flex-direction:column;border-radius:3px 3px 0 0;overflow:hidden;">
-        <div style="height:${segH(d.grid_kwh)}px;background:#6b5216;"></div>
-        <div style="height:${segH(d.solar_kwh)}px;background:linear-gradient(180deg,#8df0b0,#57e389);"></div>
-        <div style="height:${segH(d.battery_kwh)}px;background:linear-gradient(180deg,#57e389,#1f7a44);"></div>
+        <div style="height:${segH(d.grid_kwh)}px;background:#6b5420;"></div>
+        <div style="height:${segH(d.solar_kwh)}px;background:linear-gradient(180deg,#7af0bd,#3ddc97);"></div>
+        <div style="height:${segH(d.battery_kwh)}px;background:linear-gradient(180deg,#3ddc97,#2fbf85);"></div>
       </div>
-      <div class="mono" style="font-size:9px;color:#4c5f50;">${d.label}</div></div>`;
+      <div class="mono" style="font-size:9px;color:#8a8a96;">${d.label}</div></div>`;
   }).join('');
   const avgSelf = raw.reduce((a,d) => a + d.self_sufficiency_pct, 0) / raw.length;
   const totalGrid = raw.reduce((a,d) => a + d.grid_kwh, 0);
@@ -1188,17 +1217,17 @@ function renderEv(){
 
   const p = ev.prediction;
   if (p && p.without_ev_pct != null) {
-    $('ev-noev').innerHTML = `${p.without_ev_pct.toFixed(0)} <span style="font-size:14px;color:#7d937f;">%</span>`;
+    $('ev-noev').innerHTML = `${p.without_ev_pct.toFixed(0)} <span style="font-size:14px;color:#b0b0ba;">%</span>`;
     $('ev-hour').textContent = p.hour_label || '—';
   } else {
-    $('ev-noev').innerHTML = '— <span style="font-size:14px;color:#7d937f;">%</span>';
+    $('ev-noev').innerHTML = '— <span style="font-size:14px;color:#b0b0ba;">%</span>';
     $('ev-hour').textContent = '—';
   }
   if (p && p.with_ev_pct != null) {
-    $('ev-withev').innerHTML = `${p.with_ev_pct.toFixed(0)} <span style="font-size:14px;color:#7d937f;">%</span>`;
+    $('ev-withev').innerHTML = `${p.with_ev_pct.toFixed(0)} <span style="font-size:14px;color:#b0b0ba;">%</span>`;
     $('ev-kw').textContent = (p.ev_charge_floor_soc != null ? p.ev_charge_floor_soc.toFixed(0) : '—');
   } else {
-    $('ev-withev').innerHTML = '— <span style="font-size:14px;color:#7d937f;">%</span>';
+    $('ev-withev').innerHTML = '— <span style="font-size:14px;color:#b0b0ba;">%</span>';
     $('ev-kw').textContent = '—';
   }
 
@@ -1207,8 +1236,8 @@ function renderEv(){
   $('ev-ctl').style.display = '';
   $('ev-mode').textContent = ctl.dry_run ? 'DRY RUN' : 'LIVE';
   $('ev-mode').style.cssText = ctl.dry_run
-    ? "font-size:10px;letter-spacing:.08em;padding:3px 10px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;"
-    : "font-size:10px;letter-spacing:.08em;padding:3px 10px;border-radius:999px;background:#57e389;color:#07160b;border:1px solid #57e389;";
+    ? "font-size:10px;letter-spacing:.08em;padding:3px 10px;border-radius:999px;border:1px solid #4a4a56;color:#c8c8d0;"
+    : "font-size:10px;letter-spacing:.08em;padding:3px 10px;border-radius:999px;background:#3ddc97;color:#050507;border:1px solid #3ddc97;";
   const bits = [`session: ${ctl.session}`];
   if (ctl.commanded_amps != null) bits.push(`${ctl.commanded_amps} A`);
   if (ctl.override_until) bits.push(`override until ${new Date(ctl.override_until).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}`);
@@ -1221,10 +1250,10 @@ function renderEv(){
   $('ev-decisions').innerHTML = dec.length ? dec.map(d => {
     const acted = d.action !== 'none';
     return `<div style="display:flex;justify-content:space-between;gap:10px;font-size:11px;">
-      <span style="color:${acted?'#57e389':'#5f7263'};">${d.action}${d.amps ? ' '+d.amps+'A' : ''}</span>
-      <span style="color:#6d8272;flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${d.reason||''}</span>
-      <span class="mono" style="color:#4c5f50;">${relTime(d.timestamp)}</span></div>`;
-  }).join('') : '<div class="mono" style="font-size:11px;color:#4c5f50;">no decisions logged yet</div>';
+      <span style="color:${acted?'#3ddc97':'#9a9aa6'};">${d.action}${d.amps ? ' '+d.amps+'A' : ''}</span>
+      <span style="color:#a0a0ac;flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${d.reason||''}</span>
+      <span class="mono" style="color:#8a8a96;">${relTime(d.timestamp)}</span></div>`;
+  }).join('') : '<div class="mono" style="font-size:11px;color:#8a8a96;">no decisions logged yet</div>';
 }
 function renderVpp(){
   const v = S.vpp;
@@ -1249,14 +1278,14 @@ function renderVpp(){
   const upcoming = start > nowT();
   $('vpp-status').textContent = ev.active ? '⚡ ACTIVE' : (upcoming ? 'UPCOMING' : 'ENDED');
   $('vpp-status').style.cssText = ev.active
-    ? "font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;background:#57e389;color:#07160b;border:1px solid #57e389;"
-    : "font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;border:1px solid #2a3a2e;color:#9db8a2;";
+    ? "font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;background:#3ddc97;color:#050507;border:1px solid #3ddc97;"
+    : "font-size:11px;letter-spacing:.08em;padding:4px 12px;border-radius:999px;border:1px solid #4a4a56;color:#c8c8d0;";
   $('vpp-window').textContent = `${fmt(start)} – ${fmt(end)}` + (ev.rate_per_kwh != null ? ` · $${ev.rate_per_kwh.toFixed(3)}/kWh` : '');
-  $('vpp-export').innerHTML = `${ev.export_kwh_so_far.toFixed(1)} <span style="font-size:13px;color:#7d937f;">kWh</span>`;
-  $('vpp-discharge').innerHTML = `${(ev.discharge_kwh_so_far ?? 0).toFixed(1)} <span style="font-size:13px;color:#7d937f;">kWh</span>`;
+  $('vpp-export').innerHTML = `${ev.export_kwh_so_far.toFixed(1)} <span style="font-size:13px;color:#b0b0ba;">kWh</span>`;
+  $('vpp-discharge').innerHTML = `${(ev.discharge_kwh_so_far ?? 0).toFixed(1)} <span style="font-size:13px;color:#b0b0ba;">kWh</span>`;
   $('vpp-payout').innerHTML = ev.est_payout_so_far != null
-    ? `${ev.est_payout_so_far.toFixed(2)} <span style="font-size:13px;color:#7d937f;">$</span>`
-    : '— <span style="font-size:13px;color:#7d937f;">$</span>';
+    ? `${ev.est_payout_so_far.toFixed(2)} <span style="font-size:13px;color:#b0b0ba;">$</span>`
+    : '— <span style="font-size:13px;color:#b0b0ba;">$</span>';
 }
 function renderTou(){
   const t = S.tou;
@@ -1265,7 +1294,7 @@ function renderTou(){
   $('tc-time').textContent = fmtTime(now);
   $('tc-hand').style.transform = `rotate(${(hf/24*360).toFixed(1)}deg)`;
   if (!t) return;
-  const colFor = p => p.includes('ON') && !p.includes('OFF') ? '#f5b942' : p.includes('SUPER') ? '#17351f' : '#2e5c3a';
+  const colFor = p => p.includes('ON') && !p.includes('OFF') ? '#ffc247' : p.includes('SUPER') ? '#143a2c' : '#2c6b52';
   const stops = t.ring.map((r, h) => `${colFor(r.period)} ${(h/24*100).toFixed(2)}% ${((h+1)/24*100).toFixed(2)}%`).join(', ');
   $('tc-ring').style.background = `conic-gradient(${stops})`;
   // Derive the CURRENT period/rate from the ring (a full day's schedule,
@@ -1275,17 +1304,17 @@ function renderTou(){
   // disagree with the header's on-peak banner (refreshed every 10s).
   const nowRing = t.ring[now.getHours()] || { period: t.period, rate: t.rate };
   $('tc-period').textContent = nowRing.period;
-  $('tc-period').style.color = nowRing.period === 'ON PEAK' ? '#f5b942' : nowRing.period === 'OFF PEAK' ? '#8df0b0' : '#57e389';
+  $('tc-period').style.color = nowRing.period === 'ON PEAK' ? '#ffc247' : nowRing.period === 'OFF PEAK' ? '#7af0bd' : '#3ddc97';
   $('tc-rate').textContent = '$' + nowRing.rate.toFixed(3) + '/kWh';
   const rates = {};
   t.ring.forEach(r => { rates[r.period] = r.rate; });
   $('tc-legend').innerHTML = [
-    ['SUPER OFF PEAK','#17351f','1px solid #2a3a2e'],
-    ['OFF PEAK','#2e5c3a',''],
-    ['ON PEAK','#f5b942',''],
+    ['SUPER OFF PEAK','#143a2c','1px solid #4a4a56'],
+    ['OFF PEAK','#2c6b52',''],
+    ['ON PEAK','#ffc247',''],
   ].map(([p,c,b]) => rates[p] === undefined ? '' :
-    `<div style="display:flex;align-items:center;gap:9px;"><span style="width:10px;height:10px;border-radius:3px;background:${c};${b?'border:'+b+';':''}"></span><span style="color:#7d937f;">${p.replace('OFF PEAK','OFF-PEAK').replace('ON PEAK','ON-PEAK 4–9 PM')}</span><span style="margin-left:auto;color:${p==='ON PEAK'?'#f5d18a':'#9db8a2'};">$${rates[p].toFixed(3)}</span></div>`
-  ).join('') + `<div style="color:#4c5f50;font-size:10px;line-height:1.6;margin-top:4px;">Weekday summer schedule. Weekends & holidays shift SOP to before 2 PM.</div>`;
+    `<div style="display:flex;align-items:center;gap:9px;"><span style="width:10px;height:10px;border-radius:3px;background:${c};${b?'border:'+b+';':''}"></span><span style="color:#b0b0ba;">${p.replace('OFF PEAK','OFF-PEAK').replace('ON PEAK','ON-PEAK 4–9 PM')}</span><span style="margin-left:auto;color:${p==='ON PEAK'?'#ffd27a':'#c8c8d0'};">$${rates[p].toFixed(3)}</span></div>`
+  ).join('') + `<div style="color:#8a8a96;font-size:10px;line-height:1.6;margin-top:4px;">Weekday summer schedule. Weekends & holidays shift SOP to before 2 PM.</div>`;
 }
 function renderBill(){
   const b = S.bill;
@@ -1302,7 +1331,7 @@ function renderBill(){
   $('bill-curval').textContent = '$' + b.projected.toFixed(2);
   $('bill-priorval').textContent = '$' + b.prior_net.toFixed(2);
   const delta = b.prior_net > 0 ? (b.projected - b.prior_net)/b.prior_net*100 : 0;
-  $('bill-foot').innerHTML = `${delta<=0?'▼':'▲'} Tracking <b style="color:${delta<=0?'#57e389':'#f5b942'};">${delta>=0?'+':'−'}${Math.abs(delta).toFixed(0)}%</b> vs prior cycle · battery + solar saved <b style="color:#57e389;">$${b.saved_mtd.toFixed(2)}</b> MTD.`;
+  $('bill-foot').innerHTML = `${delta<=0?'▼':'▲'} Tracking <b style="color:${delta<=0?'#3ddc97':'#ffc247'};">${delta>=0?'+':'−'}${Math.abs(delta).toFixed(0)}%</b> vs prior cycle · battery + solar saved <b style="color:#3ddc97;">$${b.saved_mtd.toFixed(2)}</b> MTD.`;
 }
 
 // ── Alerts feed ──────────────────────────────────────────────────────
@@ -1330,11 +1359,11 @@ function segsOf(body){
   const re = /<b>(.*?)<\/b>/gs;
   let last = 0, m;
   while ((m = re.exec(clean)) !== null) {
-    if (m.index > last) segs.push({ t: clean.slice(last, m.index), c: '#cfe8d4', w: 400 });
-    segs.push({ t: m[1], c: '#57e389', w: 700 });
+    if (m.index > last) segs.push({ t: clean.slice(last, m.index), c: '#e4e4ea', w: 400 });
+    segs.push({ t: m[1], c: '#3ddc97', w: 700 });
     last = m.index + m[0].length;
   }
-  if (last < clean.length) segs.push({ t: clean.slice(last), c: '#cfe8d4', w: 400 });
+  if (last < clean.length) segs.push({ t: clean.slice(last), c: '#e4e4ea', w: 400 });
   return segs;
 }
 function relTime(ts){
@@ -1358,9 +1387,9 @@ function ingestAlerts(list, initial){
     const amber = /peak/.test(raw.body.toLowerCase()) && cat === 'BILLING';
     S.alerts.unshift({
       ts: raw.ts, cat, body: raw.body, segs: segsOf(raw.body),
-      channel: 'TELEGRAM · ADVISOR BOT', chColor: red ? '#ff8a7a' : '#57e389',
-      bg: red ? '#2a0d0a' : amber ? '#241a06' : '#12301d',
-      border: red ? '#6e2019' : amber ? '#6b5216' : '#1e4a2c',
+      channel: 'TELEGRAM · ADVISOR BOT', chColor: red ? '#ff6b8b' : '#3ddc97',
+      bg: red ? '#26101a' : amber ? '#1f1a0c' : '#123226',
+      border: red ? '#6e2a3a' : amber ? '#6b5420' : '#1d4a39',
       prog: initial ? 1e9 : 0, done: initial,
     });
     added++;
@@ -1376,7 +1405,7 @@ function renderAlerts(){
   wrap.innerHTML = '';
   CATS.forEach(c => { const b = document.createElement('button'); b.className = 'chip' + (S.filterCat === c ? ' on' : ''); b.textContent = c; b.addEventListener('click', () => { S.filterCat = c; renderAlerts(); }); wrap.appendChild(b); });
   const list = S.alerts.filter(a => S.filterCat === 'ALL' || a.cat === S.filterCat);
-  $('al-list').innerHTML = list.length ? '' : '<div class="mono" style="font-size:11px;color:#4c5f50;">no alerts yet — they appear here as the advisor sends them</div>';
+  $('al-list').innerHTML = list.length ? '' : '<div class="mono" style="font-size:11px;color:#8a8a96;">no alerts yet — they appear here as the advisor sends them</div>';
   list.forEach(a => {
     let left = a.prog;
     const spans = [];
@@ -1386,9 +1415,9 @@ function renderAlerts(){
     el.title = 'Jump to related panel';
     el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
         <div class="mono" style="font-size:10px;letter-spacing:.16em;font-weight:700;color:${a.chColor};">${a.channel}</div>
-        <div class="mono" style="font-size:8.5px;letter-spacing:.14em;color:#4c5f50;border:1px solid #1e3a26;border-radius:999px;padding:2px 8px;">${a.cat}</div></div>
-      <div style="font-size:14px;line-height:1.55;color:#cfe8d4;margin-top:8px;">${spans.join('')}${a.done ? '' : '<span style="display:inline-block;width:7px;height:15px;background:#57e389;vertical-align:-2px;animation:blink .8s step-end infinite;"></span>'}</div>
-      <div class="mono" title="${a.ts}" style="font-size:10px;color:#4c5f50;text-align:right;margin-top:8px;">${relTime(a.ts)}</div>`;
+        <div class="mono" style="font-size:8.5px;letter-spacing:.14em;color:#8a8a96;border:1px solid #1a3a2e;border-radius:999px;padding:2px 8px;">${a.cat}</div></div>
+      <div style="font-size:14px;line-height:1.55;color:#e4e4ea;margin-top:8px;">${spans.join('')}${a.done ? '' : '<span style="display:inline-block;width:7px;height:15px;background:#3ddc97;vertical-align:-2px;animation:blink .8s step-end infinite;"></span>'}</div>
+      <div class="mono" title="${a.ts}" style="font-size:10px;color:#8a8a96;text-align:right;margin-top:8px;">${relTime(a.ts)}</div>`;
     el.addEventListener('click', () => jumpToPanel(a.cat));
     $('al-list').appendChild(el);
   });
@@ -1411,7 +1440,7 @@ function renderDigests(){
   const strip = s => escapeHtml(s.replace(/<[^>]+>/g, ''));
   $('dg-body').innerHTML = cur
     ? `<div style="animation:rise .4s ease-out;"><div style="font-size:14px;font-weight:700;margin-top:16px;">${strip(cur.body.split('\n')[0])}</div><pre class="digest">${strip(cur.body.split('\n').slice(1).join('\n'))}</pre></div>`
-    : `<div class="mono" style="font-size:11px;color:#4c5f50;margin-top:16px;">${titles[S.tab]} — none received yet. Digests appear after the advisor sends them (nightly / weekly / monthly).</div>`;
+    : `<div class="mono" style="font-size:11px;color:#8a8a96;margin-top:16px;">${titles[S.tab]} — none received yet. Digests appear after the advisor sends them (nightly / weekly / monthly).</div>`;
 }
 document.querySelectorAll('.tabbtn').forEach(b => b.addEventListener('click', () => {
   S.tab = +b.dataset.tab;
@@ -1431,24 +1460,24 @@ function drawFlow(){
   ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
   const out = S.gridStatus !== 'normal';
   const N = {
-    solar: { x: W*0.5, y: 42, label: 'SOLAR', kw: S.solar, col: '#57e389' },
-    batt:  { x: W*0.16, y: 175, label: 'BATTERY', kw: S.chg > 0 ? S.chg : -S.dis, col: '#8df0b0' },
-    home:  { x: W*0.5, y: 205, label: 'HOME', kw: S.load, col: '#d9f5e2' },
-    grid:  { x: W*0.84, y: 175, label: out ? 'GRID ✕' : 'GRID', kw: out ? 0 : (S.grid > 0 ? S.grid : -S.exp), col: out ? '#e05a50' : '#f5b942' }
+    solar: { x: W*0.5, y: 42, label: 'SOLAR', kw: S.solar, col: '#3ddc97' },
+    batt:  { x: W*0.16, y: 175, label: 'BATTERY', kw: S.chg > 0 ? S.chg : -S.dis, col: '#7af0bd' },
+    home:  { x: W*0.5, y: 205, label: 'HOME', kw: S.load, col: '#ececf1' },
+    grid:  { x: W*0.84, y: 175, label: out ? 'GRID ✕' : 'GRID', kw: out ? 0 : (S.grid > 0 ? S.grid : -S.exp), col: out ? '#ff5c7c' : '#ffc247' }
   };
   const paths = [
-    { key:'solarHome', a:N.solar, b:N.home, kw: Math.min(S.solar, S.load), col:'#57e389' },
-    { key:'solarBatt', a:N.solar, b:N.batt, kw: S.chg, col:'#57e389' },
-    { key:'solarGrid', a:N.solar, b:N.grid, kw: S.exp, col:'#f5b942' },
-    { key:'battHome',  a:N.batt,  b:N.home, kw: S.dis, col:'#8df0b0' },
-    { key:'gridHome',  a:N.grid,  b:N.home, kw: Math.max(0,S.grid), col:'#f5b942' }
+    { key:'solarHome', a:N.solar, b:N.home, kw: Math.min(S.solar, S.load), col:'#3ddc97' },
+    { key:'solarBatt', a:N.solar, b:N.batt, kw: S.chg, col:'#3ddc97' },
+    { key:'solarGrid', a:N.solar, b:N.grid, kw: S.exp, col:'#ffc247' },
+    { key:'battHome',  a:N.batt,  b:N.home, kw: S.dis, col:'#7af0bd' },
+    { key:'gridHome',  a:N.grid,  b:N.home, kw: Math.max(0,S.grid), col:'#ffc247' }
   ];
   const density = 1.5;
   paths.forEach(p => {
     const mx = (p.a.x+p.b.x)/2, my = (p.a.y+p.b.y)/2 + 26;
     const active = p.kw > 0.05;
     ctx.beginPath(); ctx.moveTo(p.a.x,p.a.y); ctx.quadraticCurveTo(mx,my,p.b.x,p.b.y);
-    ctx.strokeStyle = active ? p.col+'44' : '#1c2a1e'; ctx.lineWidth = active ? 2 : 1; ctx.stroke();
+    ctx.strokeStyle = active ? p.col+'44' : '#2a2a31'; ctx.lineWidth = active ? 2 : 1; ctx.stroke();
     const arr = pdata[p.key];
     const want = active ? Math.min(14, Math.ceil(p.kw*3*density)) : 0;
     while (arr.length < want) arr.push(Math.random());
@@ -1469,14 +1498,14 @@ function drawFlow(){
   Object.values(N).forEach(n => {
     const dead = n.label === 'GRID ✕';
     ctx.beginPath(); ctx.arc(n.x, n.y, 17*(dead?1:pulse), 0, 7);
-    ctx.fillStyle = '#0c130d'; ctx.fill();
-    ctx.strokeStyle = dead ? '#6e2019' : n.col; ctx.lineWidth = 2;
+    ctx.fillStyle = '#15151a'; ctx.fill();
+    ctx.strokeStyle = dead ? '#6e2a3a' : n.col; ctx.lineWidth = 2;
     ctx.shadowColor = n.col; ctx.shadowBlur = dead ? 4 : 14; ctx.stroke(); ctx.shadowBlur = 0;
-    ctx.font = "700 10px 'JetBrains Mono',monospace"; ctx.textAlign = 'center';
-    ctx.fillStyle = dead ? '#e05a50' : '#7d937f';
+    ctx.font = "700 10px 'Space Grotesk',sans-serif"; ctx.textAlign = 'center';
+    ctx.fillStyle = dead ? '#ff5c7c' : '#b0b0ba';
     ctx.fillText(n.label, n.x, n.y - 26);
-    ctx.fillStyle = dead ? '#6e2019' : n.col;
-    ctx.font = "700 12px 'JetBrains Mono',monospace";
+    ctx.fillStyle = dead ? '#6e2a3a' : n.col;
+    ctx.font = "700 12px 'Space Grotesk',sans-serif";
     ctx.fillText(dead ? 'DOWN' : Math.abs(n.kw).toFixed(2) + ' kW', n.x, n.y + 38);
   });
 }
@@ -1542,37 +1571,37 @@ async function J(url){
 $('wm-check').addEventListener('click', async () => {
   const hours = Math.max(1, Math.min(24, +$('wm-hours').value || 8));
   const out = $('wm-result');
-  out.textContent = 'checking…'; out.style.color = '#5f7263';
+  out.textContent = 'checking…'; out.style.color = '#9a9aa6';
   try {
     const r = await J(`/api/willmake?hours=${hours}`);
     if (!r.ok) { out.textContent = r.error === 'insufficient_forecast' ? 'Not enough usage history yet.' : 'No data yet.'; return; }
     if (r.will_make_it) {
-      out.style.color = '#57e389';
+      out.style.color = '#3ddc97';
       out.textContent = `✓ Should make it — stays above ${r.min_soc.toFixed(0)}% (now ${r.current_soc.toFixed(0)}% → ~${r.end_soc.toFixed(0)}% in ${hours}h)`;
     } else {
-      out.style.color = '#f5b942';
+      out.style.color = '#ffc247';
       const minAt = new Date(r.min_at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
       out.textContent = `⚠ Projected to hit 0% around ${minAt} — grid import likely`;
     }
-  } catch(e) { out.textContent = 'Error checking projection.'; out.style.color = '#f5b942'; }
+  } catch(e) { out.textContent = 'Error checking projection.'; out.style.color = '#ffc247'; }
 });
 $('until-check').addEventListener('click', async () => {
   const target = Math.max(0, Math.min(100, +$('until-target').value || 80));
   const out = $('until-result');
-  out.textContent = 'checking…'; out.style.color = '#5f7263';
+  out.textContent = 'checking…'; out.style.color = '#9a9aa6';
   try {
     const r = await J(`/api/until?target=${target}`);
     if (!r.ok) {
-      out.style.color = '#5f7263';
+      out.style.color = '#9a9aa6';
       out.textContent = r.error === 'idle' ? `Battery idle at ${r.current_soc?.toFixed(0) ?? '?'}% — can't estimate.`
         : r.error === 'wrong_direction' ? `Battery moving away from ${target}% at current rate.`
         : 'No data yet.';
       return;
     }
-    out.style.color = '#57e389';
+    out.style.color = '#3ddc97';
     const eta = new Date(r.eta).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
     out.textContent = `~${r.hours.toFixed(1)}h to ${target}% (ETA ${eta}) at current ${Math.abs(r.battery_kw).toFixed(1)} kW rate`;
-  } catch(e) { out.textContent = 'Error checking.'; out.style.color = '#f5b942'; }
+  } catch(e) { out.textContent = 'Error checking.'; out.style.color = '#ffc247'; }
 });
 
 async function pollFast(){
@@ -1586,7 +1615,7 @@ async function pollFast(){
       const wasOut = S.gridStatus !== 'normal';
       S.gridStatus = c.grid_status || 'normal';
       const isOut = S.gridStatus !== 'normal';
-      if (isOut !== wasOut) flash(isOut ? '#3a0d0d' : '#0d3a1a');
+      if (isOut !== wasOut) flash(isOut ? '#2e0d18' : '#143a2c');
       S.onPeak = !!c.on_peak;
       S.savedToday = c.saved_today || 0;
       S.lastPoll = c.last_poll; S.nextPoll = c.next_poll;
@@ -1685,7 +1714,7 @@ function backToLive(){ if (!jumpedFrom) return; S.simTime = new Date(jumpedFrom)
 function toggleOutage(){
   S.outage = !S.outage;
   S.gridStatus = S.outage ? 'down' : 'normal';
-  flash(S.outage ? '#3a0d0d' : '#0d3a1a');
+  flash(S.outage ? '#2e0d18' : '#143a2c');
   if (S.outage) { outageStart = new Date(S.simTime); outageSoc = S.soc;
     demoAlert('GRID', `🔴 <b>GRID DOWN at ${fmtTime(S.simTime)}.</b> Load ${S.load.toFixed(2)} kW · Solar ${S.solar.toFixed(2)} kW · ~${tteStr()} to empty. Conserve: AC, EV, dryer, pool pump.`, true);
   } else {
@@ -1772,7 +1801,7 @@ function demoData(){
     setTimeout(() => {
       S.applying = false; S.modeApplied = true; savTarget = 4.80;
       $('m-apply').textContent = '✓ TIME-OF-USE ACTIVE';
-      $('m-apply').style.cssText += 'background:rgba(87,227,137,.12);color:#57e389;border-color:#2e5c3a;';
+      $('m-apply').style.cssText += 'background:rgba(61,220,151,.12);color:#3ddc97;border-color:#2c6b52;';
       $('m-burst').style.display = 'block'; setTimeout(() => $('m-burst').style.display = 'none', 950);
       $('m-sav').style.display = 'block';
       demoAlert('MODE', `✅ Mode switched to <b>Time-of-Use</b> at ${fmtTime(S.simTime)}. Battery will hold charge for 4–9 PM and export surplus.`);
