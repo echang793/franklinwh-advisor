@@ -93,6 +93,12 @@ def _tou_eb_plan(
     for how long (targeting the cheapest Super Off-Peak window before 2 pm).
     """
     peak_start, peak_end = on_peak_window(now)
+    # Once tonight's peak is over there is nothing left to project through, so every window below came out
+    # empty ("none" confidence) and recommend() fell into its crude no-history rules at night. Plan for
+    # tomorrow's peak instead: tonight's draw plus tomorrow's solar until 4 PM.
+    next_day = now >= peak_end
+    if next_day:
+        peak_start, peak_end = on_peak_window(now + timedelta(days=1))
     current_kwh    = soc / 100.0 * capacity_kwh
     current_rate   = rate_at(now)
     current_period = period_at(now).value.replace("_", " ")
@@ -138,7 +144,8 @@ def _tou_eb_plan(
 
     # ── Compute charge window ────────────────────────────────────────
     run_hours              = shortfall_kwh / charge_kw if charge_kw > 0 else 0.0
-    deadline               = cheap_charge_deadline(now)
+    deadline               = (cheap_charge_deadline(peak_start.replace(hour=0)) if next_day
+                              else cheap_charge_deadline(now))
     run_until: datetime | None = None
 
     if eb_needed:
@@ -163,7 +170,7 @@ def _tou_eb_plan(
     elif not eb_needed:
         hint = (
             f"Battery projects to cover peak without EB "
-            f"(est. {soc_at_peak:.0f}% at 4 pm, need ~{net_peak_draw:.1f} kWh)."
+            f"(est. {soc_at_peak:.0f}% at 4 pm{' tomorrow' if next_day else ''}, need ~{net_peak_draw:.1f} kWh)."
         )
     elif deadline is not None and run_until is not None:
         if run_until >= deadline:
@@ -210,6 +217,7 @@ def _tou_eb_plan(
         "savings_est":             round(savings_est, 2),
         "hint_str":                hint,
         "window_confidence":       window_conf,
+        "next_day_peak":           next_day,
     }
 
 
@@ -294,7 +302,8 @@ def _recommend_raw(
         # plan["soc_at_4pm"] collapses to the current SoC, so this can't
         # defer in the evening when there's no solar left to wait for.
         solar_will_recover = (
-            forecast is not None
+            now < on_peak_window(now)[1]      # not overnight: a nearly empty battery at night keeps its EB call
+            and forecast is not None
             and plan["window_confidence"] == "high"
             and not plan["eb_needed"]
             and plan["soc_at_4pm"] >= _SOC_HEALTHY

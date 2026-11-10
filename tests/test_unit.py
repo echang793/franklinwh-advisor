@@ -13865,3 +13865,75 @@ def test_history_scrub_readout_has_its_own_fixed_height_line_so_the_panel_does_n
     head = html.split('mkPanel(\'history\'')[1].split('id="h-scrub"')[0]
     assert "flex-wrap:wrap;\">\n      <button id=\"h-cmp\"" not in head                 # the button's row no longer holds the readout
     assert "requestAnimationFrame" in html.split("$('h-scrub').addEventListener('pointermove'")[1][:600]
+
+
+# ── advisor: after tonight's peak, plan for tomorrow's (not the static fallback) ──────────────────
+
+def _night_forecast(now, *, sunny_tomorrow=True, hours=24):
+    """24 hourly predictions from `now`: a 2 kW car charge 12-4 AM, otherwise a quiet house, solar 8 AM-4 PM."""
+    from franklinwh_scraper.predictor import HourPrediction, UsageForecast
+    pts = []
+    for i in range(hours):
+        t = now + timedelta(hours=i)
+        load = 2.0 if t.hour in (0, 1, 2, 3) else 0.4
+        solar = 3.0 if sunny_tomorrow and 8 <= t.hour < 16 else 0.0
+        pts.append(HourPrediction(dt=t, predicted_load_kw=load, predicted_solar_kw=solar,
+                                  net_kw=solar - load, confidence="high"))
+    return UsageForecast(hours=pts, total_load_kwh=sum(p.predicted_load_kw for p in pts),
+                         total_solar_kwh=sum(p.predicted_solar_kw for p in pts),
+                         net_kwh=sum(p.net_kw for p in pts), peak_load_kw=2.0, confidence="high", data_days=15)
+
+
+def test_eb_plan_after_the_peak_ends_looks_at_tomorrows_peak_and_sees_the_sun_coming():
+    from franklinwh_scraper import advisor
+    now = datetime(2026, 11, 9, 22, 0)
+    plan = advisor._tou_eb_plan(now, soc=48.0, capacity_kwh=13.6, forecast=_night_forecast(now))
+    assert plan["window_confidence"] == "high"              # was "none": today's peak window is in the past
+    assert plan["eb_needed"] is False
+    assert plan["soc_at_4pm"] > 80                          # tomorrow's solar refills the battery
+    assert "tomorrow" in plan["hint_str"]
+
+
+def test_eb_plan_after_the_peak_still_asks_for_eb_when_tomorrow_will_not_cover_it():
+    from franklinwh_scraper import advisor
+    now = datetime(2026, 11, 9, 22, 0)
+    plan = advisor._tou_eb_plan(now, soc=15.0, capacity_kwh=13.6, forecast=_night_forecast(now, sunny_tomorrow=False))
+    assert plan["eb_needed"] is True
+    assert plan["run_until"] <= datetime(2026, 11, 10, 14, 0)   # cheap-rate cutoff is tomorrow's 2 PM, not none
+
+
+def test_eb_plan_before_the_peak_ends_is_unchanged_by_the_night_rule():
+    from franklinwh_scraper import advisor
+    now = datetime(2026, 11, 9, 20, 0)                          # inside tonight's 4-9 PM window
+    plan = advisor._tou_eb_plan(now, soc=48.0, capacity_kwh=13.6, forecast=_night_forecast(now))
+    assert "tomorrow" not in plan["hint_str"]
+
+
+def _night_case(now, soc, sunny_tomorrow=True):
+    import types
+    stats = types.SimpleNamespace(current=types.SimpleNamespace(
+        battery_soc_pct=soc, home_load_kw=0.9, solar_production_kw=0.0, grid_status="normal"), totals=types.SimpleNamespace())
+    outlook = types.SimpleNamespace(avg_ghi=lambda h: 0.0, avg_cloud_cover=lambda h: 10.0, peak_ghi_today=lambda: 675.0)
+    return stats, outlook, _night_forecast(now, sunny_tomorrow=sunny_tomorrow)
+
+
+def test_no_eb_recommendation_at_night_just_because_soc_dips_under_50(monkeypatch):
+    """Regression (2026-11-09 9:46 PM): the 24-hour load (which includes an overnight car charge) plus no solar in the
+    next 6 hours plus SoC under 50% tripped the 'no usable history' static rules, because after 9 PM the now-to-peak
+    window is empty. Tomorrow's sun refills the battery, so no EB."""
+    from franklinwh_scraper import advisor
+    now = datetime(2026, 11, 9, 22, 0)
+    monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
+    stats, outlook, fc = _night_case(now, soc=49.0)
+    rec = advisor.recommend(stats, outlook=outlook, forecast=fc, battery_capacity_kwh=13.6)
+    assert rec.mode is not advisor.Mode.EMERGENCY_BACKUP
+
+
+def test_a_critically_low_battery_at_night_still_gets_eb(monkeypatch):
+    """The night rule must not let the 'solar will recover' deferral hide a nearly empty battery overnight."""
+    from franklinwh_scraper import advisor
+    now = datetime(2026, 11, 9, 22, 0)
+    monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
+    stats, outlook, fc = _night_case(now, soc=11.0)
+    rec = advisor.recommend(stats, outlook=outlook, forecast=fc, battery_capacity_kwh=13.6)
+    assert rec.mode is advisor.Mode.EMERGENCY_BACKUP and rec.urgency == "critical"
