@@ -291,11 +291,9 @@ mkPanel('battery', `
 mkPanel('history', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel">LAST 24 HOURS</div>
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-      <button id="h-cmp" class="chip">↔ VS YESTERDAY</button>
-      <div id="h-info" class="mono" style="font-size:11.5px;letter-spacing:.08em;color:#3ddc97;">24H · 15-MIN SAMPLES · DRAG TO SCRUB</div>
-    </div>
+    <button id="h-cmp" class="chip">↔ VS YESTERDAY</button>
   </div>
+  <div id="h-info" class="mono" style="margin-top:10px;min-height:18px;line-height:18px;font-size:11.5px;letter-spacing:.08em;color:#3ddc97;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">24H · 15-MIN SAMPLES · DRAG TO SCRUB</div>
   <div id="h-scrub" style="position:relative;margin-top:14px;cursor:crosshair;touch-action:none;">
     <div id="h-cursor" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(236,236,241,.5);pointer-events:none;z-index:2;"></div>
     <div style="display:flex;flex-direction:column;gap:10px;">
@@ -1006,7 +1004,10 @@ function renderHistCursor(){
   }
 }
 $('h-cmp').addEventListener('click', () => { S.cmp = !S.cmp; $('h-cmp').classList.toggle('on', S.cmp); renderHistory(); });
-$('h-scrub').addEventListener('pointermove', e => { const r = e.currentTarget.getBoundingClientRect(); S.histIdx = Math.max(0, Math.min(95, Math.floor((e.clientX - r.left)/r.width*96))); renderHistCursor(); });
+$('h-scrub').addEventListener('pointermove', e => {   // one redraw per frame however fast the mouse reports
+  const r = e.currentTarget.getBoundingClientRect(); S.histIdx = Math.max(0, Math.min(95, Math.floor((e.clientX - r.left)/r.width*96)));
+  if (!renderHistCursor._raf) renderHistCursor._raf = requestAnimationFrame(() => { renderHistCursor._raf = 0; renderHistCursor(); });
+});
 $('h-scrub').addEventListener('pointerleave', () => { S.histIdx = -1; renderHistCursor(); });
 
 // forecast + what-if + EB derivation

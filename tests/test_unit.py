@@ -13852,3 +13852,16 @@ def test_dashboard_text_is_never_below_eleven_pixels():
     from franklinwh_scraper import webapi
     html = (webapi._STATIC / "index.html").read_text()
     assert [m for m in re.findall(r"font-size:(\d+(?:\.\d+)?)px", html) if float(m) < 11] == []
+
+
+def test_history_scrub_readout_has_its_own_fixed_height_line_so_the_panel_does_not_jump():
+    """The readout text changes length as the cursor moves. Inside a wrapping row it wrapped and unwrapped, so the
+    panel grew and shrank under the mouse."""
+    import re
+    from franklinwh_scraper import webapi
+    html = (webapi._STATIC / "index.html").read_text()
+    tag = re.search(r'<div id="h-info"[^>]*>', html).group(0)
+    assert "white-space:nowrap" in tag and "min-height" in tag and "text-overflow:ellipsis" in tag
+    head = html.split('mkPanel(\'history\'')[1].split('id="h-scrub"')[0]
+    assert "flex-wrap:wrap;\">\n      <button id=\"h-cmp\"" not in head                 # the button's row no longer holds the readout
+    assert "requestAnimationFrame" in html.split("$('h-scrub').addEventListener('pointermove'")[1][:600]
