@@ -1,13 +1,17 @@
-"""Read-only HTTP API + static dashboard server for the advisor.
+"""HTTP API + static dashboard server for the advisor.
 
 Serves the live dashboard (static/) and JSON endpoints that read the same
 files/DB the advisor writes — it never talks to the FranklinWH cloud itself,
 so it can run alongside the watch loop with zero extra API load.
 
-Local-only by design: the shipped LaunchAgent binds --host 127.0.0.1, and
-that's the recommended binding — the /api/* routes have no auth beyond the
-optional dashboard_token below, so don't expose this port past localhost
-without setting one.
+Almost everything here only reads. The exceptions are POST /api/plan and
+POST /api/habits/name (the "Editing" section near the end): they update the
+advisor's state file under its lock, and are refused unless dashboard_token is
+set.
+
+The recommended binding is --host 127.0.0.1. This machine's LaunchAgent binds
+0.0.0.0 on purpose (the dashboard is reached over the network), which is only
+acceptable with dashboard_token set: the /api/* routes have no other auth.
 
 Run:  python3.13 -m uvicorn franklinwh_scraper.webapi:app --host 127.0.0.1 --port 8093
 """
@@ -961,6 +965,135 @@ def api_baseline_load():
         for h in range(24)
     ]
     return {"hours": hours, "min_samples": _NO_EV_LOAD_MIN_SAMPLES}
+
+
+# ── Editing: today's plan and routine names ──────────────────────────────────
+# The only routes that write. They change the same state file the advisor and the chat bot use (under
+# the same cross-process lock), so a plan set here is counted by /sundown, /evening and the 12:30 alert.
+# Refused unless dashboard_token is configured: with the dashboard reachable on the network, an
+# unauthenticated write is not acceptable.
+
+from typing import Literal  # noqa: E402
+
+from pydantic import BaseModel, Field  # noqa: E402
+
+
+class _PlanLoad(BaseModel):
+    name: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9 \-]{0,23}$")
+    start: float = Field(ge=0, lt=24)
+    hours: float = Field(gt=0, le=12)
+    kw: float = Field(gt=0, le=12)
+
+
+class _PlanBody(BaseModel):
+    action: Literal["set", "clear", "none"] = "set"
+    loads: list[_PlanLoad] = Field(default_factory=list, max_length=8)
+
+
+class _NameBody(BaseModel):
+    key: str = Field(pattern=r"^[0-6]:\d{1,2}$")
+    code: str = Field(min_length=1, max_length=1)
+
+
+def _require_write(request: Request) -> None:
+    if not _cfg.dashboard_token:
+        raise HTTPException(status_code=403,
+                            detail="Editing needs dashboard_token set in ~/.franklinwh.json")
+    _require_token(request)
+
+
+_writable = [Depends(_require_write)]
+_PLAN_PRESETS = [{"name": "dryer", "start": 14.0, "hours": 1.0, "kw": 4.0},
+                 {"name": "oven", "start": 17.0, "hours": 2.0, "kw": 2.5},
+                 {"name": "kitchen", "start": 17.0, "hours": 2.0, "kw": 2.5},
+                 {"name": "ac", "start": 14.0, "hours": 3.0, "kw": 3.0}]
+
+
+def _habit_items(state: dict, now: datetime) -> list[dict]:
+    """The routine loads learned from the history, one per weekday and start time (see loadevents.py)."""
+    from . import loadevents, planned
+    try:
+        with HistoryStore(_OUT / "history.db") as history:
+            learned = loadevents.learn(history, now.date(), state.get("car_day_labels"))
+    except Exception:
+        return []
+    names = state.get("pattern_names")
+    out = []
+    for wd in sorted(learned):
+        for e in learned[wd]:
+            out.append({"key": loadevents.pattern_key(e), "weekday": wd,
+                        "weekday_name": datetime(2000, 1, 3 + wd).strftime("%A"),
+                        "name": (names or {}).get(loadevents.pattern_key(e)),
+                        "start": round(e.start, 2), "hours": round(e.hours, 2), "kw": round(e.kw, 2),
+                        "span": planned.span(e.as_load()), "days": e.days, "of": e.of,
+                        "share": round(e.share, 2), "usual": e.share >= loadevents.USUAL_SHARE})
+    return out
+
+
+def _plan_payload(state: dict, now: datetime) -> dict:
+    from . import planned
+    today = now.strftime("%Y-%m-%d")
+    loads = planned.get_plan(state, today)
+    now_h = now.hour + now.minute / 60.0
+    usual = [{"name": h["name"] or "usual load", "start": h["start"], "hours": h["hours"], "kw": h["kw"]}
+             for h in _habit_items(state, now)
+             if h["weekday"] == now.weekday() and h["usual"] and h["start"] + h["hours"] > now_h]
+    return {"date": today, "declared": planned.declared(state, today),
+            "loads": [dict(ld, span=planned.span(ld)) for ld in loads],
+            "evening_kwh": round(planned.evening_kwh(loads), 2),
+            "usual": usual, "presets": _PLAN_PRESETS, "away_since": state.get("away_since")}
+
+
+@app.get("/api/plan", dependencies=_authed)
+def api_plan():
+    """Today's declared loads, the learned usual loads still ahead, quick-add presets and the away flag."""
+    return _plan_payload(_load_peak_state(_OUT), _sundown_now())
+
+
+@app.post("/api/plan", dependencies=_writable)
+def api_plan_set(body: _PlanBody):
+    """Replace today's plan with exactly these loads (set), say there are none (none), or forget it (clear)."""
+    from . import planned
+    from .alerts import _save_peak_state, _state_lock
+    now = _sundown_now()
+    today = now.strftime("%Y-%m-%d")
+    with _state_lock(_OUT):
+        state = _load_peak_state(_OUT)
+        planned.clear_plan(state, today)
+        if body.action == "none":
+            planned.set_none(state, today)
+        elif body.action == "set" and body.loads:
+            planned.set_plan(state, today, [ld.model_dump() for ld in body.loads])
+        _save_peak_state(_OUT, state)
+    return _plan_payload(state, now)
+
+
+@app.get("/api/habits", dependencies=_authed)
+def api_habits():
+    """Routine big loads learned from the history, the names you gave them, and the answers you can pick."""
+    from . import appliances
+    state = _load_peak_state(_OUT)
+    return {"habits": _habit_items(state, _sundown_now()),
+            "choices": [{"code": c, "label": t} for c, t in appliances.choices()]}
+
+
+@app.post("/api/habits/name", dependencies=_writable)
+def api_habits_name(body: _NameBody):
+    """Name a routine ("6:15" = Sundays around 3 PM) as the dryer, the oven and so on. Answers the bot's
+    "Is this a routine?" question too."""
+    from . import appliances
+    from .alerts import _mark_question_answered, _save_peak_state, _state_lock
+    name = appliances.NAMES.get(body.code)
+    if name is None:
+        raise HTTPException(status_code=422, detail="Unknown appliance code")
+    with _state_lock(_OUT):
+        state = _load_peak_state(_OUT)
+        names = state.get("pattern_names", {})
+        names[body.key] = name
+        state["pattern_names"] = dict(list(names.items())[-40:])
+        _mark_question_answered(state, "pattern")
+        _save_peak_state(_OUT, state)
+    return api_habits()
 
 
 app.mount("/", StaticFiles(directory=_STATIC, html=True), name="static")

@@ -64,7 +64,7 @@ where = ["."]
 include = ["franklinwh_scraper*"]
 
 [tool.setuptools.package-data]
-franklinwh_scraper = ["static/*", "data/*.json"]
+franklinwh_scraper = ["static/*", "static/vendor/*", "data/*.json"]
 
 [tool.ruff.lint]
 # Explicit, so a newer Ruff that changes its defaults (0.16 turned on DTZ, BLE, I,

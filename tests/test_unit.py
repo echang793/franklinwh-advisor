@@ -13738,3 +13738,117 @@ def test_dashboard_has_a_sundown_panel():
     html = (webapi._STATIC / "index.html").read_text()
     assert "'sundown'" in html and "/api/sundown" in html and "function renderSundown" in html
     assert "mkPanel('sundown'" in html
+
+
+# ── Dashboard: edit today's plan and name routines (writes need dashboard_token) ──────────────────
+
+def _plan_client(tmp_path, monkeypatch, token="tok", now=datetime(2026, 11, 15, 11, 0), db=None):
+    from fastapi.testclient import TestClient
+    from franklinwh_scraper import webapi
+    monkeypatch.setattr(webapi, "_OUT", tmp_path, raising=False)
+    monkeypatch.setattr(webapi, "_cfg", Config(dashboard_token=token), raising=False)
+    monkeypatch.setattr(webapi, "_sundown_now", lambda: now, raising=False)
+    if db is not None:
+        class _Keep:                                    # hand the seeded db to every request without closing it
+            def __init__(self, _path): pass
+            def __enter__(self): return db
+            def __exit__(self, *exc): return False
+        monkeypatch.setattr(webapi, "HistoryStore", _Keep, raising=False)
+    return TestClient(webapi.app), {"X-Dashboard-Token": token}
+
+
+def test_api_plan_starts_empty_and_lists_the_quick_add_presets(tmp_path, monkeypatch):
+    c, h = _plan_client(tmp_path, monkeypatch)
+    body = c.get("/api/plan", headers=h).json()
+    assert body["declared"] is False and body["loads"] == []
+    assert {p["name"] for p in body["presets"]} >= {"dryer", "oven"}
+
+
+def test_api_plan_post_sets_replaces_and_clears(tmp_path, monkeypatch):
+    c, h = _plan_client(tmp_path, monkeypatch)
+    dryer = {"name": "dryer", "start": 15, "hours": 1, "kw": 4}
+    oven = {"name": "oven", "start": 17, "hours": 1.5, "kw": 2}
+    r = c.post("/api/plan", headers=h, json={"action": "set", "loads": [dryer, oven]})
+    assert r.status_code == 200 and [ld["name"] for ld in r.json()["loads"]] == ["dryer", "oven"]
+    assert r.json()["evening_kwh"] > 0
+    r = c.post("/api/plan", headers=h, json={"action": "set", "loads": [oven]})              # sent whole: dryer is gone
+    assert [ld["name"] for ld in r.json()["loads"]] == ["oven"]
+    assert alerts._load_peak_state(tmp_path)["planned_loads_2026-11-15"][0]["name"] == "oven"   # the bot sees it too
+    r = c.post("/api/plan", headers=h, json={"action": "none"})
+    assert r.json()["declared"] is True and r.json()["loads"] == []
+    r = c.post("/api/plan", headers=h, json={"action": "clear"})
+    assert r.json()["declared"] is False
+
+
+def test_api_plan_post_needs_a_token_and_a_valid_load(tmp_path, monkeypatch):
+    c, h = _plan_client(tmp_path, monkeypatch)
+    ok = {"name": "dryer", "start": 15, "hours": 1, "kw": 4}
+    assert c.post("/api/plan", json={"action": "set", "loads": [ok]}).status_code == 401           # no token sent
+    assert c.post("/api/plan", headers={"X-Dashboard-Token": "wrong"}, json={"action": "set", "loads": [ok]}).status_code == 401
+    for bad in ({"name": "dryer", "start": 30, "hours": 1, "kw": 4}, {"name": "dryer", "start": 15, "hours": 0, "kw": 4},
+                {"name": "<b>x</b>", "start": 15, "hours": 1, "kw": 4}, {"name": "dryer", "start": 15, "hours": 1, "kw": 99}):
+        assert c.post("/api/plan", headers=h, json={"action": "set", "loads": [bad]}).status_code == 422
+    assert "planned_loads_2026-11-15" not in alerts._load_peak_state(tmp_path)
+
+
+def test_api_plan_post_is_refused_when_no_dashboard_token_is_configured(tmp_path, monkeypatch):
+    c, _h = _plan_client(tmp_path, monkeypatch, token="")
+    r = c.post("/api/plan", json={"action": "none"})
+    assert r.status_code == 403 and "dashboard_token" in r.json()["detail"]
+    assert c.get("/api/plan").status_code == 200                                                    # reading is unchanged
+
+
+def test_api_plan_shows_the_usual_loads_still_ahead_and_the_away_flag(tmp_path, monkeypatch):
+    db = _events_db(tmp_path, dryer_weeks=(0, 1, 2, 3, 4, 5))                                       # 75% of Sundays, 3 PM
+    alerts._save_peak_state(tmp_path, {"away_since": "2026-11-13"})
+    c, h = _plan_client(tmp_path, monkeypatch, db=db)
+    body = c.get("/api/plan", headers=h).json()
+    assert len(body["usual"]) == 1 and body["usual"][0]["start"] == 15.0
+    assert body["away_since"] == "2026-11-13"
+
+
+def test_api_habits_lists_routines_and_naming_one_is_shared_with_the_bot(tmp_path, monkeypatch):
+    db = _events_db(tmp_path, dryer_weeks=(0, 1, 2, 3, 4, 5))
+    alerts._save_peak_state(tmp_path, {"question_log": [{"kind": "pattern", "day": "2026-11-14", "answered": False}]})
+    c, h = _plan_client(tmp_path, monkeypatch, db=db)
+    body = c.get("/api/habits", headers=h).json()
+    item = body["habits"][0]
+    assert item["weekday_name"] == "Sunday" and item["name"] is None and item["days"] >= 3 and item["key"] == "6:15"
+    assert {ch["code"] for ch in body["choices"]} >= {"d", "o"}
+    r = c.post("/api/habits/name", headers=h, json={"key": "6:15", "code": "d"})
+    assert r.status_code == 200 and r.json()["habits"][0]["name"] == "dryer"
+    state = alerts._load_peak_state(tmp_path)
+    assert state["pattern_names"]["6:15"] == "dryer" and state["question_log"][0]["answered"] is True
+
+
+def test_api_habits_name_rejects_a_bad_key_or_code(tmp_path, monkeypatch):
+    c, h = _plan_client(tmp_path, monkeypatch)
+    assert c.post("/api/habits/name", headers=h, json={"key": "9:15", "code": "d"}).status_code == 422
+    assert c.post("/api/habits/name", headers=h, json={"key": "6:15", "code": "zzz"}).status_code == 422
+    assert c.post("/api/habits/name", json={"key": "6:15", "code": "d"}).status_code == 401
+
+
+def test_dashboard_has_plan_habits_hero_collapse_and_summarised_alerts():
+    from franklinwh_scraper import webapi
+    html = (webapi._STATIC / "index.html").read_text()
+    for needle in ("mkPanel('plan'", "mkPanel('habits'", "/api/plan", "/api/habits", "function renderPlan", "function renderHabits",
+                   "function renderHero", 'id="hero"', "toggleCollapsed", "SHOW MORE", "fwh-dash-collapsed"):
+        assert needle in html, needle
+    assert "'plan'" in html.split("const PANEL_IDS")[1].split("\n")[0]
+
+
+def test_dashboard_loads_no_script_from_a_public_cdn_and_serves_its_vendored_library():
+    from fastapi.testclient import TestClient
+    from franklinwh_scraper import webapi
+    html = (webapi._STATIC / "index.html").read_text()
+    assert "unpkg.com" not in html and "cdn." not in html.lower()
+    assert '<script src="/vendor/html-to-image.js"></script>' in html
+    r = TestClient(webapi.app).get("/vendor/html-to-image.js")
+    assert r.status_code == 200 and "toPng" in r.text
+
+
+def test_dashboard_text_is_never_below_eleven_pixels():
+    import re
+    from franklinwh_scraper import webapi
+    html = (webapi._STATIC / "index.html").read_text()
+    assert [m for m in re.findall(r"font-size:(\d+(?:\.\d+)?)px", html) if float(m) < 11] == []
