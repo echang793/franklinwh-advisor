@@ -1435,7 +1435,7 @@ _DATE_KEYED_PREFIXES = (
     "predicted_kwh_", "predicted_avg_ghi_", "predicted_cloudy_", "daily_import_cost_",
     "outages_", "sundown_pred_", "savings_daily_", "soc_7am_pred_",
     "actual_bill_", "perf_ratio_used_", "sundown_shadow_", "daily_plan_", "reserve_plan_", "eb_gate_",
-    "eb_timer_", "evening_short_", "sundown_watch_", "planned_loads_",
+    "eb_timer_", "evening_short_", "sundown_watch_", "sunrise_watch_", "planned_loads_",
 )
 
 
@@ -2256,6 +2256,11 @@ _SUNDOWN_WATCH_PTS = 15.0
 _SUNDOWN_WATCH_MIN_GAP = timedelta(minutes=45)    # between messages, so a swinging forecast cannot spam
 _SUNDOWN_WATCH_MAX = 3                            # corrections a day
 _SUNDOWN_WATCH_STOP = timedelta(hours=1)          # inside the last hour a correction is no use to anyone
+_SUNRISE_WATCH_PTS = 20.0                         # how far the sunrise level may drift from the digest's before you hear
+_SUNRISE_WATCH_MIN_GAP = timedelta(minutes=30)    # between messages, so a car charging in bursts cannot spam
+_SUNRISE_WATCH_MAX = 2                            # messages a night
+_SUNRISE_WATCH_SETTLE = timedelta(minutes=10)     # after the digest, before the first comparison
+_SUNRISE_WATCH_LOAD_WINDOW = timedelta(minutes=15)  # how much recent load to average: short, so a car that just started shows within minutes
 
 
 def _start_sundown_watch(state: dict, today: str, now: datetime, pct: float, sundown_dt: datetime,
@@ -2440,6 +2445,70 @@ def _alert_sundown_watch(state: dict, today: str, now: datetime, c, cfg, outlook
             + ("You charged from the grid (Emergency Backup) since then, so this is your top-up, not a forecast "
                "change.\n" if grid else "")
             + f"Tonight's summary will compare the actual to the first one I sent today (~{w['initial_pct']:.0f}%).")
+
+
+def _alert_sunrise_watch(state: dict, today: str, now: datetime, c, cfg, outlook, usage_forecast, store) -> str | None:
+    """Overnight: re-project the battery level at the next sunrise and tell you when it has drifted
+    _SUNRISE_WATCH_PTS or more from the evening digest's number (or from the last one sent tonight).
+    The digest assumes a flat baseline draw; this uses what the house is actually drawing now (the last quarter
+    hour, never below the baseline), so a car that starts charging shows up within minutes, early
+    enough to act before bed. At most _SUNRISE_WATCH_MAX a night, one per _SUNRISE_WATCH_MIN_GAP, and none while
+    the battery is charging from the grid (that top-up is yours, not a miss)."""
+    from . import ebpattern
+    checkpoint = _next_sunrise_after(now, outlook)
+    key = checkpoint.strftime("%Y-%m-%d")
+    pred = state.get(f"soc_7am_pred_{key}")
+    if not isinstance(pred, dict):
+        return None
+    try:
+        digest_pct = float(pred["pct"])
+        made_at = datetime.fromisoformat(pred["made_at"])
+        pred_dt = datetime.fromisoformat(pred["dt"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if abs((pred_dt - checkpoint).total_seconds()) > 1800:              # the digest's sunrise is not this one
+        return None
+    if now - made_at < _SUNRISE_WATCH_SETTLE or now - made_at > timedelta(hours=20):
+        return None
+    if getattr(c, "grid_use_kw", 0.0) > ebpattern.GRID_KW and getattr(c, "battery_use_kw", 0.0) < -ebpattern.BATT_KW:
+        return None
+    w = state.get(f"sunrise_watch_{key}") or {}
+    if len(w.get("corrections", [])) >= _SUNRISE_WATCH_MAX:
+        return None
+    try:
+        if w.get("last_at") and now - datetime.fromisoformat(w["last_at"]) < _SUNRISE_WATCH_MIN_GAP:
+            return None
+        last_pct = float(w.get("last_pct", digest_pct))
+    except (TypeError, ValueError):
+        return None
+    baseline = float(getattr(cfg, "no_ev_baseline_load_kw", 0.4))
+    load_now = float(getattr(c, "home_load_kw", baseline) or baseline)
+    try:
+        recent = [r[2] for r in store.readings_between((now - _SUNRISE_WATCH_LOAD_WINDOW).isoformat(), now.isoformat())] if store is not None else []
+    except Exception:
+        recent = []
+    if recent:
+        load_now = sum(recent) / len(recent)
+    load_kw = max(baseline, load_now)
+    cap = getattr(cfg, "battery_capacity_kwh", None) or 13.6
+    reserve = getattr(cfg, "battery_reserve_pct", DEFAULT_RESERVE_PCT)
+    pct, hour_label = _predict_overnight_soc_flat(now, float(c.battery_soc_pct), cap, load_kw, checkpoint, reserve)
+    if abs(pct - last_pct) < _SUNRISE_WATCH_PTS:
+        return None
+    w.setdefault("corrections", []).append({"at": now.isoformat(), "from": round(last_pct, 1), "to": round(pct, 1)})
+    w.update(last_pct=round(pct, 1), last_at=now.isoformat())
+    state[f"sunrise_watch_{key}"] = w
+    first = "the evening digest said" if len(w["corrections"]) == 1 else "I last said"
+    lines = ["🌅 <b>Sunrise battery projection changed</b>",
+             f"{first.capitalize()} ~{last_pct:.0f}% at {hour_label}; now ~{pct:.0f}% ({pct - last_pct:+.0f} pts).",
+             f"Battery is {c.battery_soc_pct:.0f}% now and the house is drawing {load_now:.1f} kW "
+             f"(the digest assumed {baseline:.1f} kW)."]
+    if load_kw >= baseline + 0.8:
+        lines.append(f"That looks like the car or another big load. If it keeps up, the battery reaches the "
+                     f"{reserve:.0f}% floor and the grid carries the rest.")
+    elif pct > last_pct:
+        lines.append("Less is being used than the digest assumed.")
+    return "\n".join(lines)
 
 
 def _sundown_watch_line(watch: dict, pred_pct: float, actual_pct: float, grid: bool = False) -> str:
@@ -6066,6 +6135,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("eb_timer",             lambda: _alert_eb_timer(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("evening_short",        lambda: _alert_evening_short(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("sundown_watch",        lambda: _alert_sundown_watch(state, today, now, c, cfg, outlook, usage_forecast, store)),
+            ("sunrise_watch",        lambda: _alert_sunrise_watch(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("solar_backtest",       lambda: _maybe_launch_monthly_backtest(state, now, cfg)),
             ("sundown_drift",        lambda: _alert_sundown_drift(state, today, now)),
             ("miss_question",        lambda: _alert_miss_question(state, today, now)),

@@ -13937,3 +13937,99 @@ def test_a_critically_low_battery_at_night_still_gets_eb(monkeypatch):
     stats, outlook, fc = _night_case(now, soc=11.0)
     rec = advisor.recommend(stats, outlook=outlook, forecast=fc, battery_capacity_kwh=13.6)
     assert rec.mode is advisor.Mode.EMERGENCY_BACKUP and rec.urgency == "critical"
+
+
+# ── sunrise watch: tell me when the sunrise battery level drifts from what the evening digest said ───
+
+_SR_DAY = "2026-11-09"
+_SR_SUNRISE = "2026-11-10T07:00:00"                       # the fallback sunrise the test outlook gives
+_SR_DB_N = __import__("itertools").count()
+
+
+def _sr_run(tmp_path, soc, load_kw, now=None, pred=None, watch=None, grid=False, c_kw=None):
+    """The 11:30 PM check. The 9 PM digest said ~36% at sunrise (a flat 0.4 kW walk from 63%)."""
+    import types
+    now = now or datetime(2026, 11, 9, 23, 30)
+    db = HistoryStore(tmp_path / f"sr{next(_SR_DB_N)}.db")                                  # a fresh database per call
+    for k in range(0, 30, 5):                                                               # the last half hour
+        t = now - timedelta(minutes=30 - k)
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,solar_kw,battery_soc,"
+            "grid_use_kw,grid_status,solar_total_kwh,battery_use_kw) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (t.isoformat(), t.weekday(), t.hour, load_kw, 0.0, soc, 4.5 if grid else 0.0, "normal", 0.0,
+             -4.0 if grid else load_kw))
+    db._conn.commit()
+    st = {"soc_7am_pred_2026-11-10": pred or {"pct": 36.0, "low_pct": 31.0, "high_pct": 41.0, "dt": _SR_SUNRISE,
+                                              "made_at": "2026-11-09T21:01:00"}}
+    if watch is not None:
+        st["sunrise_watch_2026-11-10"] = watch
+    c = types.SimpleNamespace(battery_soc_pct=soc, home_load_kw=load_kw, solar_production_kw=0.0,
+                              battery_use_kw=-4.0 if grid else load_kw, grid_use_kw=4.5 if grid else 0.0, **(c_kw or {}))
+    cfg = Config(battery_capacity_kwh=13.6)
+    return alerts._alert_sunrise_watch(st, _SR_DAY, now, c, cfg, _GateOutlook(False, 25.0), None, db), st
+
+
+def test_sunrise_watch_alerts_when_the_car_starts_charging_and_the_projection_falls(tmp_path):
+    msg, st = _sr_run(tmp_path, soc=31.0, load_kw=2.0)
+    assert msg and "36%" in msg and "10%" in msg and "7:00 AM" in msg
+    assert "2.0 kW" in msg and "0.4 kW" in msg                                              # what it assumed vs what it sees
+    assert st["sunrise_watch_2026-11-10"]["last_pct"] == 10.0 and len(st["sunrise_watch_2026-11-10"]["corrections"]) == 1
+
+
+def test_sunrise_watch_stays_quiet_while_the_night_goes_as_the_digest_said(tmp_path):
+    msg, st = _sr_run(tmp_path, soc=45.0, load_kw=0.4)                                      # ~25% projected: on track
+    assert msg is None and "sunrise_watch_2026-11-10" not in st
+
+
+def test_sunrise_watch_also_tells_you_when_it_is_better_than_the_digest_expected(tmp_path):
+    msg, _ = _sr_run(tmp_path, soc=90.0, load_kw=0.4)                                       # ~68% projected vs ~36%
+    assert msg and "36%" in msg and "68%" in msg
+
+
+def test_sunrise_watch_sends_a_follow_up_only_after_a_further_big_move_and_at_most_two(tmp_path):
+    w = {"last_pct": 10.0, "last_at": "2026-11-09T22:00:00", "corrections": [{"at": "2026-11-09T22:00:00"}]}
+    assert _sr_run(tmp_path, soc=31.0, load_kw=2.0, watch=w)[0] is None                    # still ~10%: nothing new to say
+    msg, st = _sr_run(tmp_path, soc=70.0, load_kw=0.4, watch=dict(w))                       # the car stopped; ~48% now
+    assert msg and "48%" in msg and len(st["sunrise_watch_2026-11-10"]["corrections"]) == 2
+    full = {"last_pct": 10.0, "last_at": "2026-11-09T20:00:00", "corrections": [{}, {}]}
+    assert _sr_run(tmp_path, soc=70.0, load_kw=0.4, watch=full)[0] is None                  # two already tonight
+
+
+def test_sunrise_watch_waits_a_while_between_messages(tmp_path):
+    w = {"last_pct": 40.0, "last_at": "2026-11-09T23:10:00", "corrections": [{}]}
+    assert _sr_run(tmp_path, soc=31.0, load_kw=2.0, watch=w)[0] is None                    # 20 minutes ago
+
+
+def test_sunrise_watch_skips_a_grid_top_up_and_a_missing_or_stale_digest_projection(tmp_path):
+    assert _sr_run(tmp_path, soc=31.0, load_kw=2.0, grid=True)[0] is None                  # Emergency Backup charging: your top-up
+    stale = {"pct": 36.0, "low_pct": 31.0, "high_pct": 41.0, "dt": _SR_SUNRISE, "made_at": "2026-11-08T21:01:00"}
+    assert _sr_run(tmp_path, soc=31.0, load_kw=2.0, pred=stale)[0] is None                 # made last night, not this one
+    assert _sr_run(tmp_path, soc=31.0, load_kw=2.0, now=datetime(2026, 11, 9, 21, 9))[0] is None    # 8 minutes after the digest
+    assert _sr_run(tmp_path, soc=31.0, load_kw=2.0, now=datetime(2026, 11, 9, 21, 12))[0]            # 11 minutes: compare now
+
+
+def test_sunrise_watch_is_dispatched_and_its_state_is_pruned():
+    from pathlib import Path
+    assert '("sunrise_watch",' in Path(alerts.__file__).read_text()
+    assert "sunrise_watch_" in alerts._DATE_KEYED_PREFIXES
+
+
+def test_sunrise_watch_notices_a_car_that_started_charging_ten_minutes_ago(tmp_path):
+    """Averaging a long window dilutes a fresh charge for half an hour; with you asleep before 1 AM it has to show
+    within minutes. Quiet house for 25 minutes, then 2 kW for the last 10."""
+    import types
+    now = datetime(2026, 11, 9, 23, 30)
+    db = HistoryStore(tmp_path / "fresh.db")
+    for minutes_ago, kw in ((30, 0.4), (25, 0.4), (20, 0.4), (15, 0.4), (10, 2.0), (5, 2.0)):
+        t = now - timedelta(minutes=minutes_ago)
+        db._conn.execute(
+            "INSERT INTO readings (timestamp,day_of_week,hour_of_day,home_load_kw,solar_kw,battery_soc,grid_use_kw,"
+            "grid_status,solar_total_kwh,battery_use_kw) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (t.isoformat(), t.weekday(), t.hour, kw, 0.0, 70.0, 0.0, "normal", 0.0, kw))
+    db._conn.commit()
+    st = {"soc_7am_pred_2026-11-10": {"pct": 36.0, "low_pct": 31.0, "high_pct": 41.0, "dt": _SR_SUNRISE,
+                                      "made_at": "2026-11-09T21:01:00"}}
+    c = types.SimpleNamespace(battery_soc_pct=70.0, home_load_kw=2.0, solar_production_kw=0.0, battery_use_kw=2.0,
+                              grid_use_kw=0.0)
+    msg = alerts._alert_sunrise_watch(st, _SR_DAY, now, c, Config(battery_capacity_kwh=13.6), _GateOutlook(False, 25.0), None, db)
+    assert msg and "10%" in msg
