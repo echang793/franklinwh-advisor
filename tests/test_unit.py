@@ -2911,7 +2911,7 @@ def test_grid_down_dispatches_as_urgent(tmp_path, monkeypatch):
     import types
     sent = []
     monkeypatch.setattr(alerts, "_send_alert",
-                        lambda body, cfg, urgent=False, alert_name=None: sent.append((body, urgent)))
+                        lambda body, cfg, urgent=False, alert_name=None, **_kw: sent.append((body, urgent)))
 
     c = types.SimpleNamespace(
         battery_soc_pct=80.0, home_load_kw=1.0, solar_production_kw=0.0,
@@ -14033,3 +14033,30 @@ def test_sunrise_watch_notices_a_car_that_started_charging_ten_minutes_ago(tmp_p
                               grid_use_kw=0.0)
     msg = alerts._alert_sunrise_watch(st, _SR_DAY, now, c, Config(battery_capacity_kwh=13.6), _GateOutlook(False, 25.0), None, db)
     assert msg and "10%" in msg
+
+
+def test_dashboard_shows_how_old_the_reading_is():
+    from franklinwh_scraper import webapi
+    html = (webapi._STATIC / "index.html").read_text()
+    for needle in ('id="b-age"', 'id="fl-age"', "function fmtAge", "function renderAge", "REAL-TIME"):
+        assert (needle in html) is (needle != "REAL-TIME"), needle      # "real-time" is gone: the data is up to a poll old
+
+
+def test_fmt_age_reads_naturally_and_never_goes_negative():
+    import json
+    import re
+    import shutil
+    import subprocess
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    from franklinwh_scraper import webapi
+    html = (webapi._STATIC / "index.html").read_text()
+    fn = re.search(r"function fmtAge\(.*?\n}\n", html, re.S).group(0)
+    cases = [-5, 0, 4, 9, 10, 45, 59, 60, 119, 240, 3599, 3600, 3660, 7500]
+    out = subprocess.run(["node", "-e", fn + f"console.log(JSON.stringify({cases}.map(fmtAge)))"],
+                         capture_output=True, text=True, check=True).stdout
+    got = dict(zip(cases, json.loads(out)))
+    assert got[-5] == got[0] == got[4] == got[9] == "just now"
+    assert got[10] == "10s ago" and got[45] == "45s ago" and got[59] == "59s ago"
+    assert got[60] == "1 min ago" and got[119] == "1 min ago" and got[240] == "4 min ago" and got[3599] == "59 min ago"
+    assert got[3600] == "1h 0m ago" and got[3660] == "1h 1m ago" and got[7500] == "2h 5m ago"

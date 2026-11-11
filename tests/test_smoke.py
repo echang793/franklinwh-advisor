@@ -41,7 +41,7 @@ def _fake_stats(**cur_over):
 def test_dispatch_runs_clean(tmp_path, monkeypatch):
     """Full dispatch list executes for every alert without raising."""
     sent = []
-    monkeypatch.setattr(alerts, "_send_alert", lambda b, c, urgent=False, alert_name=None: sent.append(b))
+    monkeypatch.setattr(alerts, "_send_alert", lambda b, c, urgent=False, alert_name=None, **_kw: sent.append(b))
     monkeypatch.setattr(alerts, "fetch_nws_storm_alerts", lambda lat, lon: [])
 
     store = HistoryStore(tmp_path / "h.db")
@@ -57,7 +57,7 @@ def test_dispatch_runs_for_ntfy_only_config(tmp_path, monkeypatch):
     never ran any of the ~30 alerts at all, even though _send_alert itself
     has always supported all five channels."""
     sent = []
-    monkeypatch.setattr(alerts, "_send_alert", lambda b, c, urgent=False, alert_name=None: sent.append(b))
+    monkeypatch.setattr(alerts, "_send_alert", lambda b, c, urgent=False, alert_name=None, **_kw: sent.append(b))
     monkeypatch.setattr(alerts, "fetch_nws_storm_alerts", lambda lat, lon: [])
 
     store = HistoryStore(tmp_path / "h.db")

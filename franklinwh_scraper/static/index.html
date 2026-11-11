@@ -282,6 +282,7 @@ mkPanel('battery', `
     <div style="flex:1 1 200px;min-width:0;">
       <div id="b-soc" style="font-family:'Space Grotesk',sans-serif;font-size:88px;font-weight:300;letter-spacing:-.04em;line-height:1;color:#3ddc97;transition:color .6s;">—%</div>
       <div id="b-status" class="mono" style="font-size:13px;color:#b0b0ba;margin-top:10px;"></div>
+      <div id="b-age" class="mono" style="font-size:12px;color:#8a8a96;margin-top:4px;"></div>
       <div class="mono" style="display:flex;justify-content:space-between;gap:12px;margin-top:18px;font-size:12px;color:#a0a0ac;">
         <span id="b-kwh"></span><span id="b-tte"></span>
       </div>
@@ -309,7 +310,7 @@ mkPanel('history', `
 mkPanel('flow', `
   <div style="display:flex;justify-content:space-between;align-items:center;">
     <div class="plabel">LIVE ENERGY FLOW</div>
-    <div class="mono" style="font-size:11.5px;letter-spacing:.14em;color:#6e6e7a;">kW · REAL-TIME</div>
+    <div id="fl-age" class="mono" style="font-size:11.5px;letter-spacing:.14em;color:#6e6e7a;">kW</div>
   </div>
   <canvas id="flowcv" style="width:100%;height:250px;display:block;margin-top:8px;"></canvas>`);
 
@@ -1499,7 +1500,7 @@ setInterval(() => {  // typewriter
   a.prog += 3; if (a.prog >= total) a.done = true;
   renderAlerts();
 }, 40);
-setInterval(() => { document.querySelectorAll('#al-list [title]'); renderHeader(); }, 1000);
+setInterval(() => { document.querySelectorAll('#al-list [title]'); renderHeader(); renderAge(); }, 1000);
 
 // digests from alert feed
 function renderDigests(){
@@ -1773,12 +1774,33 @@ function renderHabits(){
     row.appendChild(chips); list.appendChild(row);
   });
 }
+// How old the numbers on screen are: the advisor logs a reading about every 5 minutes and the dashboard shows the latest
+// one, so it can trail the FranklinWH app by up to a poll. Say so instead of looking live.
+function fmtAge(sec){
+  const s = Math.max(0, Math.floor(sec));
+  if (s < 10) return 'just now';
+  if (s < 60) return s + 's ago';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + ' min ago';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm ago';
+}
+function readingAgeSec(){ return S.lastPoll ? (nowT() - new Date(S.lastPoll)) / 1000 : null; }
+function renderAge(){
+  const sec = readingAgeSec();
+  if (sec == null) return;
+  const stale = sec > 7 * 60;                          // a poll is 5 minutes: a couple of missed ones
+  const at = fmtTime(new Date(S.lastPoll));
+  const b = $('b-age');
+  b.textContent = 'Reading from ' + at + ' · ' + fmtAge(sec) + (stale ? ' · STALE' : '');
+  b.style.color = stale ? '#ffc247' : '#8a8a96';
+  const f = $('fl-age'); f.textContent = 'kW · ' + fmtAge(sec).toUpperCase(); f.style.color = stale ? '#ffc247' : '#6e6e7a';
+}
 function setT(id, text){ const e = $(id); if (e && e.textContent !== text) e.textContent = text; }
 function renderHero(){
   if (!DEMO && !S.hasData) return;
   const soc = Math.round(D.soc);
   setT('hero-soc', soc + '%');
-  setT('hero-soc-s', S.chg > 0.05 ? '↑ charging ' + S.chg.toFixed(1) + ' kW' : S.dis > 0.05 ? '↓ discharging ' + S.dis.toFixed(1) + ' kW' : 'idle');
+  setT('hero-soc-s', (S.chg > 0.05 ? '↑ ' + S.chg.toFixed(1) + ' kW' : S.dis > 0.05 ? '↓ ' + S.dis.toFixed(1) + ' kW' : 'idle') + (readingAgeSec() == null ? '' : ' · ' + fmtAge(readingAgeSec())));
   const sd = S.sundown;
   if (sd && sd.ok) { setT('hero-sd', Math.round(sd.projected_pct) + '%'); setT('hero-sd-s', sd.band ? 'likely ' + Math.round(sd.band.lo) + '–' + Math.round(sd.band.hi) + '%' : ''); }
   else { setT('hero-sd', sd && sd.reason === 'solar_done' ? 'done' : '—'); setT('hero-sd-s', sd && sd.reason === 'solar_done' ? 'solar is over for today' : ''); }
