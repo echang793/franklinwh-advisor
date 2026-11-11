@@ -2350,6 +2350,17 @@ def cmd_advise(
                 logger.exception("EV controller init failed")
                 _err(f"EV control disabled this run: {e}")
 
+        # Faster readings while the house draws a lot (fastpoll.py). Off unless fast_poll is set;
+        # the breaker state is reloaded so a restart can't forget a throttle or an account lock.
+        from . import fastpoll as _fastpoll
+        _fast_guard = _fastpoll.load_state(outdir, _fastpoll.FastPollGuard.for_config(cfg))
+        if getattr(cfg, "fast_poll", False):
+            if _fast_guard.stopped:
+                _warn(f"Fast polling is STOPPED (account lock seen earlier). Delete {outdir / _fastpoll.STATE_FILE} to re-arm it.")
+            else:
+                _info(f"Fast polling on: every {_fastpoll.effective_interval_s(cfg)}s while home load is "
+                      f"{_fastpoll.load_threshold_kw(cfg):g} kW or more (touch {outdir / _fastpoll.KILL_FILE} to stop it)")
+
         while True:
             # Re-check each cycle so expiry mid-run is caught; file read + Ed25519
             # verify is microseconds, negligible at a 5-min poll cadence.
@@ -2561,7 +2572,16 @@ def cmd_advise(
                 dim=True,
             ))
             try:
-                time.sleep(interval * 60)
+                # Same 5-minute cadence as ever; when fast polling is on and the house is
+                # drawing a lot, this wait also re-reads the gateway in between (dashboard only).
+                # Skipped after a failed poll: never add requests while the API is struggling.
+                _fastpoll.wait_with_fast_polls(
+                    client=client, gateway=gateway, outdir=outdir, cfg=cfg,
+                    last_stats=_last_stats if _consec_errors == 0 else None,
+                    deadline=time.monotonic() + interval * 60, guard=_fast_guard,
+                    alert=lambda msg, urgent=False: _send_alert(msg, cfg, urgent=urgent),
+                    sleep=time.sleep,
+                )
                 click.echo()
             except KeyboardInterrupt:
                 click.echo()

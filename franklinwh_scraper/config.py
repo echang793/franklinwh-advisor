@@ -164,6 +164,18 @@ class Config:
     # that should own alerting and the other one goes into standby.
     run_on_host: str = ""
 
+    # Faster readings while the house is drawing a lot (see fastpoll.py). Off by default:
+    # FranklinWH publishes no rate limits for this API. While home load is at or above
+    # fast_poll_load_kw the advisor re-reads the gateway every fast_poll_seconds (never
+    # under 60) between its normal watch_interval polls. Those extra readings only feed
+    # the dashboard; they are not stored in history, so forecasts and learning never see
+    # them. A circuit breaker pauses them after errors or throttling and stops them for
+    # good if the account is locked. Instant off without a restart: `touch output/.fastpoll_off`.
+    fast_poll: bool = False
+    fast_poll_seconds: int = 120
+    fast_poll_load_kw: float = 3.0
+    fast_poll_max_per_hour: int = 36
+
     def is_complete(self) -> bool:
         return bool(self.email and self.password and self.lat and self.lon)
 

@@ -53,6 +53,7 @@ from . import savings, sunpath
 from .tou import (BASE_SERVICE_DAILY, TouPeriod, cycle_bounds, export_rate_at,
                   on_peak_window, period_at, rate_at)
 from .weather import fetch_solar_outlook_cached as _fetch_outlook_cached
+from . import fastpoll as _fastpoll
 
 app = FastAPI(title="FranklinWH Advisor API", docs_url=None, redoc_url=None)
 
@@ -117,6 +118,12 @@ def _latest_reading() -> dict | None:
             conn.close()
 
 
+def _current_reading() -> tuple[dict | None, bool]:
+    """The newest stored reading, with the advisor's fast-poll reading on top when that is
+    newer (see fastpoll.py). Only the 'now' views use this; charts and learning read history."""
+    return _fastpoll.overlay(_latest_reading(), _fastpoll.read_live(_OUT))
+
+
 def _readings_since(since: datetime, until: datetime | None = None) -> list[sqlite3.Row]:
     conn = None
     try:
@@ -156,13 +163,14 @@ def _intervals(rows):
 
 @app.get("/api/current", dependencies=_authed)
 def api_current():
-    r = _latest_reading()
+    r, live = _current_reading()
     now = datetime.now()
     if not r:
         return {"ok": False, "error": "no readings yet"}
     last = datetime.fromisoformat(r["timestamp"])
     return {
         "ok": True,
+        "live": live,
         "ts": r["timestamp"],
         "soc_pct": r["battery_soc"],
         "solar_kw": r["solar_kw"],
@@ -173,7 +181,7 @@ def api_current():
         "solar_today_kwh": r["solar_total_kwh"],
         "battery_capacity_kwh": _BAT_CAP,
         "last_poll": r["timestamp"],
-        "next_poll": (last + timedelta(seconds=_POLL_S)).isoformat(),
+        "next_poll": r["next_poll"] if live and r.get("next_poll") else (last + timedelta(seconds=_POLL_S)).isoformat(),
         "poll_seconds": _POLL_S,
         "saved_today": _saved_today(now),
         "on_peak": period_at(now) == TouPeriod.ON_PEAK,
@@ -203,7 +211,7 @@ def api_glance():
     is older than _GLANCE_STALE_MIN — a widget quietly showing an hours-old
     battery level is worse than one that says so.
     """
-    r = _latest_reading()
+    r, _live = _current_reading()
     if not r:
         return {"ok": False, "stale": True, "text": "⚠ no readings yet"}
     try:
