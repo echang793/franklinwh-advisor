@@ -24,6 +24,7 @@ from . import tou
 from .config import Config
 from .econet import EcoNetClient, EcoNetError, EcoNetRateLimited, HeaterReading
 from .notifier import notify_telegram
+from .wh_whatif import load_energy, save_day
 from .wh_policy import (WaterHeaterState, WhAction, WhDecision, WhInputs, WhMode,
                         WhParams, compute_wh_surplus_kw, decide)
 
@@ -43,6 +44,8 @@ _ERROR_ALERT_TICKS = 6       # ~30 min of failed polls before one Telegram alert
 _HEARTBEAT_MIN = 60.0
 _BACKOFF_START_MIN = 30      # after an HTTP 429, leave EcoNet alone this long...
 _BACKOFF_MAX_MIN = 240       # ...doubling on each repeat, up to this
+_ENERGY_LOOKBACK_DAYS = 35   # backfill a billing cycle plus a few days
+_ENERGY_START_HOUR = 1       # yesterday's EcoNet report is complete by then
 _NEVER = 1e9
 
 
@@ -189,21 +192,56 @@ class WhController:
         self._notify(f"🚿 Water heater changed in the app ({h.mode.value}, {h.setpoint_f}°F) — "
                      f"advisor hands off until {until:%-I:%M %p}.")
 
-    def _poll(self, now: datetime) -> HeaterReading | None:
+    def _backing_off(self, now: datetime) -> bool:
+        """Rate-limited: don't touch EcoNet until the pause ends."""
         raw = self.state.get("backoff_until_iso")
-        if raw:
-            try:
-                if now < datetime.fromisoformat(raw):
-                    return None         # rate-limited: don't touch EcoNet until the pause ends
-            except ValueError:
-                self.state.pop("backoff_until_iso", None)
+        if not raw:
+            return False
+        try:
+            return now < datetime.fromisoformat(raw)
+        except ValueError:
+            self.state.pop("backoff_until_iso", None)
+            return False
+
+    def _start_backoff(self, now: datetime) -> int:
+        mins = min(_BACKOFF_MAX_MIN, (self.state.get("backoff_min") or 0) * 2 or _BACKOFF_START_MIN)
+        self.state["backoff_min"] = mins
+        self.state["backoff_until_iso"] = (now + timedelta(minutes=mins)).isoformat(timespec="seconds")
+        return mins
+
+    def _collect_energy(self, now: datetime) -> None:
+        """One past day's hourly kWh per tick (yesterday first, then back to the lookback) for the
+        monthly mode report (wh_whatif.py). Read-only; skipped while rate-limited."""
+        if now.hour < _ENERGY_START_HOUR or self._backing_off(now) or not hasattr(self.client, "energy_for_day"):
+            return
+        have = load_energy(self.outdir)
+        oldest = now.date() - timedelta(days=_ENERGY_LOOKBACK_DAYS)
+        none_days = [d for d in self.state.get("energy_none_days", []) if d >= oldest.isoformat()]
+        todo = next((d for i in range(1, _ENERGY_LOOKBACK_DAYS + 1)
+                     if (d := now.date() - timedelta(days=i)).isoformat() not in have
+                     and d.isoformat() not in none_days), None)
+        if todo is None:
+            return
+        try:
+            hourly = self.client.energy_for_day(todo)
+        except EcoNetRateLimited as e:
+            self.state["last_error"] = f"{e}; pausing {self._start_backoff(now)} min"
+            return
+        except EcoNetError as e:
+            logger.warning("water heater energy report failed: %s", e)
+            return
+        if hourly is None:
+            self.state["energy_none_days"] = none_days + [todo.isoformat()]
+        else:
+            save_day(self.outdir, todo, hourly)
+
+    def _poll(self, now: datetime) -> HeaterReading | None:
+        if self._backing_off(now):
+            return None
         try:
             reading = self.client.read_state(now)
         except EcoNetRateLimited as e:
-            mins = min(_BACKOFF_MAX_MIN, (self.state.get("backoff_min") or 0) * 2 or _BACKOFF_START_MIN)
-            self.state["backoff_min"] = mins
-            self.state["backoff_until_iso"] = (now + timedelta(minutes=mins)).isoformat(timespec="seconds")
-            return self._poll_failed(f"{e}; pausing {mins} min")
+            return self._poll_failed(f"{e}; pausing {self._start_backoff(now)} min")
         except EcoNetError as e:
             return self._poll_failed(str(e))
         self.state["consec_errors"] = 0
@@ -232,6 +270,10 @@ class WhController:
     def tick(self, stats, now: datetime) -> WhDecision:
         c = stats.current
         reading = self._poll(now)
+        try:
+            self._collect_energy(now)
+        except Exception:  # noqa: BLE001  (the report's data must never break a tick)
+            logger.exception("water heater energy collection failed")
         heater = reading.state if reading else None
         if heater is not None and not self.dry_run:
             self._detect_override(now, heater)

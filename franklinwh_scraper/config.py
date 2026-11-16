@@ -141,6 +141,10 @@ class Config:
     wh_pre_peak_setpoint_f: int = 130
     wh_bank_setpoint_f: int = 135     # solar banking; capped at 140 F
     wh_battery_first_soc: float = 80.0  # FWH battery tops up before the tank banks heat
+    # Monthly "what would another mode have cost" report (wh_whatif.py). Estimates:
+    wh_heat_pump_cop: float = 3.0     # conservative vs Rheem's rated ~3.7+
+    wh_energy_saver_element_share: float = 0.10  # share of heat from the element in Energy Saver
+    wh_high_demand_element_share: float = 0.40   # ...and in High Demand (Electric is 1.0)
 
     # Per-alert opt-outs.  Empty = all alerts enabled.
     # Values are alert-name strings (function suffix after _alert_).
