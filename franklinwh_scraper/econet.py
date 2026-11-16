@@ -22,7 +22,7 @@ import os
 import stat
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -177,6 +177,27 @@ class EcoNetClient:
 
     def apply(self, mode: WhMode, setpoint_f: int | None) -> None:
         asyncio.run(self._apply(mode, setpoint_f))
+
+    def energy_for_day(self, day: date) -> dict[int, float] | None:
+        """The heater's own kWh by hour of day (0-23) for a past day; None where the unit
+        doesn't report energy."""
+        return asyncio.run(self._energy(day))
+
+    async def _energy(self, day: date) -> dict[int, float] | None:
+        _, h = await self._heater()
+        tz = datetime.now().astimezone().tzinfo
+        start = datetime.combine(day, time(0), tzinfo=tz)
+        end = datetime.combine(day, time(23, 59, 59, 999000), tzinfo=tz)
+        try:
+            await h.get_energy_usage(start, end)
+        except Exception as e:
+            if _is_429(e):
+                raise EcoNetRateLimited("energy report") from e
+            raise EcoNetError(f"EcoNet energy report failed: {e}") from e
+        usage = h.energy_usage
+        if not usage:
+            return None
+        return {int(k): float(v) for k, v in usage.items()}
 
     # ------------------------------------------------------------ internals
 

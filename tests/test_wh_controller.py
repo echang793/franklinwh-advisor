@@ -293,3 +293,83 @@ def test_backoff_is_logged(tmp_path):
     ctl = WhController(_cfg(), tmp_path, client=FakeClient(fail=EcoNetRateLimited("login")))
     ctl.tick(_stats(), PEAK)
     assert "429" in _log(tmp_path)[-1]["error"] or "rate" in _log(tmp_path)[-1]["error"].lower()
+
+
+# ---------------------------------------------------------------- daily energy collection
+
+class EnergyClient(FakeClient):
+    def __init__(self, energy=None, energy_fail=None, **kw):
+        super().__init__(**kw)
+        self.energy = {14: 0.5} if energy is None else energy
+        self.energy_fail = energy_fail
+        self.energy_calls: list = []
+
+    def energy_for_day(self, day):
+        self.energy_calls.append(day)
+        if self.energy_fail:
+            raise self.energy_fail
+        return self.energy
+
+
+def _energy(tmp_path):
+    from franklinwh_scraper.wh_whatif import load_energy
+    return load_energy(tmp_path)
+
+
+def test_collects_yesterday_first_then_backfills_one_per_tick(tmp_path):
+    from datetime import date
+    fc = EnergyClient()
+    ctl = WhController(_cfg(), tmp_path, client=fc)
+    t = datetime(2026, 11, 16, 2, 0)
+    ctl.tick(_stats(), t)
+    ctl.tick(_stats(), t + timedelta(minutes=5))
+    assert fc.energy_calls == [date(2026, 11, 15), date(2026, 11, 14)]
+    assert set(_energy(tmp_path)) == {"2026-11-15", "2026-11-14"}
+
+
+def test_backfill_stops_at_lookback(tmp_path):
+    fc = EnergyClient()
+    ctl = WhController(_cfg(), tmp_path, client=fc)
+    t = datetime(2026, 11, 16, 2, 0)
+    for i in range(50):
+        ctl.tick(_stats(), t + timedelta(minutes=5 * i))
+    assert len(fc.energy_calls) == 35
+
+
+def test_no_collection_before_1am(tmp_path):
+    fc = EnergyClient()
+    ctl = WhController(_cfg(), tmp_path, client=fc)
+    ctl.tick(_stats(), datetime(2026, 11, 16, 0, 30))
+    assert fc.energy_calls == []
+
+
+def test_unsupported_day_not_retried(tmp_path):
+    from datetime import date
+    fc = EnergyClient()
+    fc.energy = None
+    ctl = WhController(_cfg(), tmp_path, client=fc)
+    t = datetime(2026, 11, 16, 2, 0)
+    ctl.tick(_stats(), t)
+    ctl.tick(_stats(), t + timedelta(minutes=5))
+    assert fc.energy_calls == [date(2026, 11, 15), date(2026, 11, 14)]
+
+
+def test_energy_error_retried_later_and_tick_survives(tmp_path):
+    from datetime import date
+    fc = EnergyClient(energy_fail=EcoNetError("boom"))
+    ctl = WhController(_cfg(), tmp_path, client=fc)
+    t = datetime(2026, 11, 16, 2, 0)
+    ctl.tick(_stats(), t)
+    fc.energy_fail = None
+    ctl.tick(_stats(), t + timedelta(minutes=5))
+    assert fc.energy_calls == [date(2026, 11, 15), date(2026, 11, 15)]
+
+
+def test_energy_rate_limit_starts_backoff(tmp_path):
+    fc = EnergyClient(energy_fail=EcoNetRateLimited("energy report"))
+    ctl = WhController(_cfg(), tmp_path, client=fc)
+    t = datetime(2026, 11, 16, 2, 0)
+    ctl.tick(_stats(), t)
+    ctl.tick(_stats(), t + timedelta(minutes=5))
+    assert len(fc.energy_calls) == 1 and fc.reads == 1
+    assert "backoff_until_iso" in ctl.state

@@ -55,6 +55,16 @@ class FakeHeater:
     def set_set_point(self, sp):
         self.calls.append(("setpoint", sp))
 
+    energy: dict | None = None             # what EcoNet's usage report holds for the day
+    energy_error: Exception | None = None
+    energy_usage = None
+
+    async def get_energy_usage(self, start=None, end=None):
+        self.calls.append(("energy", start, end))
+        if self.energy_error is not None:
+            raise self.energy_error
+        self.energy_usage = self.energy
+
 
 class FakeApi:
     def __init__(self, heaters, fail_first: Exception | None = None, connected=True):
@@ -269,3 +279,31 @@ def test_module_does_not_import_pyeconet_at_load():
     # Advisor must start even where pyeconet isn't installed.
     src = open(econet.__file__).read()
     assert "\nimport pyeconet" not in src and "\nfrom pyeconet" not in src
+
+
+# ---------------------------------------------------------------- energy report
+
+def test_energy_for_day_returns_hourly_kwh(tmp_path):
+    from datetime import date
+    h = FakeHeater()
+    h.energy = {14: 0.5, 2: 0.1}
+    c, _ = _client(FakeApi([h]), tmp_path)
+    assert c.energy_for_day(date(2026, 11, 14)) == {14: 0.5, 2: 0.1}
+    _kind, start, end = h.calls[-1]
+    assert (start.date(), start.hour, end.date(), end.hour) == (date(2026, 11, 14), 0, date(2026, 11, 14), 23)
+
+
+def test_energy_for_day_unsupported_is_none(tmp_path):
+    from datetime import date
+    c, _ = _client(FakeApi([FakeHeater()]), tmp_path)
+    assert c.energy_for_day(date(2026, 11, 14)) is None
+
+
+def test_energy_for_day_429_is_rate_limited(tmp_path):
+    from datetime import date
+    h = FakeHeater()
+    h.energy_error = FakeHTTPError(429)
+    c, _ = _client(FakeApi([h]), tmp_path, creds_extra=TOKEN)
+    with pytest.raises(EcoNetRateLimited) as ei:
+        c.energy_for_day(date(2026, 11, 14))
+    assert ei.value.stage == "energy report"

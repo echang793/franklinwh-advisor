@@ -6,13 +6,15 @@ Kept out of cli.py (already very long); cli.py registers grp_wh.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import click
 
 from .config import save as save_config
 from .econet import CREDS_PATH, EcoNetClient, EcoNetError, EcoNetRateLimited, write_creds
+from .tou import cycle_bounds
+from .wh_whatif import cycle_report, describe_report
 
 _RESTART = ("     launchctl stop com.franklinwh.advisor && "
             "launchctl start com.franklinwh.advisor")
@@ -104,3 +106,37 @@ def wh_status(ctx: click.Context, last: int) -> None:
         click.echo(f"  {e.get('timestamp', '?')}  {e.get('action', '?'):4}  "
                    f"{e.get('reason', '')}  [{e.get('heater_mode')}, {e.get('heater_setpoint_f')}°F, "
                    f"{e.get('running_state') or '-'}]{'  ERROR ' + e['error'] if e.get('error') else ''}")
+
+
+def _open_store(cfg):
+    """The advisor's history store, or None before it has one."""
+    from .history import HistoryStore
+    path = Path(cfg.output_dir) / "history.db"
+    return HistoryStore(path) if path.exists() else None
+
+
+@grp_wh.command("compare")
+@click.option("--days", type=int, default=None, help="The last N days instead of this billing cycle so far.")
+@click.pass_context
+def wh_compare(ctx: click.Context, days: int | None) -> None:
+    """What Energy Saver, High Demand or Electric would have cost vs heat pump only."""
+    cfg = ctx.obj["config"]
+    end = date.today() - timedelta(days=1)
+    if days:
+        start = end - timedelta(days=days - 1)
+    else:
+        start_day = getattr(cfg, "billing_cycle_start_day", 20)
+        start, _ = cycle_bounds(date.today(), start_day)
+        if start > end:                       # today is the cycle's first day: show the last one
+            start, _ = cycle_bounds(end, start_day)
+    store = _open_store(cfg)
+    try:
+        rep = cycle_report(store, Path(cfg.output_dir), cfg, start, end)
+    finally:
+        if store is not None and hasattr(store, "close"):
+            store.close()
+    if rep is None:
+        click.echo(f"  No water heater energy data yet for {start:%b %-d} – {end:%b %-d}. The advisor collects "
+                   "it daily (backfilling the last 35 days) while water heater control is set up.")
+        return
+    click.echo(describe_report(rep))

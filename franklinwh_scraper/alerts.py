@@ -4425,6 +4425,13 @@ def _missed_block(store, now: datetime, state: dict, cfg) -> str:
     return f"\n\n{text}" if text else ""
 
 
+def _alert_wh_mode_report(state: dict, today: str, now: datetime, store, cfg: Config) -> str | None:
+    """Last evening of the billing cycle: what other water heater modes would have cost
+    (wh_whatif.py). Read-only; silent without a week of EcoNet energy data."""
+    from .wh_whatif import maybe_alert
+    return maybe_alert(state, today, now, store, cfg)
+
+
 def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: Config) -> str | None:
     """Last day of the billing cycle: cycle summary vs the prior cycle."""
     if now.hour not in (21, 22) or store is None:
@@ -6138,6 +6145,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("eod_digest",        lambda: _alert_eod_digest(state, today, now, stats, cfg, outlook, usage_forecast, store)),
             ("weekly_summary",    lambda: _alert_weekly_summary(state, today, now, store, cfg)),
             ("monthly_summary",   lambda: _alert_monthly_summary(state, today, now, store, cfg)),
+            ("wh_mode_report",    lambda: _alert_wh_mode_report(state, today, now, store, cfg)),
             ("grid_down",         lambda: _alert_grid_down(state, today, now, c, cfg)),
             ("grid_restored",     lambda: _alert_grid_restored(state, now, c, cfg)),
             ("fast_drain",        lambda: _alert_fast_drain(state, today, now, c, cfg, outlook, usage_forecast, store)),

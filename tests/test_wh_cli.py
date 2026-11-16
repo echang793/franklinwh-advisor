@@ -101,3 +101,31 @@ def test_setup_rate_limited_says_to_wait(env, monkeypatch):
     res = CliRunner().invoke(root, ["waterheater", "setup"], input="me@x.com\npw\n")
     assert res.exit_code != 0 and saved == []
     assert "wait 30 minutes" in res.output and "once" in res.output
+
+
+def test_compare_prints_mode_costs(env, monkeypatch):
+    from datetime import date, timedelta
+
+    from franklinwh_scraper import wh_whatif
+    root, cfg, _, tmp = env
+    today = date.today()
+    wh_whatif.save_day(tmp, today - timedelta(days=1), {14: 0.5})
+
+    class _Store:
+        def readings_between(self, a, b):
+            return []
+
+        def soc_near(self, ts):
+            return None
+
+    monkeypatch.setattr(wh_cli, "_open_store", lambda cfg: _Store())
+    res = CliRunner().invoke(root, ["waterheater", "compare"])
+    assert res.exit_code == 0, res.output
+    assert "Electric" in res.output and "Energy Saver" in res.output
+
+
+def test_compare_without_data_explains(env, monkeypatch):
+    root, cfg, _, _tmp = env
+    monkeypatch.setattr(wh_cli, "_open_store", lambda cfg: None)
+    res = CliRunner().invoke(root, ["waterheater", "compare"])
+    assert res.exit_code == 0 and "No water heater energy data yet" in res.output
