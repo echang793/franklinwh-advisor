@@ -93,6 +93,13 @@ APP_TOOLS.append(
          "load": {"type": "string", "description": "dryer, oven, ac, dishwasher, kitchen or car"},
          "kw": {"type": "number", "description": "size in kW, if not a named load"},
          "hours": {"type": "number", "description": "how long it runs, in hours"}}}})
+APP_TOOLS.append(
+    {"name": "weekly_schedule",
+     "description": ("The best time each day this week to run a load you start by hand (dryer, dishwasher, oven), "
+                     "from a typical day of recent solar, house load and battery at that day's time-of-use rates, "
+                     "with the Delay End time to set on the machine and what moving from the usual time saves."),
+     "input_schema": {"type": "object", "properties": {
+         "load": {"type": "string", "description": "dryer, dishwasher, oven or kitchen; dryer if not given"}}}})
 APP_TOOL_NAMES = frozenset(t["name"] for t in APP_TOOLS)
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")

@@ -2001,6 +2001,10 @@ def cmd_scrape_all(ctx: click.Context, out: str, fmt: str, max_pages: int) -> No
 
 # ── Account commands ──────────────────────────────────────────────────
 
+from .wh_cli import grp_wh  # noqa: E402 — registered beside the other groups
+cli.add_command(grp_wh)
+
+
 @cli.group("account")
 def grp_account() -> None:
     """Live account data — requires your FranklinWH login."""
@@ -2361,6 +2365,19 @@ def cmd_advise(
                 logger.exception("EV controller init failed")
                 _err(f"EV control disabled this run: {e}")
 
+        # Heat pump water heater control (opt-in, wh_controller.py). Same
+        # contract as EV: init failures degrade to no control, never a crash.
+        _wh = None
+        if getattr(cfg, "wh_control_enabled", False):
+            try:
+                from .wh_controller import WhController
+                _wh = WhController(cfg, outdir)
+                _ok(f"Water heater control active"
+                    f"{' (dry run)' if cfg.wh_dry_run else ''}")
+            except Exception as e:
+                logger.exception("water heater controller init failed")
+                _err(f"Water heater control disabled this run: {e}")
+
         # Faster readings while the house draws a lot (fastpoll.py). Off unless fast_poll is set;
         # the breaker state is reloaded so a restart can't forget a throttle or an account lock.
         _fast_guard = _fastpoll.load_state(outdir, _fastpoll.FastPollGuard.for_config(cfg))
@@ -2508,6 +2525,11 @@ def cmd_advise(
                         _ev.tick(stats, datetime.now())
                     except Exception:
                         logger.exception("EV controller error — advisor unaffected")
+                if _wh is not None:
+                    try:
+                        _wh.tick(stats, datetime.now())
+                    except Exception:
+                        logger.exception("water heater controller error — advisor unaffected")
 
                 last_mode = rec.mode.value
                 _save_last_mode(outdir, last_mode)

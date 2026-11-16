@@ -45,6 +45,8 @@ test = ["pytest>=7.0"]
 # advisor runs fine without it — unlike fastapi above).
 # tesla-fleet-api requires Python >=3.13.
 ev = ["tesla-fleet-api>=1.7"]
+# Heat pump water heater control (econet.py imports this lazily).
+wh = ["pyeconet>=0.3.1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

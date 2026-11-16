@@ -295,6 +295,26 @@ def _parse_when(text: str):
     return req if req is not None else "help"
 
 
+_WEEK_RE = re.compile(r"\s*/week(?:@\w+)?(?:\s+(.*))?$", re.I | re.S)
+
+
+def _parse_week(text: str):
+    """/week [dryer|dishwasher|oven...] -> the load name (dryer when none); "help" for one it can't
+    size; None when the text isn't the command."""
+    m = _WEEK_RE.match(text or "")
+    if m is None:
+        return None
+    return _week_load(m.group(1) or "")
+
+
+def _week_load(arg: str):
+    from . import besttime
+    if not arg.strip():
+        return "dryer"
+    req = besttime.parse_request(arg)
+    return req[0] if req and req[0] else "help"
+
+
 def _when_args(args: dict, num) -> tuple | None:
     """The best_time tool's arguments as a /when request."""
     from . import besttime
@@ -572,6 +592,7 @@ class TelegramChatBot:
                             "/whatif kW [hours] [from H] — what a load (dryer 3 kW, AC) does to the sundown battery\n"
                             "/when dryer|oven|ac|car|3 kW 2h — the cheapest time today to run it, and the dearest\n"
                             "/missed   — last week's big loads that would have cost less at another time\n"
+                            "/week dryer|dishwasher|oven — best time each day this week, with the Delay End to set\n"
                             "/habits  — the big loads (dryer, oven) your history says you run, by weekday\n"
                             "/plan dryer 4pm, oven 5pm — tell me what you'll run today; /sundown, /evening and /ebplan count it (/plan clear)\n"
                             "/cardays  — label which recent afternoons were the car\n"
@@ -704,6 +725,11 @@ class TelegramChatBot:
                                "/missed": self._send_missed}.get(_cmd)
                     if _simple is not None:
                         threading.Thread(target=_simple, args=(chat_id,), daemon=True).start()
+                        continue
+                    _wk = _parse_week(text)
+                    if _wk is not None:
+                        threading.Thread(target=self._send_week, args=(chat_id, None if _wk == "help" else _wk),
+                                         daemon=True).start()
                         continue
                     _wh = _parse_when(text)
                     if _wh is not None:
@@ -1127,6 +1153,9 @@ class TelegramChatBot:
             "get_accuracy": lambda: self._send_accuracy(chat_id),
             "what_if_load": lambda: self._send_whatif(chat_id, num("extra_kw"), num("hours"), num("start_hour")),
             "best_time": lambda: self._send_when(chat_id, _when_args(args, num)),
+            "weekly_schedule": lambda: self._send_week(
+                chat_id, (lambda w: None if w == "help" else w)(
+                    _week_load(args.get("load") if isinstance(args.get("load"), str) else ""))),
         }
         run = runners.get(name)
         if run is None:
@@ -1216,6 +1245,23 @@ class TelegramChatBot:
             self._send(chat_id, besttime.describe(res, label, kw, hours), reply_markup=markup)
         except Exception as e:
             logger.warning("_send_when error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
+    def _send_week(self, chat_id: str, name: str | None) -> None:
+        """/week: the best time each day this week for a load you run by hand, with Delay End (weekly.py)."""
+        try:
+            from . import weekly
+            if name is None:
+                self._send(chat_id, "Tell me what to schedule: /week dryer, /week dishwasher or /week oven.")
+                return
+            _stats, _fc, _ol, store, state = self._snapshot_for_report()
+            plan = weekly.for_store(store, self._cfg, state or {}, datetime.now().date(), name)
+            if plan is None:
+                self._send(chat_id, "Not enough history yet for a typical week (it needs a few weeks of readings).")
+                return
+            self._send(chat_id, weekly.describe_week(plan))
+        except Exception as e:
+            logger.warning("_send_week error: %s", e)
             self._send(chat_id, f"Error: {e}")
 
     def _send_missed(self, chat_id: str) -> None:
