@@ -4409,7 +4409,20 @@ def _alert_weekly_summary(state: dict, today: str, now: datetime, store, cfg: Co
         f"Export credit:    ${export_credit:.2f}\n"
         f"Total saved:      ${total_saved:.2f}</code>{stale_note}"
         f"{accuracy_str}{cycle_str}"
+        f"{_missed_block(store, now, state, cfg)}"
     )
+
+
+def _missed_block(store, now: datetime, state: dict, cfg) -> str:
+    """The weekly summary's "could have saved" block: last week's big loads replayed at the cheapest
+    time each day allowed (besttime.missed_week). Empty when small, and never breaks the summary."""
+    try:
+        from . import besttime
+        text = besttime.describe_missed(besttime.missed_week(store, now.date(), state, cfg))
+    except Exception:
+        logger.exception("Missed-savings replay failed")
+        return ""
+    return f"\n\n{text}" if text else ""
 
 
 def _alert_monthly_summary(state: dict, today: str, now: datetime, store, cfg: Config) -> str | None:
@@ -6061,7 +6074,31 @@ def _alert_weather_stale(state: dict, today: str, now: datetime) -> str | None:
     )
 
 
-def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None, store=None) -> None:
+def check_fast_alerts(stats, cfg: Config, out: Path, store) -> None:
+    """After a fast poll (fastpoll.py): only the car-charging-on-peak check, which is the one where
+    minutes cost money. Same enabled/mute rules and state as the main loop; `store` is the
+    MergedStore that includes the fast readings."""
+    if not any([cfg.imessage_phone, cfg.telegram_bot_token and cfg.telegram_chat_id,
+                cfg.smtp_host and cfg.email_to, cfg.webhook_url, getattr(cfg, "ntfy_topic", "")]):
+        return
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    body = None
+    with _state_lock(out):
+        state = _load_peak_state(out)
+        if not _alert_enabled(cfg, "car_on_peak", state, now):
+            return
+        try:
+            body = _alert_car_on_peak(state, today, now, stats.current, cfg, store)
+        except Exception:
+            logger.exception("Fast car-on-peak check raised")
+        _save_peak_state(out, state)
+    if body:
+        _send_alert(body, cfg, urgent="car_on_peak" in _URGENT_ALERTS, alert_name="car_on_peak")
+
+
+def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None, store=None,
+                       fast_store=None) -> None:
     # Bug fix: this guard used to only recognize iMessage/Telegram, so an
     # email-, webhook-, or ntfy-only setup (no iMessage/Telegram configured)
     # silently never ran the entire ~30-alert engine at all — _send_alert
@@ -6129,9 +6166,9 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("ev_charge_window",     lambda: _alert_ev_charge_window(state, today, now, c, cfg, outlook)),
             ("ev_still_charging",    lambda: _alert_ev_still_charging(state, today, now, c, cfg, store)),
             ("car_question",         lambda: _alert_car_question(state, today, now, store)),
-            ("load_question",        lambda: _alert_load_question(state, today, now, store)),
+            ("load_question",        lambda: _alert_load_question(state, today, now, fast_store or store)),
             ("car_charge_started",   lambda: _alert_car_charge_started(state, today, now, c, cfg, store)),
-            ("car_on_peak",          lambda: _alert_car_on_peak(state, today, now, c, cfg, store, outlook)),
+            ("car_on_peak",          lambda: _alert_car_on_peak(state, today, now, c, cfg, fast_store or store, outlook)),
             ("eb_timer",             lambda: _alert_eb_timer(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("evening_short",        lambda: _alert_evening_short(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("sundown_watch",        lambda: _alert_sundown_watch(state, today, now, c, cfg, outlook, usage_forecast, store)),

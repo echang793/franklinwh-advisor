@@ -383,3 +383,149 @@ def test_glance_widget_uses_the_live_reading_too(tmp_path, monkeypatch):
     fastpoll.write_live(tmp_path, _stats(load=5.6), at=at, next_at=at)
     body = c.get("/api/glance").json()
     assert body["load_kw"] == 5.6 and "5.6kW" in body["text"]
+
+
+# ── the normal poll backs off too ────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("errors,exc,want_min", [
+    (0, None, 5), (1, RuntimeError("x"), 5), (2, RuntimeError("x"), 5),
+    (3, RuntimeError("x"), 10), (4, RuntimeError("x"), 10),
+    (5, RuntimeError("x"), 20), (12, RuntimeError("x"), 20),
+    (1, RuntimeError("429 Too Many Requests"), 30),
+    (1, ValueError("Account locked: x"), 60),
+])
+def test_normal_poll_wait_backs_off(errors, exc, want_min):
+    assert fastpoll.normal_poll_wait_s(errors, exc, 5) == want_min * 60
+
+
+def test_backoff_never_polls_faster_than_configured_and_caps_at_30():
+    assert fastpoll.normal_poll_wait_s(0, None, 45) == 45 * 60
+    assert fastpoll.normal_poll_wait_s(9, RuntimeError("x"), 45) == 45 * 60
+    assert fastpoll.normal_poll_wait_s(9, RuntimeError("x"), 15) == 20 * 60      # the back-off step, above the interval
+    assert fastpoll.normal_poll_wait_s(9, RuntimeError("x"), 25) == 25 * 60      # never shorter than configured
+
+
+def test_outage_alert_still_comes_after_about_40_minutes():
+    n = fastpoll.error_alert_threshold(5)
+    waited = sum(fastpoll.normal_poll_wait_s(i, RuntimeError("x"), 5) for i in range(1, n))
+    assert 35 * 60 <= waited <= 55 * 60
+    assert fastpoll.error_alert_threshold(30) >= 2
+
+
+def test_watch_loop_uses_the_backoff_and_announces_a_lock():
+    import inspect
+
+    from franklinwh_scraper import cli
+    src = inspect.getsource(cli)
+    assert "normal_poll_wait_s(" in src and "error_alert_threshold(" in src
+    assert "_lock_alerted" in src
+
+
+# ── fast readings feed the car-on-peak and "what was that?" detectors ────────────────────────────
+
+def test_fast_readings_keep_the_last_hour_only(tmp_path):
+    for m in range(0, 80, 2):
+        fastpoll.append_reading(tmp_path, T0 + timedelta(minutes=m), _stats(load=2.5))
+    got = fastpoll.recent(tmp_path, since=T0, now=T0 + timedelta(minutes=78))
+    assert got[0][0] >= (T0 + timedelta(minutes=18)).isoformat() and len(got) == 31
+    assert got[-1] == ((T0 + timedelta(minutes=78)).isoformat(), 0.0, 2.5, 0.0)
+
+
+def test_fast_readings_never_hold_nan_and_survive_a_corrupt_file(tmp_path):
+    (tmp_path / fastpoll.FAST_READINGS_FILE).write_text("[[")
+    assert fastpoll.recent(tmp_path, since=T0, now=T0) == []
+    fastpoll.append_reading(tmp_path, T0, _stats(load=float("nan")))
+    assert "NaN" not in (tmp_path / fastpoll.FAST_READINGS_FILE).read_text()
+
+
+class _Stored:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def readings_between(self, a, b):
+        return [r for r in self.rows if a <= r[0] < b]
+
+    def soc_near(self, ts):
+        return 55.0
+
+
+def test_merged_store_interleaves_fast_readings_and_delegates_the_rest(tmp_path):
+    stored = _Stored([((T0 + timedelta(minutes=m)).isoformat(), 0.0, 2.8, 0.0) for m in (0, 5, 10)])
+    fastpoll.append_reading(tmp_path, T0 + timedelta(minutes=2), _stats(load=2.8, grid=0.0))
+    fastpoll.append_reading(tmp_path, T0 + timedelta(minutes=12), _stats(load=2.8, grid=0.0))
+    m = fastpoll.MergedStore(stored, tmp_path, now=lambda: T0 + timedelta(minutes=13))
+    ts = [r[0][14:16] for r in m.readings_between(T0.isoformat(), (T0 + timedelta(hours=1)).isoformat())]
+    assert ts == ["00", "02", "05", "10", "12"]
+    assert m.soc_near("x") == 55.0
+
+
+def _car_rows(minutes, kw=2.8, start=datetime(2026, 10, 26, 17, 0)):
+    return [((start + timedelta(minutes=m)).isoformat(), 0.0, (0.4 if m < 0 else kw), 0.0) for m in minutes]
+
+
+def test_mixed_cadence_does_not_shorten_the_ten_minute_rule(tmp_path, monkeypatch):
+    """Three fast readings in 4 minutes must not count as the 10 steady minutes a car needs."""
+    from franklinwh_scraper import alerts
+    from franklinwh_scraper.config import Config
+    from tests.test_unit import _tracker_c
+    monkeypatch.setattr(alerts, "_tesla_charge_state", lambda cfg: ("unknown", None))
+    start = datetime(2026, 10, 26, 17, 0)
+    stored = _Stored(_car_rows([-10, -5, 0, 5]))
+    for m in (2, 4, 7):
+        fastpoll.append_reading(tmp_path, start + timedelta(minutes=m), _stats(load=2.8))
+    c = _tracker_c(62.0)
+    c.home_load_kw, c.solar_production_kw = 2.8, 0.0
+    now = start + timedelta(minutes=7, seconds=20)
+    m = fastpoll.MergedStore(stored, tmp_path, now=lambda: now)
+    assert alerts._alert_car_on_peak({}, "2026-10-26", now, c, Config(battery_capacity_kwh=13.6), m) is None
+    fastpoll.append_reading(tmp_path, start + timedelta(minutes=10), _stats(load=2.8))
+    later = start + timedelta(minutes=10, seconds=20)
+    m = fastpoll.MergedStore(stored, tmp_path, now=lambda: later)
+    msg = alerts._alert_car_on_peak({}, "2026-10-26", later, c, Config(battery_capacity_kwh=13.6), m)
+    assert msg is not None and "since 5:00 PM" in msg                # at 5:10, five minutes before the next normal poll
+
+
+def test_wait_loop_records_fast_readings_and_runs_the_hook(tmp_path):
+    clock = Clock()
+    client = FakeClient(clock, readings=[_stats(load=6.0), _stats(load=6.5)])
+    seen = []
+    cfg = _cfg()
+    guard = fastpoll.FastPollGuard.for_config(cfg)
+    fastpoll.wait_with_fast_polls(client=client, gateway="gw", outdir=tmp_path, cfg=cfg, last_stats=_stats(), deadline=300.0,
+                                  guard=guard, alert=lambda m, urgent=False: None, sleep=clock.sleep,
+                                  monotonic=clock.monotonic, now=clock.now, on_reading=lambda s: seen.append(s.current.home_load_kw))
+    assert seen == [6.0, 6.5]
+    assert len(fastpoll.recent(tmp_path, since=T0, now=clock.now())) == 2
+
+
+def test_a_failing_hook_does_not_break_the_wait(tmp_path):
+    clock = Clock()
+    client = FakeClient(clock)
+    cfg = _cfg()
+    fastpoll.wait_with_fast_polls(client=client, gateway="gw", outdir=tmp_path, cfg=cfg, last_stats=_stats(), deadline=300.0,
+                                  guard=fastpoll.FastPollGuard.for_config(cfg), alert=lambda m, urgent=False: None,
+                                  sleep=clock.sleep, monotonic=clock.monotonic, now=clock.now, on_reading=lambda s: 1 / 0)
+    assert clock.t == 300.0 and len(client.calls) == 2
+
+
+def test_on_peak_a_car_sized_load_is_enough_to_poll_fast(tmp_path):
+    on_peak = _cfg()
+    assert fastpoll.is_hot(_stats(load=2.0), 3.0) is False
+    assert fastpoll.wants_fast(_stats(load=2.0), on_peak, datetime(2026, 11, 11, 17, 0)) is True     # 5 PM weekday
+    assert fastpoll.wants_fast(_stats(load=2.0), on_peak, datetime(2026, 11, 11, 12, 0)) is False    # midday
+    assert fastpoll.wants_fast(_stats(load=1.2), on_peak, datetime(2026, 11, 11, 17, 0)) is False
+    assert fastpoll.wants_fast(_stats(load=3.5), on_peak, datetime(2026, 11, 11, 12, 0)) is True
+
+
+def test_fast_alert_check_runs_only_the_car_alert_and_respects_mutes(tmp_path, monkeypatch):
+    from franklinwh_scraper import alerts
+    from franklinwh_scraper.config import Config
+    sent = []
+    monkeypatch.setattr(alerts, "_alert_car_on_peak", lambda *a, **k: "car!")
+    monkeypatch.setattr(alerts, "_send_alert", lambda body, cfg, urgent=False, alert_name=None, **kw: sent.append((body, alert_name)))
+    cfg = Config(telegram_bot_token="t", telegram_chat_id="1")
+    alerts.check_fast_alerts(_stats(load=2.8), cfg, tmp_path, object())
+    assert sent == [("car!", "car_on_peak")]
+    cfg.disabled_alerts = ["car_on_peak"]
+    alerts.check_fast_alerts(_stats(load=2.8), cfg, tmp_path, object())
+    assert len(sent) == 1

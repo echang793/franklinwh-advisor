@@ -1,7 +1,11 @@
 """Solar irradiance + cloud cover forecast via Open-Meteo (free, no API key)."""
 
+import json
 import logging
+import math
+import os
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -104,6 +108,9 @@ class SolarOutlook:
     # Same shape, for sunset: lets /sundown mean the real sunset instead of "an hour
     # after the last forecast hour with sun".
     sunset_times: list[datetime] = field(default_factory=list)
+    # Where this forecast came from: "open-meteo" normally, "nws" when the fallback
+    # (National Weather Service sky cover turned into irradiance) had to stand in.
+    source: str = "open-meteo"
 
     def sunset_on(self, d) -> datetime | None:
         """Sunset datetime for date `d`, or None if outside the forecast window."""
@@ -449,20 +456,248 @@ def fetch_solar_outlook(lat: float, lon: float, timeout: int = 10, retries: int 
 # Lives here rather than in each caller so a chatbot query and the alert
 # loop hit the same 30-min-TTL cache instead of each keeping (and paying
 # for) its own copy of the same Open-Meteo forecast.
+#
+# The advisor and the dashboard are separate processes, so the last good
+# forecast is also kept on disk (set_cache_dir): the dashboard reads what the
+# advisor fetched instead of calling Open-Meteo itself, and a restart during an
+# outage still has a forecast. A failed fetch is remembered for 5 minutes, so a
+# slow or down Open-Meteo costs one timeout per 5 minutes instead of one per
+# request (the dashboard's panels used to wait ~50 s on every load). When the
+# last good forecast is over 3 hours old, the NWS fallback stands in.
+
+OUTLOOK_CACHE_FILE = ".outlook_cache.json"
+_FRESH_S = 1800              # refetch after 30 min
+_DISK_FRESH_S = 2400         # another process's copy is good for 40 min (the advisor refreshes at 30)
+_NEGATIVE_S = 300            # after a failure, don't try again for 5 min
+_FALLBACK_AFTER_S = 3 * 3600 # stale beyond this: ask NWS instead
 
 _outlook_cache: dict = {}
+_cache_dir: list = [None]
+_fetch_policy = {"timeout": 10, "retries": 3}
 
 
-def fetch_solar_outlook_cached(lat: float, lon: float):
-    """Return a SolarOutlook, fetching fresh data at most once per 30 minutes."""
-    now_ts = time.time()
-    if _outlook_cache.get("outlook") is not None and now_ts - _outlook_cache.get("fetched_at", 0) < 1800:
-        return _outlook_cache["outlook"]
+def _clock() -> float:
+    return time.time()
+
+
+def set_cache_dir(path) -> None:
+    """Where the shared on-disk copy lives (the advisor's output dir). None turns it off."""
+    from pathlib import Path
+    _cache_dir[0] = Path(path) if path is not None else None
+
+
+def set_fetch_policy(timeout: int = 10, retries: int = 3) -> None:
+    """The dashboard asks once with a short timeout; the advisor can afford retries."""
+    _fetch_policy["timeout"] = timeout
+    _fetch_policy["retries"] = retries
+
+
+def _num(x) -> float:
     try:
-        outlook = fetch_solar_outlook(lat, lon)
-        _outlook_cache["outlook"] = outlook
-        _outlook_cache["fetched_at"] = now_ts
-        return outlook
-    except Exception as e:
+        f = float(x)
+    except (TypeError, ValueError):
+        return 0.0
+    return f if math.isfinite(f) else 0.0
+
+
+def outlook_to_dict(o: SolarOutlook) -> dict:
+    """JSON-safe form (no NaN/Infinity: those become 0.0)."""
+    return {
+        "source": o.source,
+        "utc_offset_seconds": int(o.utc_offset_seconds or 0),
+        "sunrise_times": [t.isoformat() for t in o.sunrise_times],
+        "sunset_times": [t.isoformat() for t in o.sunset_times],
+        "hours": [[h.time.isoformat(), _num(h.direct_radiation_wm2), _num(h.diffuse_radiation_wm2),
+                   _num(h.cloud_cover_pct), _num(h.temp_c), _num(h.wind_speed_ms)] for h in o.hours],
+    }
+
+
+def outlook_from_dict(d: dict) -> SolarOutlook:
+    return SolarOutlook(
+        hours=[HourlyForecast(time=datetime.fromisoformat(r[0]), direct_radiation_wm2=_num(r[1]),
+                              diffuse_radiation_wm2=_num(r[2]), cloud_cover_pct=_num(r[3]),
+                              temp_c=_num(r[4]), wind_speed_ms=_num(r[5])) for r in d["hours"]],
+        utc_offset_seconds=int(d.get("utc_offset_seconds", 0)),
+        sunrise_times=[datetime.fromisoformat(t) for t in d.get("sunrise_times", [])],
+        sunset_times=[datetime.fromisoformat(t) for t in d.get("sunset_times", [])],
+        source=str(d.get("source", "open-meteo")),
+    )
+
+
+def _loc_key(lat: float, lon: float) -> list:
+    return [round(float(lat), 3), round(float(lon), 3)]
+
+
+def _read_disk(key: list):
+    d = _cache_dir[0]
+    if d is None:
+        return None
+    try:
+        js = json.loads((d / OUTLOOK_CACHE_FILE).read_text())
+        if js.get("key") != key:
+            return None
+        return float(js["fetched_at"]), outlook_from_dict(js["outlook"])
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return None
+
+
+def _write_disk(key: list, fetched_at: float, o: SolarOutlook) -> None:
+    d = _cache_dir[0]
+    if d is None:
+        return
+    try:
+        target = d / OUTLOOK_CACHE_FILE
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"key": key, "fetched_at": fetched_at, "outlook": outlook_to_dict(o)},
+                                  allow_nan=False))
+        os.replace(tmp, target)
+    except (OSError, ValueError, TypeError):
+        logger.debug("Couldn't write the outlook cache", exc_info=True)
+
+
+def fetch_solar_outlook_cached(lat: float, lon: float, timeout: int | None = None,
+                               retries: int | None = None):
+    """A SolarOutlook (or None when nothing is available). Never raises.
+
+    Order: fresh memory copy -> fresh disk copy (another process fetched it) -> stale copy
+    while a recent failure is still being backed off -> Open-Meteo -> stale copy if under 3 h
+    old -> NWS fallback -> whatever stale copy there is. `fetched_at` only ever moves on a
+    real Open-Meteo success, so the weather-stale alert keeps measuring the right thing."""
+    now = _clock()
+    c = _outlook_cache
+    key = _loc_key(lat, lon)
+    if c.get("key") not in (None, key):
+        c.clear()
+    c["key"] = key
+
+    o, fa = c.get("outlook"), c.get("fetched_at", 0.0)
+    if o is not None and o.source != "nws" and now - fa < _FRESH_S:
+        return o
+    disk = _read_disk(key)
+    if disk is not None and disk[0] > fa:
+        c["outlook"], c["fetched_at"] = disk[1], disk[0]
+        o, fa = disk[1], disk[0]
+        if now - fa < _DISK_FRESH_S:
+            return o
+    if o is not None and o.source == "nws" and now - c.get("nws_at", 0.0) < _FRESH_S \
+            and now - c.get("failed_at", -1e18) < _NEGATIVE_S:
+        return o
+    if now - c.get("failed_at", -1e18) < _NEGATIVE_S:
+        return o                                     # backing off: serve what we have
+
+    try:
+        fresh = fetch_solar_outlook(lat, lon,
+                                    timeout=timeout if timeout is not None else _fetch_policy["timeout"],
+                                    retries=retries if retries is not None else _fetch_policy["retries"])
+        c["outlook"], c["fetched_at"] = fresh, now
+        c.pop("failed_at", None)
+        _write_disk(key, now, fresh)
+        return fresh
+    except Exception as e:  # noqa: BLE001
         logger.warning("Weather forecast fetch failed: %s", e)
-        return _outlook_cache.get("outlook")  # serve stale cache rather than None
+        c["failed_at"] = now
+
+    if o is not None:
+        if o.source == "nws" and now - c.get("nws_at", 0.0) < _FRESH_S:
+            return o
+        if o.source != "nws" and now - fa < _FALLBACK_AFTER_S:
+            return o
+    try:
+        nws = fetch_nws_outlook(lat, lon)
+        c["outlook"], c["nws_at"] = nws, now
+        logger.warning("Using the NWS fallback forecast (Open-Meteo unavailable)")
+        return nws
+    except Exception as e:  # noqa: BLE001
+        logger.warning("NWS fallback forecast failed too: %s", e)
+        return o
+
+
+# ── NWS fallback ─────────────────────────────────────────────────────────────
+#
+# api.weather.gov has no irradiance, only sky cover. Irradiance is estimated as
+# clear-sky GHI (sunpath.clear_sky at mid-hour sun elevation) scaled by the
+# Kasten-Czeplak cloud factor 1 - 0.75 * cover^3.4. Rough, but far better than
+# a blank forecast: it only stands in when Open-Meteo has been down 3+ hours.
+
+_NWS_HEADERS = {"User-Agent": "franklinwh-advisor (github.com/echang793)", "Accept": "application/geo+json"}
+_DURATION_RE = re.compile(r"P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$")
+
+
+def _expand_hours(values: list, tz) -> dict:
+    """{local naive hour: value} from NWS "validTime": "start/PnDTnH" entries."""
+    out: dict = {}
+    for v in values or []:
+        try:
+            start_s, dur_s = str(v["validTime"]).split("/")
+            m = _DURATION_RE.match(dur_s)
+            hours = (int(m.group(1) or 0) * 24 + int(m.group(2) or 0)) if m else 1
+            start = datetime.fromisoformat(start_s)
+            val = v.get("value")
+        except (KeyError, ValueError, TypeError, AttributeError):
+            continue
+        if val is None:
+            continue
+        for i in range(max(1, hours)):
+            t = (start + timedelta(hours=i)).astimezone(tz).replace(tzinfo=None)
+            out[t] = float(val)
+    return out
+
+
+def _sun_crossing(day, lat: float, lon: float, tz, lo_h: int, hi_h: int, rising: bool) -> datetime | None:
+    from .sunpath import sun_position
+    prev = None
+    t = datetime(day.year, day.month, day.day, lo_h)
+    end = datetime(day.year, day.month, day.day, hi_h)
+    while t <= end:
+        el = sun_position(t.replace(tzinfo=tz), lat, lon)[1]
+        up = el > -0.833
+        if prev is not None and up != prev and up == rising:
+            return t
+        prev = up
+        t += timedelta(minutes=2)
+    return None
+
+
+def nws_outlook_from_grid(grid: dict, lat: float, lon: float, tz: str | None = None) -> SolarOutlook:
+    """Turn a gridpoint payload into a SolarOutlook (hours in local time). Raises ValueError
+    when there is no sky cover to work from."""
+    from zoneinfo import ZoneInfo
+
+    from .sunpath import clear_sky, default_tz, sun_position
+    zone = ZoneInfo(tz or default_tz())
+    props = (grid or {}).get("properties") or {}
+    sky = _expand_hours((props.get("skyCover") or {}).get("values"), zone)
+    if not sky:
+        raise ValueError("NWS grid has no sky cover")
+    temps = _expand_hours((props.get("temperature") or {}).get("values"), zone)
+    winds = _expand_hours((props.get("windSpeed") or {}).get("values"), zone)   # km/h
+    hours: list[HourlyForecast] = []
+    for t in sorted(sky):
+        cover = max(0.0, min(100.0, sky[t])) / 100.0
+        el = sun_position((t + timedelta(minutes=30)).replace(tzinfo=zone), lat, lon)[1]
+        ghi = clear_sky(el)[2] * (1.0 - 0.75 * cover ** 3.4)
+        diffuse = ghi * min(1.0, 0.15 + 0.85 * cover)
+        hours.append(HourlyForecast(
+            time=t, direct_radiation_wm2=ghi - diffuse, diffuse_radiation_wm2=diffuse,
+            cloud_cover_pct=cover * 100.0, temp_c=temps.get(t, 0.0),
+            wind_speed_ms=winds.get(t, 0.0) / 3.6,
+        ))
+    days = sorted({h.time.date() for h in hours})
+    sunrise = [x for d in days if (x := _sun_crossing(d, lat, lon, zone, 3, 10, True))]
+    sunset = [x for d in days if (x := _sun_crossing(d, lat, lon, zone, 14, 21, False))]
+    offset = int(hours[0].time.replace(tzinfo=zone).utcoffset().total_seconds())
+    return SolarOutlook(hours=hours, utc_offset_seconds=offset, sunrise_times=sunrise,
+                        sunset_times=sunset, source="nws")
+
+
+def fetch_nws_outlook(lat: float, lon: float, timeout: int = 10) -> SolarOutlook:
+    """NWS gridpoint forecast as a SolarOutlook. Raises on any failure (the caller falls back)."""
+    r = requests.get(f"https://api.weather.gov/points/{lat:.4f},{lon:.4f}", headers=_NWS_HEADERS, timeout=timeout)
+    r.raise_for_status()
+    props = r.json().get("properties") or {}
+    url = props.get("forecastGridData")
+    if not url:
+        raise ValueError("NWS points lookup returned no grid URL")
+    g = requests.get(url, headers=_NWS_HEADERS, timeout=timeout)
+    g.raise_for_status()
+    return nws_outlook_from_grid(g.json(), lat, lon, tz=props.get("timeZone"))

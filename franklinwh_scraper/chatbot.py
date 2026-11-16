@@ -281,6 +281,31 @@ def _hour24(num: str, ampm: str | None) -> int | None:
     return h if 0 <= h <= 23 else None
 
 
+_WHEN_RE = re.compile(r"\s*/when(?:@\w+)?(?:\s+(.*))?$", re.I | re.S)
+
+
+def _parse_when(text: str):
+    """/when dryer | /when 3 kW 2h -> (name, kW, hours); "help" for a bare or unreadable /when;
+    None when the text isn't the command."""
+    from . import besttime
+    m = _WHEN_RE.match(text or "")
+    if m is None:
+        return None
+    req = besttime.parse_request(m.group(1) or "")
+    return req if req is not None else "help"
+
+
+def _when_args(args: dict, num) -> tuple | None:
+    """The best_time tool's arguments as a /when request."""
+    from . import besttime
+    load = args.get("load") if isinstance(args.get("load"), str) else ""
+    req = besttime.parse_request(load) if load else None
+    name = req[0] if req else None
+    kw = num("kw") if num("kw") is not None else (req[1] if req else None)
+    hours = num("hours") if num("hours") is not None else (req[2] if req else None)
+    return None if name is None and kw is None else (name, kw, hours)
+
+
 _LOAD_DEFAULTS = {"dryer": (14, 1.0, 4.0), "oven": (17, 2.0, 2.5), "kitchen": (17, 2.0, 2.5), "ac": (14, 3.0, 3.0)}
 _LOAD_RE = re.compile(
     r"\b(dryer|oven|kitchen|ac)\b(?:\s+(?:at\s+)?" + _HOUR + r"(?!\s*(?:h|hr|hrs|m|min)\b))?"
@@ -545,6 +570,8 @@ class TelegramChatBot:
                             "/accuracy — how accurate /sundown and the solar forecast have been\n"
                             "/alerts   — what fired lately, what you snooze, what to turn off\n"
                             "/whatif kW [hours] [from H] — what a load (dryer 3 kW, AC) does to the sundown battery\n"
+                            "/when dryer|oven|ac|car|3 kW 2h — the cheapest time today to run it, and the dearest\n"
+                            "/missed   — last week's big loads that would have cost less at another time\n"
                             "/habits  — the big loads (dryer, oven) your history says you run, by weekday\n"
                             "/plan dryer 4pm, oven 5pm — tell me what you'll run today; /sundown, /evening and /ebplan count it (/plan clear)\n"
                             "/cardays  — label which recent afternoons were the car\n"
@@ -673,9 +700,15 @@ class TelegramChatBot:
                     _cmd = text.lower().strip().split("@")[0]
                     _simple = {"/accuracy": self._send_accuracy, "/today": self._send_today,
                                "/reserve": self._send_reserve, "/alerts": self._send_alerts,
-                               "/evening": self._send_evening, "/habits": self._send_habits}.get(_cmd)
+                               "/evening": self._send_evening, "/habits": self._send_habits,
+                               "/missed": self._send_missed}.get(_cmd)
                     if _simple is not None:
                         threading.Thread(target=_simple, args=(chat_id,), daemon=True).start()
+                        continue
+                    _wh = _parse_when(text)
+                    if _wh is not None:
+                        threading.Thread(target=self._send_when, args=(chat_id, None if _wh == "help" else _wh),
+                                         daemon=True).start()
                         continue
                     _wi = _parse_whatif(text)
                     if _wi is not None:
@@ -1093,6 +1126,7 @@ class TelegramChatBot:
             "get_today": lambda: self._send_today(chat_id),
             "get_accuracy": lambda: self._send_accuracy(chat_id),
             "what_if_load": lambda: self._send_whatif(chat_id, num("extra_kw"), num("hours"), num("start_hour")),
+            "best_time": lambda: self._send_when(chat_id, _when_args(args, num)),
         }
         run = runners.get(name)
         if run is None:
@@ -1153,11 +1187,78 @@ class TelegramChatBot:
             loads = [{"name": what, "start": float(start), "hours": hours, "kw": kw}]
         self._send_plan(chat_id, {"loads": loads})
 
+    def _send_when(self, chat_id: str, req) -> None:
+        """/when: the cheapest and dearest time today to run a load, with a button to plan it (besttime.py)."""
+        try:
+            from . import besttime
+            if req is None:
+                self._send(chat_id, "Tell me what to run: /when dryer, /when oven, /when ac, /when car, "
+                                    "or a size like /when 3 kW 2h.")
+                return
+            stats, forecast, outlook, store, state = self._snapshot_for_report()
+            if stats is None or forecast is None:
+                self._send(chat_id, "No data yet — advisor hasn't completed its first check.")
+                return
+            sized = besttime.resolve(req, state, self._cfg)
+            if sized is None:
+                self._send(chat_id, "I don't know how big that is. Add the size, e.g. /when 3 kW 2h.")
+                return
+            name, label, kw, hours = sized
+            res = besttime.for_snapshot(stats.current, state, self._cfg, outlook, forecast, store,
+                                        datetime.now(), kw, hours)
+            if res is None:
+                self._send(chat_id, "No forecast to work from yet.")
+                return
+            b = res.best.start
+            start_h = round(b.hour + b.minute / 60.0, 2)
+            markup = {"inline_keyboard": [[{"text": f"📌 Plan it for {b.strftime('%-I:%M %p')}",
+                                            "callback_data": f"when:{name}:{start_h:g}:{hours:g}:{kw:g}"[:64]}]]}
+            self._send(chat_id, besttime.describe(res, label, kw, hours), reply_markup=markup)
+        except Exception as e:
+            logger.warning("_send_when error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
+    def _send_missed(self, chat_id: str) -> None:
+        """/missed: last week's big loads replayed at the cheapest time each day allowed (besttime.py)."""
+        try:
+            from . import besttime
+            _stats, _fc, _ol, store, state = self._snapshot_for_report()
+            if store is None:
+                self._send(chat_id, "No history yet — advisor hasn't completed its first check.")
+                return
+            text = besttime.describe_missed(besttime.missed_week(store, datetime.now().date(), state, self._cfg))
+            self._send(chat_id, text or "💸 Nothing worth moving last week: the big loads ran at fair times "
+                                        f"(less than ${besttime.WEEK_MIN_TOTAL:.2f} to gain in all).")
+        except Exception as e:
+            logger.warning("_send_missed error: %s", e)
+            self._send(chat_id, f"Error: {e}")
+
+    def _tap_when(self, chat_id: str, payload: str) -> None:
+        """The /when button: add the load at its best time to today's plan (keeping what's planned)."""
+        from pathlib import Path
+
+        from . import planned
+        from .alerts import _state_lock
+        try:
+            name, start, hours, kw = payload.split(":")
+            start, hours, kw = float(start), float(hours), float(kw)
+        except ValueError:
+            return
+        if not re.fullmatch(r"[a-z]{1,12}", name) or not (0 <= start < 24) or not (0 < hours <= 12) or not (0 < kw <= 12):
+            return
+        today = datetime.now().strftime("%Y-%m-%d")
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        with _state_lock(out):
+            state = _load_peak_state(out)
+            keep = [ld for ld in planned.get_plan(state, today) if not (ld["name"] == name and ld["start"] == start)]
+            loads = keep + [{"name": name, "start": start, "hours": hours, "kw": kw}]
+        self._send_plan(chat_id, {"loads": loads})
+
     def _register_commands(self) -> None:
         """Fill Telegram's "/" menu so the commands can be picked instead of remembered."""
         commands = [("status", "Battery, solar and grid right now"), ("sundown", "Battery level at sundown"),
                     ("evening", "What tonight needs and what you will have"), ("ebplan", "When to run Emergency Backup"),
-                    ("plan", "Tell me what you will run today"), ("habits", "The big loads I have learned"),
+                    ("plan", "Tell me what you will run today"), ("when", "Cheapest time to run the dryer, oven or car"), ("habits", "The big loads I have learned"),
                     ("today", "The day so far"), ("reserve", "What to charge to overnight"),
                     ("bill", "This billing cycle against the last"), ("alerts", "What I sent lately"),
                     ("accuracy", "How accurate the projections have been"), ("mute", "Pause non-safety alerts")]
@@ -2213,6 +2314,10 @@ class TelegramChatBot:
         if data.startswith("cmd:"):
             self._answer_callback_query(cq_id)
             threading.Thread(target=self._run_command, args=(chat_id, data[4:]), daemon=True).start()
+            return
+        if data.startswith("when:"):
+            self._answer_callback_query(cq_id, "Added to today's plan")
+            threading.Thread(target=self._tap_when, args=(chat_id, data[5:]), daemon=True).start()
             return
         if data.startswith("plan:"):
             self._answer_callback_query(cq_id, "Got it")

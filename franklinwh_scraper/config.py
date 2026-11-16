@@ -175,6 +175,9 @@ class Config:
     fast_poll_seconds: int = 120
     fast_poll_load_kw: float = 3.0
     fast_poll_max_per_hour: int = 36
+    # During on-peak (4-9 PM) a car-sized draw is enough to poll fast, so a car left charging is
+    # caught in ~10 minutes instead of ~15.
+    fast_poll_peak_load_kw: float = 1.6
 
     def is_complete(self) -> bool:
         return bool(self.email and self.password and self.lat and self.lon)

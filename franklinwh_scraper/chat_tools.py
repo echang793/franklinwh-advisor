@@ -85,6 +85,14 @@ APP_TOOLS = [
          "start_hour": {"type": "integer", "description": "clock hour it starts, 0-23 (default: now)"}},
          "required": ["extra_kw"]}},
 ]
+APP_TOOLS.append(
+    {"name": "best_time",
+     "description": ("The cheapest and dearest time today to run a load (dryer, oven, AC, dishwasher, car, or a size in kW), "
+                     "with the dollar cost of each, from the solar forecast, the battery and the time-of-use rates."),
+     "input_schema": {"type": "object", "properties": {
+         "load": {"type": "string", "description": "dryer, oven, ac, dishwasher, kitchen or car"},
+         "kw": {"type": "number", "description": "size in kW, if not a named load"},
+         "hours": {"type": "number", "description": "how long it runs, in hours"}}}})
 APP_TOOL_NAMES = frozenset(t["name"] for t in APP_TOOLS)
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")

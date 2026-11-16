@@ -489,9 +489,11 @@ function drawDay() {
   ctx.setLineDash([4, 3]); ctx.strokeStyle = C.blue; ctx.lineWidth = 1.5; ctx.stroke(); ctx.setLineDash([]);
   if (act && act.length) {
     const pts = act.filter(a => a.min >= t0 - 5 && a.min <= t1 + 5);
+    if (pts.length) {                                // after midnight every reading predates sunrise
     ctx.beginPath(); pts.forEach((a, j) => j ? ctx.lineTo(X(a.min), Y(a.kw)) : ctx.moveTo(X(a.min), Y(a.kw)));
     ctx.strokeStyle = C.green; ctx.lineWidth = 2; ctx.stroke();
     ctx.lineTo(X(pts[pts.length - 1].min), Y(0)); ctx.lineTo(X(pts[0].min), Y(0)); ctx.closePath(); ctx.fillStyle = 'rgba(141,240,176,.16)'; ctx.fill();
+    }
   }
   const cx = X(clamp(st.minute, t0, t1)), cur = at(st.doy, st.minute);
   ctx.strokeStyle = C.amber; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(cx, padT - 4); ctx.lineTo(cx, h - padB); ctx.stroke();
@@ -558,7 +560,9 @@ function syncUI() {
 }
 
 // ── loop ──────────────────────────────────────────────────────────────
-function draw() { try { drawScene(); drawDay(); drawYear(); updateChips(); } catch (e) { console.error('sunpath draw', e); } }
+function draw() {                                 // each chart on its own, so one failure can't blank the rest
+  for (const f of [drawScene, drawDay, drawYear, updateChips]) { try { f(); } catch (e) { console.error('sunpath draw', f.name, e); } }
+}
 function requestDraw() { if (!raf && active) raf = requestAnimationFrame(frame); }
 function frame(ts) {
   raf = 0; const dt = Math.min(0.1, lastTs ? (ts - lastTs) / 1000 : 0.016); lastTs = ts;

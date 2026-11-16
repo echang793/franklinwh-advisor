@@ -52,6 +52,7 @@ from .predictor import predict
 from . import savings, sunpath
 from .tou import (BASE_SERVICE_DAILY, TouPeriod, cycle_bounds, export_rate_at,
                   on_peak_window, period_at, rate_at)
+from . import weather as _weather
 from .weather import fetch_solar_outlook_cached as _fetch_outlook_cached
 from . import fastpoll as _fastpoll
 
@@ -116,6 +117,13 @@ def _latest_reading() -> dict | None:
     finally:
         if conn is not None:
             conn.close()
+
+
+def _outlook():
+    """The forecast for dashboard routes: the advisor's copy on disk when it is fresh, else one
+    quick Open-Meteo try (4 s, no retries). A slow weather API used to hold every panel ~50 s."""
+    _weather.set_cache_dir(_OUT)
+    return _fetch_outlook_cached(_cfg.lat, _cfg.lon, timeout=4, retries=1)
 
 
 def _current_reading() -> tuple[dict | None, bool]:
@@ -282,7 +290,7 @@ def api_recommendation():
         state = _load_peak_state(_OUT)
         r = _latest_reading()
         with HistoryStore(_OUT / "history.db") as history:
-            outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
+            outlook = _outlook()
             sp = _get_system_peak_kw(state)
             cloudy = bool(outlook and outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
             fc = (predict(history, 24, outlook=outlook, system_peak_kw=sp,
@@ -452,9 +460,10 @@ def api_forecast():
     sp = None
     fc = None
     error = False
+    outlook = None
     try:
         with HistoryStore(_OUT / "history.db") as history:
-            outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
+            outlook = _outlook()
             sp = _get_system_peak_kw(state)
             cloudy = bool(outlook and outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
             perf_ratio = _get_performance_ratio(state, cloudy=cloudy)
@@ -495,7 +504,19 @@ def api_forecast():
         "cloudy_today": cloudy,
         "system_peak_kw": round(sp, 2) if sp is not None else None,
         "error": error,
+        # "open-meteo" normally; "nws" while the fallback stands in. Age is since the last
+        # real Open-Meteo forecast, so the panel can say "FORECAST FROM 7:10 AM".
+        "forecast_source": outlook.source if outlook is not None else None,
+        "forecast_age_min": _forecast_age_min(),
     }
+
+
+def _forecast_age_min() -> int | None:
+    fa = _weather._outlook_cache.get("fetched_at")
+    if not fa:
+        return None
+    age = (_weather._clock() - fa) / 60
+    return int(age) if math.isfinite(age) and age >= 0 else None
 
 
 def _sundown_now() -> datetime:
@@ -516,7 +537,7 @@ def api_sundown():
     try:
         state = _load_peak_state(_OUT)
         with HistoryStore(_OUT / "history.db") as history:
-            outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
+            outlook = _outlook()
             sp = _get_system_peak_kw(state)
             cloudy = bool(outlook and outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
             fc = (predict(history, 24, outlook=outlook, system_peak_kw=sp,
@@ -526,6 +547,142 @@ def api_sundown():
             return _sundown_report(state, _sundown_now(), c, _cfg, outlook, fc, history)
     except Exception:
         return {"ok": False, "reason": "error", "watch": None}
+
+
+def _besttime_inputs():
+    """(current reading, state, outlook, 24 h forecast, open HistoryStore, now) for best-time
+    scoring, or None without a reading or enough history. The caller closes the store."""
+    r = _latest_reading()
+    if not r:
+        return None
+    c = types.SimpleNamespace(
+        battery_soc_pct=r["battery_soc"], home_load_kw=r["home_load_kw"], solar_production_kw=r["solar_kw"],
+        battery_use_kw=r["battery_use_kw"], grid_use_kw=r["grid_use_kw"])
+    state = _load_peak_state(_OUT)
+    history = HistoryStore(_OUT / "history.db")
+    try:
+        if not history.has_enough_data():
+            history.close()
+            return None
+        outlook = _outlook()
+        cloudy = bool(outlook and outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
+        fc = predict(history, 24, outlook=outlook, system_peak_kw=_get_system_peak_kw(state),
+                     perf_ratio=_get_performance_ratio(state, cloudy=cloudy), hourly_bias=_get_hourly_bias(state))
+    except Exception:
+        history.close()
+        raise
+    return c, state, outlook, fc, history, _sundown_now()
+
+
+_BESTTIME_PRESETS = ("dryer", "oven", "kitchen", "ac", "dishwasher")
+
+
+def _window_json(w) -> dict:
+    return {"start": w.start.isoformat(), "start_h": round(w.start.hour + w.start.minute / 60.0, 2),
+            "cost": _finite(w.cost), "grid_kwh": _finite(w.grid_kwh),
+            "sundown_delta": _finite(w.sundown_delta, 1) if w.sundown_delta is not None else None}
+
+
+@app.get("/api/besttime", dependencies=_authed)
+def api_besttime(name: str | None = Query(None, pattern=r"^[a-z]{1,12}$"),
+                 kw: float | None = Query(None, gt=0, le=12), hours: float | None = Query(None, gt=0, le=12)):
+    """Cheapest and dearest time today for each quick-add load (or one named / sized load): the
+    same scoring as the bot's /when (besttime.py). Read-only."""
+    from . import besttime
+    inputs = _besttime_inputs()
+    if inputs is None:
+        return {"ok": False, "reason": "no_forecast", "loads": {}}
+    c, state, outlook, fc, store, now = inputs
+    try:
+        reqs = [(name, kw, hours)] if (name or kw is not None) else [(n, None, None) for n in _BESTTIME_PRESETS]
+        loads = {}
+        for req in reqs:
+            sized = besttime.resolve(req, state, _cfg)
+            if sized is None:
+                continue
+            pname, _label, k, h = sized
+            res = besttime.for_snapshot(c, state, _cfg, outlook, fc, store, now, k, h)
+            if res is None:
+                continue
+            loads[pname] = {"kw": k, "hours": h, "best": _window_json(res.best),
+                            "worst": _window_json(res.worst), "now": _window_json(res.now)}
+        return {"ok": True, "loads": loads} if loads else {"ok": False, "reason": "no_forecast", "loads": {}}
+    finally:
+        if store is not None and hasattr(store, "close"):
+            store.close()
+
+
+def _ribbon_sundown(c, state, outlook, fc, store, now):
+    return _sundown_report(state, now, c, _cfg, outlook, fc, store)
+
+
+def _ribbon_actual(day: datetime, now: datetime) -> list[dict]:
+    """Today so far in 15-minute means: battery %, solar and load."""
+    buckets: dict[datetime, list] = {}
+    for r in _readings_since(day, now):
+        try:
+            t = datetime.fromisoformat(r["timestamp"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        k = t.replace(minute=t.minute - t.minute % 15, second=0, microsecond=0)
+        buckets.setdefault(k, []).append(r)
+    out = []
+    for k in sorted(buckets):
+        rows = buckets[k]
+        mean = lambda col: _finite(sum(float(x[col] or 0) for x in rows) / len(rows))  # noqa: E731
+        out.append({"ts": k.isoformat(), "soc": mean("battery_soc"), "solar": mean("solar_kw"), "load": mean("home_load_kw")})
+    return out
+
+
+@app.get("/api/ribbon", dependencies=_authed)
+def api_ribbon():
+    """One midnight-to-midnight view for the day ribbon panel: the rate periods, today's actual battery,
+    sun and load, the projection to midnight (the /sundown walk, bent to land on its headline number),
+    the likely range at sundown, sunset, and today's planned loads."""
+    from . import besttime
+    now = _sundown_now()
+    day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    tou = [{"hour": h, "period": period_at(day.replace(hour=h)).value.replace("_", " ").upper(),
+            "rate": _finite(rate_at(day.replace(hour=h)), 4)} for h in range(24)]
+    out = {"ok": True, "day": day.date().isoformat(), "now": now.isoformat(), "tou": tou,
+           "actual": _ribbon_actual(day, now), "projection": [], "sunset": None, "band": None,
+           "sundown_pct": None, "plan": []}
+    inputs = _besttime_inputs()
+    if inputs is None:
+        return out
+    c, state, outlook, fc, store, _ = inputs
+    try:
+        sd = _ribbon_sundown(c, state, outlook, fc, store, now) or {}
+        hours = besttime.live_hours(c, state, outlook, fc, store, now)
+        if not hours:
+            return out
+        sunset = datetime.fromisoformat(sd["sundown_at"]) if sd.get("ok") and sd.get("sundown_at") else None
+        cap = float(_cfg.battery_capacity_kwh or 13.6)
+        reserve = float(getattr(_cfg, "battery_reserve_pct", 10.0) or 10.0)
+        trace: list = []
+        besttime.simulate(hours, now, float(c.battery_soc_pct) / 100.0 * cap, cap, reserve / 100.0 * cap,
+                          lambda t: 0.0, rate_at, export_rate_at, day + timedelta(days=1),
+                          sunset=sunset if sunset and sunset > now else None, trace=trace)
+        pct = [(t, soc / cap * 100.0) for t, soc in trace]
+        if sunset and sd.get("projected_pct") is not None:
+            pct = besttime.pin_to(pct, now, sunset, float(sd["projected_pct"]))
+        by_hour = {h.dt.replace(minute=0, second=0, microsecond=0): h for h in hours}
+        proj = []
+        for t, v in pct:
+            h = by_hour.get(t.replace(minute=0, second=0, microsecond=0))
+            if h is None:
+                continue
+            proj.append({"ts": t.isoformat(), "soc": _finite(v, 1), "solar": _finite(max(0.0, h.predicted_solar_kw)),
+                         "load": _finite(max(0.0, h.predicted_load_kw))})
+        band = sd.get("band") or None
+        out.update(projection=proj, sunset=sunset.isoformat() if sunset else None,
+                   band={"lo": _finite(band["lo"], 1), "hi": _finite(band["hi"], 1)} if band else None,
+                   sundown_pct=_finite(sd.get("projected_pct"), 1) if sd.get("projected_pct") is not None else None,
+                   plan=[ld for ld in (sd.get("plan") or []) if isinstance(ld, dict)])
+        return out
+    finally:
+        if store is not None and hasattr(store, "close"):
+            store.close()
 
 
 @app.get("/api/accuracy", dependencies=_authed)
@@ -641,7 +798,7 @@ def api_ev():
     if r is not None:
         try:
             with HistoryStore(_OUT / "history.db") as history:
-                outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
+                outlook = _outlook()
                 if history.has_enough_data():
                     now = datetime.now()
                     soc = r["battery_soc"]
@@ -751,7 +908,7 @@ def api_willmake(hours: int = Query(..., ge=1, le=24)):
     state = _load_peak_state(_OUT)
     try:
         with HistoryStore(_OUT / "history.db") as history:
-            outlook = _fetch_outlook_cached(_cfg.lat, _cfg.lon)
+            outlook = _outlook()
             sp = _get_system_peak_kw(state)
             cloudy = bool(outlook and outlook.is_cloudy(12, _GHI_CLOUDY_THRESHOLD))
             fc = (predict(history, 24, outlook=outlook, system_peak_kw=sp,
@@ -910,6 +1067,59 @@ def api_attribution(days: int = Query(14, ge=1, le=400)):
         return {"days": out, "error": False}
     except Exception:
         return {"days": [], "error": True}
+
+
+_CAL_CACHE: dict[tuple[str, str], dict | None] = {}     # past days never change; today is recomputed
+
+
+def _calendar_today() -> date:
+    return date.today()
+
+
+def _calendar_day(history, metric: str, d: date) -> dict | None:
+    """One day's heatmap cell, or None when that day has no usable data."""
+    if metric == "self":
+        attr = history.daily_attribution(d.isoformat())
+        if not attr:
+            return None
+        batt, sol, grid = attr
+        total = batt + sol + grid
+        if total <= 0:
+            return None
+        v = _finite((batt + sol) / total * 100, 1)
+        return None if v is None else {"value": v, "detail": {"battery_kwh": batt, "solar_kwh": sol, "grid_kwh": grid}}
+    start = datetime(d.year, d.month, d.day)
+    rows = _readings_since(start, start + timedelta(days=1))
+    if len(rows) < 12:
+        return None
+    sv = savings.compute(_intervals(rows))
+    v = _finite(sv.saved_vs_grid_only)
+    return None if v is None else {"value": v, "detail": {"import_cost": _finite(sv.actual_import_cost),
+                                                          "export_credit": _finite(sv.actual_export_credit)}}
+
+
+@app.get("/api/calendar", dependencies=_authed)
+def api_calendar(metric: str = Query("self", pattern="^(self|saved)$"), days: int = Query(365, ge=1, le=400)):
+    """The year heatmap: one value per day, self-sufficiency % or dollars saved. Days without data are
+    left out. Past days are cached in memory (they never change); today is always recomputed."""
+    today = _calendar_today()
+    out = []
+    try:
+        with HistoryStore(_OUT / "history.db") as history:
+            for i in range(days - 1, -1, -1):
+                d = today - timedelta(days=i)
+                key = (metric, d.isoformat())
+                if key in _CAL_CACHE:
+                    cell = _CAL_CACHE[key]
+                else:
+                    cell = _calendar_day(history, metric, d)
+                    if d < today:
+                        _CAL_CACHE[key] = cell
+                if cell is not None:
+                    out.append({"date": d.isoformat(), **cell})
+    except Exception:
+        return {"metric": metric, "days": out, "error": True}
+    return {"metric": metric, "days": out, "error": False}
 
 
 @app.get("/api/savings", dependencies=_authed)

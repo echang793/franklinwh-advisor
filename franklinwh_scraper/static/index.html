@@ -14,7 +14,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet">
 <script src="/vendor/html-to-image.js"></script>
-<script src="/sunpath.js?v=5"></script>
+<script src="/sunpath.js?v=0c60b1eb"></script>
 <style>
 html,body{margin:0;padding:0;background:#050507;}
 a{color:#3ddc97;text-decoration:none}a:hover{color:#7af0bd;text-decoration:underline}
@@ -29,7 +29,8 @@ a{color:#3ddc97;text-decoration:none}a:hover{color:#7af0bd;text-decoration:under
 @keyframes glowPulse{0%,100%{box-shadow:0 0 18px rgba(61,220,151,.25)}50%{box-shadow:0 0 42px rgba(61,220,151,.55)}}
 body{min-height:100vh;background:#050507;font-family:Inter,system-ui,sans-serif;color:#f2f2f5;padding:0 0 48px 0;position:relative;overflow-x:hidden;}
 .mono{font-family:'Space Grotesk',sans-serif;font-variant-numeric:tabular-nums;}
-.card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:28px;padding:26px;position:relative;-webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);transition:border-color .4s,box-shadow .4s;animation:cardin .9s cubic-bezier(.2,.8,.2,1) backwards;}
+.card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:28px;padding:26px;position:relative;-webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);transition:border-color .4s,box-shadow .4s;}
+.card.enter,.hero-tile.enter{animation:cardin .6s cubic-bezier(.2,.8,.2,1) backwards;}
 .card:hover{border-color:rgba(255,255,255,.2);box-shadow:0 24px 60px rgba(0,0,0,.4);}
 .card:before{content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(100deg,transparent 42%,rgba(255,255,255,.07) 50%,transparent 58%);background-size:300% 100%;background-position:150% 0;animation:sheenbg 11s ease-in-out infinite;}
 .plabel{font-family:Inter,system-ui,sans-serif;font-size:12px;font-weight:500;letter-spacing:.14em;color:#a6a6b0;}
@@ -72,7 +73,7 @@ body.wall{min-height:0!important;padding-bottom:0!important}
 body.wall main#grid{max-width:none}
 
 /* Glass look: neutral glass tiles, color only where it carries meaning. */
-@keyframes cardin{from{opacity:0;transform:translateY(40px) scale(.95);filter:blur(10px)}}
+@keyframes cardin{from{opacity:0;transform:translateY(24px)}}
 @keyframes sheenbg{0%{background-position:150% 0}55%,100%{background-position:-50% 0}}
 @keyframes drift{from{transform:translate(0,0) scale(1)}to{transform:translate(9%,12%) scale(1.3)}}
 @keyframes chargeflow{from{transform:translateY(100%)}to{transform:translateY(-100%)}}
@@ -86,17 +87,42 @@ main#grid>.card:nth-child(1){animation-delay:.05s}main#grid>.card:nth-child(2){a
 main#grid>.card:nth-child(4){animation-delay:.26s}main#grid>.card:nth-child(5){animation-delay:.33s}main#grid>.card:nth-child(6){animation-delay:.4s}
 main#grid>.card:nth-child(7){animation-delay:.47s}main#grid>.card:nth-child(8){animation-delay:.54s}main#grid>.card:nth-child(n+9){animation-delay:.6s}
 @media (prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
-body.wall .card{animation:none}
+body.wall .card.enter{animation:none}
 .collbtn{position:absolute;top:6px;right:84px;font-size:12px;color:#6e6e7a;cursor:pointer;z-index:6;padding:2px 6px;user-select:none;}
 .collbtn:hover{color:#fff;}
 @media (max-width:919px){.collbtn{font-size:15px}}
 .card.collapsed{padding-bottom:18px}
 .card.collapsed > :not(span):not(.ptitle){display:none!important}
-.hero-tile{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:22px;padding:16px 20px;-webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);animation:cardin .9s cubic-bezier(.2,.8,.2,1) backwards;min-width:0}
+.hero-tile{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:22px;padding:16px 20px;-webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);min-width:0}
 .hero-v{font-family:'Space Grotesk',sans-serif;font-size:34px;font-weight:300;letter-spacing:-.03em;line-height:1.1;margin-top:6px;font-variant-numeric:tabular-nums}
 .hero-s{font-size:12px;color:#a0a0ac;margin-top:4px;min-height:15px}
 body.wall #hero{display:none!important}
 @keyframes growy{from{transform:scaleY(0)}}
+.card.loading{min-height:150px}
+.card.collapsed.loading{min-height:0}
+.skel{position:absolute;left:26px;right:26px;top:64px;bottom:24px;display:flex;flex-direction:column;gap:14px;padding-top:6px;background:rgba(10,10,14,.9);border-radius:14px;z-index:4;pointer-events:none}
+.skel i{display:block;height:12px;border-radius:6px;background:linear-gradient(90deg,rgba(255,255,255,.05) 25%,rgba(255,255,255,.14) 50%,rgba(255,255,255,.05) 75%);background-size:200% 100%;animation:shimmer 1.4s linear infinite}
+.skel i:nth-child(2){width:78%}.skel i:nth-child(3){width:55%}.skel i:nth-child(4){width:66%}
+.pfail{position:absolute;left:26px;right:26px;top:64px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 14px;border-radius:14px;background:rgba(10,10,14,.92);border:1px solid rgba(255,194,71,.25);color:#d8c79a;font-size:13px;z-index:5}
+.pfail button{font:inherit;font-size:12px;letter-spacing:.08em;color:#f2f2f5;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:5px 12px;cursor:pointer}
+.pstale{position:absolute;top:8px;left:26px;font-size:11px;letter-spacing:.08em;color:#d8b25a;z-index:5;cursor:pointer}
+*{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.18) transparent}
+::-webkit-scrollbar{height:6px;width:8px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.18);border-radius:6px}
+#tabbar{display:none}
+@media (max-width:719px){
+  #tabbar{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:50;gap:4px;padding:6px 8px calc(6px + env(safe-area-inset-bottom));background:rgba(10,10,14,.86);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border-top:1px solid rgba(255,255,255,.1)}
+  #tabbar button{flex:1;font:inherit;font-family:'Space Grotesk',sans-serif;font-size:11.5px;letter-spacing:.12em;color:#8a8a96;background:none;border:0;border-radius:12px;padding:10px 0;cursor:pointer}
+  #tabbar button.on{color:#f2f2f5;background:rgba(255,255,255,.08)}
+  body{padding-bottom:calc(84px + env(safe-area-inset-bottom))!important}
+  .card.capped{max-height:440px;overflow:hidden}
+  .card.capped:after{content:'';position:absolute;left:0;right:0;bottom:0;height:96px;border-radius:0 0 28px 28px;background:linear-gradient(rgba(12,12,16,0),rgba(12,12,16,.96));pointer-events:none;z-index:6}
+  .card.capped .capbtn{display:block}
+}
+body.wall #tabbar{display:none!important}
+.capbtn{display:none;position:absolute;left:50%;bottom:14px;transform:translateX(-50%);z-index:7;font-family:'Space Grotesk',sans-serif;font-size:11.5px;letter-spacing:.12em;color:#f2f2f5;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);border-radius:999px;padding:7px 14px;cursor:pointer}
+.hbw-col{position:relative;height:168px;border-radius:8px;background:rgba(255,255,255,.04)}
+.hbw-blk{position:absolute;left:2px;right:2px;border-radius:4px;min-height:4px}
+.ftag{font-size:11px;letter-spacing:.1em;color:#d8b25a;border:1px solid rgba(216,178,90,.35);border-radius:999px;padding:2px 8px}
 .plrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:10px 14px}
 .plin{font-family:'Space Grotesk',sans-serif;font-size:12px;color:#f2f2f5;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:6px 8px}
 /* Fourteen day bars cannot fit a phone: let that row scroll sideways instead of widening the page. */
@@ -216,8 +242,8 @@ const WALL_RELOAD_MS = 6 * 3600 * 1000;   // fresh page every 6 h: no memory cre
 const CAP0 = 13.6;
 const $ = id => document.getElementById(id);
 const M = "'Space Grotesk',sans-serif";
-const PANEL_IDS = ['battery','plan','habits','history','flow','bill','forecast','sundown','mode','ebplan','touclock','accuracy','batteryhealth','attribution','savings','alerts','digests','ev','vpp','sunpath'];
-const PANEL_LABELS = {battery:'BATTERY',plan:'PLAN',habits:'HABITS',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',sundown:'SUNDOWN',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',attribution:'ATTRIBUTION',savings:'SAVINGS',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING',vpp:'VPP EVENT',sunpath:'SUN PATH'};
+const PANEL_IDS = ['ribbon','calendar','battery','plan','habits','history','flow','bill','forecast','sundown','mode','ebplan','touclock','accuracy','batteryhealth','attribution','savings','alerts','digests','ev','vpp','sunpath'];
+const PANEL_LABELS = {ribbon:'DAY RIBBON',calendar:'YEAR',battery:'BATTERY',plan:'PLAN',habits:'HABITS',history:'HISTORY',flow:'ENERGY FLOW',bill:'BILL',forecast:'FORECAST',sundown:'SUNDOWN',mode:'MODE',ebplan:'EB PLAN',touclock:'TOU CLOCK',accuracy:'ACCURACY',batteryhealth:'BATTERY HEALTH',attribution:'ATTRIBUTION',savings:'SAVINGS',alerts:'ALERTS',digests:'DIGESTS',ev:'EV CHARGING',vpp:'VPP EVENT',sunpath:'SUN PATH'};
 
 // ── Live state ───────────────────────────────────────────────────────
 const S = {
@@ -265,6 +291,29 @@ function mkPanel(id, inner){
   grid.appendChild(s);
   return s;
 }
+
+mkPanel('ribbon', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div class="plabel">TODAY · RATES, SUN AND BATTERY</div>
+    <div class="mono" style="font-size:11.5px;letter-spacing:.1em;color:#6e6e7a;">━ ACTUAL &nbsp;┄ PROJECTED &nbsp;▮ RANGE AT SUNDOWN</div>
+  </div>
+  <div id="rb-wrap" style="position:relative;margin-top:14px;touch-action:none;cursor:crosshair;">
+    <svg id="rb-svg" width="100%" height="230" style="display:block;overflow:visible;" role="img" aria-label="Today's rates, solar and battery level"></svg>
+  </div>
+  <div id="rb-info" class="mono" style="min-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;color:#a0a0ac;margin-top:6px;"></div>`);
+
+mkPanel('calendar', `
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div class="plabel" id="cal-title">YEAR · SELF-SUFFICIENCY</div>
+    <div style="display:flex;gap:6px;"><button class="chip on" id="cal-self" type="button">SELF-SUFFICIENT</button><button class="chip" id="cal-saved" type="button">SAVED</button></div>
+  </div>
+  <div id="cal-scroll" style="margin-top:14px;overflow-x:auto;-webkit-overflow-scrolling:touch;">
+    <div id="cal-grid" role="img" aria-label="One square per day" style="display:grid;grid-template-rows:repeat(7,12px);grid-auto-flow:column;grid-auto-columns:12px;gap:3px;width:max-content;padding-bottom:4px;"></div>
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap;">
+    <div id="cal-info" class="mono" style="min-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;color:#a0a0ac;flex:1 1 220px;"></div>
+    <div id="cal-key" class="mono" style="display:flex;align-items:center;gap:3px;font-size:11px;color:#8a8a96;"></div>
+  </div>`);
 
 mkPanel('battery', `
   <div class="plabel">BATTERY STATE OF CHARGE</div>
@@ -343,6 +392,7 @@ mkPanel('bill', `
 mkPanel('forecast', `
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
     <div class="plabel">SOLAR FORECAST · NEXT 12H</div>
+    <span id="f-src" class="mono ftag" style="display:none;"></span>
     <div class="mono" style="font-size:11.5px;letter-spacing:.1em;color:#6e6e7a;">● SOC PROJECTION</div>
   </div>
   <div id="f-scrub" style="position:relative;margin-top:18px;height:150px;display:flex;align-items:flex-end;gap:6px;cursor:crosshair;touch-action:none;">
@@ -399,7 +449,10 @@ mkPanel('habits', `
     <div class="plabel">ROUTINES I'VE LEARNED</div>
     <div id="hb-status" class="mono" style="font-size:12.5px;letter-spacing:.1em;color:#8a8a96;"></div>
   </div>
-  <div id="hb-list" style="margin-top:14px;display:flex;flex-direction:column;gap:10px;"></div>
+  <div id="hb-week" style="margin-top:14px;"></div>
+  <details id="hb-details" style="margin-top:12px;"><summary class="mono" style="cursor:pointer;font-size:12px;letter-spacing:.12em;color:#a0a0ac;">DETAILS AND NAMES</summary>
+    <div id="hb-list" style="margin-top:12px;display:flex;flex-direction:column;gap:10px;"></div>
+  </details>
   <div id="hb-msg" class="mono" style="margin-top:10px;font-size:12px;min-height:14px;"></div>`);
 
 mkPanel('mode', `
@@ -665,7 +718,7 @@ function snapshot(){
 }
 
 // ── Layout system ────────────────────────────────────────────────────
-function defaultLayout(){ return { left:['battery','plan','sundown','forecast','flow','ebplan','sunpath','attribution','alerts'], right:['history','bill','savings','mode','touclock','habits','accuracy','batteryhealth','digests','ev','vpp'] }; }
+function defaultLayout(){ return { left:['ribbon','battery','plan','sundown','forecast','flow','ebplan','sunpath','attribution','alerts'], right:['history','bill','savings','calendar','mode','touclock','habits','accuracy','batteryhealth','digests','ev','vpp'] }; }
 // Merge a saved layout against the current PANEL_IDS instead of requiring
 // an exact set match — previously, adding (or renaming) even one panel
 // silently discarded every user's custom drag arrangement back to default,
@@ -683,6 +736,18 @@ function migrateLayout(saved){
   return { left, right };
 }
 let layout = (() => { try { return migrateLayout(JSON.parse(localStorage.getItem('fwh-dash-cols'))); } catch(e){} return defaultLayout(); })();
+// One time per browser: put the day ribbon first and full width in a layout saved before it existed.
+try {
+  if (!localStorage.getItem('fwh-dash-ribbon-init')) {
+    layout.left = ['ribbon'].concat(layout.left.filter(id => id !== 'ribbon'));
+    layout.right = layout.right.filter(id => id !== 'ribbon');
+    localStorage.setItem('fwh-dash-cols', JSON.stringify(layout));
+    let w = []; try { w = JSON.parse(localStorage.getItem('fwh-dash-wide')) || []; } catch(e) {}
+    if (!w.includes('ribbon')) w.push('ribbon');
+    localStorage.setItem('fwh-dash-wide', JSON.stringify(w));
+    localStorage.setItem('fwh-dash-ribbon-init', '1');
+  }
+} catch(e) {}
 function getHidden(){ if (WALL) return PANEL_IDS.filter(id => !WALL_PANELS.includes(id)); try { const h = JSON.parse(localStorage.getItem('fwh-dash-hidden')); if (Array.isArray(h)) return h.filter(id => PANEL_IDS.includes(id)); } catch(e){} return []; }
 function hidePanel(id, on){ const h = getHidden().filter(x => x !== id); if (on) h.push(id); localStorage.setItem('fwh-dash-hidden', JSON.stringify(h)); S.presetSel = null; applyPanelStyles(); buildToolbar(); }
 function getWide(){ try { const w = JSON.parse(localStorage.getItem('fwh-dash-wide')); if (Array.isArray(w)) return w.filter(id => PANEL_IDS.includes(id)); } catch(e){} return []; }
@@ -692,6 +757,21 @@ function getCollapsed(){ if (WALL) return []; try { const c = JSON.parse(localSt
 function setCollapsed(id, on){ const c = getCollapsed().filter(x => x !== id); if (on) c.push(id); localStorage.setItem('fwh-dash-collapsed', JSON.stringify(c)); applyPanelStyles(); }
 function toggleCollapsed(id){ setCollapsed(id, !getCollapsed().includes(id)); }
 function applyLayout(l){ layout = l; localStorage.setItem('fwh-dash-cols', JSON.stringify(l)); }
+// Phones get four tabs instead of one 22-panel scroll. Every panel is on exactly one tab.
+const CAPPED_PANELS = ['sunpath', 'alerts'];
+const PHONE_TABS = {now: ['battery','ribbon','flow','history','alerts'], today: ['plan','sundown','forecast','mode','ebplan','touclock','ev','vpp'], money: ['bill','savings','calendar','attribution'], learned: ['habits','accuracy','batteryhealth','digests','sunpath']};
+const PHONE_TAB_LABELS = {now: 'NOW', today: 'TODAY', money: 'MONEY', learned: 'LEARNED'};
+const PHONE_MQ = window.matchMedia ? window.matchMedia('(max-width:719px)') : { matches: false, addEventListener() {} };
+function isPhone(){ return !WALL && PHONE_MQ.matches; }
+function getPhoneTab(){ try { const t = localStorage.getItem('fwh-dash-tab'); if (t && PHONE_TABS[t]) return t; } catch(e) {} return 'now'; }
+function setPhoneTab(t){ try { localStorage.setItem('fwh-dash-tab', t); } catch(e) {} applyPanelStyles(); renderTabbar(); window.scrollTo({ top: 0 }); }
+function phoneHides(id){ return isPhone() && !PHONE_TABS[getPhoneTab()].includes(id); }
+function renderTabbar(){
+  const bar = $('tabbar'); if (!bar) return;
+  const cur = getPhoneTab();
+  bar.innerHTML = Object.keys(PHONE_TABS).map(t => `<button type="button" data-tab="${t}" class="${t === cur ? 'on' : ''}" aria-pressed="${t === cur}">${PHONE_TAB_LABELS[t]}</button>`).join('');
+  bar.querySelectorAll('button').forEach(b => b.addEventListener('click', () => setPhoneTab(b.dataset.tab)));
+}
 function applyPanelStyles(){
   const hidden = getHidden(), wide = getWide();
   PANEL_IDS.forEach(id => {
@@ -701,7 +781,7 @@ function applyPanelStyles(){
     const idx = li >= 0 ? li : layout.right.indexOf(id);
     const foc = S.focusId === id;
     const wid = !foc && wide.includes(id);
-    el.style.display = hidden.includes(id) ? 'none' : 'block';
+    el.style.display = hidden.includes(id) || phoneHides(id) ? 'none' : 'block';
     const coll = !foc && getCollapsed().includes(id);
     el.classList.toggle('collapsed', coll);
     const cb = el.querySelector('.collbtn'); if (cb) cb.textContent = coll ? '▸' : '▾';
@@ -1254,7 +1334,7 @@ function renderSavings(){
   const s = S.savings;
   if (!s) { $('sav-window-total').textContent = '—'; $('sav-lifetime').textContent = '—'; $('sav-foot').textContent = 'collecting data — savings activate once readings accumulate'; return; }
   $('sav-window').textContent = `${s.days}D WINDOW`;
-  $('sav-window-total').textContent = '$' + s.saved_vs_grid_only.toFixed(2);
+  tweenNum($('sav-window-total'), s.saved_vs_grid_only, v => '$' + v.toFixed(2));
   const cum = s.cumulative;
   $('sav-lifetime').textContent = cum ? '$' + cum.vs_grid.toFixed(2) : '—';
   const parts = [
@@ -1388,8 +1468,8 @@ function renderBill(){
   $('bill-title').textContent = `BILL PROJECTION · CYCLE ${f(b.cycle_start)} – ${f(b.cycle_end)}`;
   $('bill-day').textContent = `DAY ${b.day} OF ${b.days}`;
   $('bill-prog').style.width = (b.day/b.days*100).toFixed(1) + '%';
-  $('bill-mtd').textContent = '$' + b.net_mtd.toFixed(2);
-  $('bill-proj').textContent = '$' + b.projected.toFixed(2);
+  tweenNum($('bill-mtd'), b.net_mtd, v => '$' + v.toFixed(2));
+  tweenNum($('bill-proj'), b.projected, v => '$' + v.toFixed(2));
   const mx = Math.max(b.projected, b.prior_net, 1);
   $('bill-curbar').style.width = (b.projected/mx*100).toFixed(0) + '%';
   $('bill-priorbar').style.width = (b.prior_net/mx*100).toFixed(0) + '%';
@@ -1629,7 +1709,13 @@ async function _promptForToken(){
 }
 async function J(url){
   const headers = _dashToken ? { 'X-Dashboard-Token': _dashToken } : {};
-  const r = await fetch(url, { headers });
+  // A hung request must not leave a panel waiting forever: give up after 12 s (the panel
+  // shows its retry row, or keeps its last good data).
+  const ctl = new AbortController();
+  const tm = setTimeout(() => ctl.abort(), 12000);
+  let r;
+  try { r = await fetch(url, { headers, signal: ctl.signal }); }
+  finally { clearTimeout(tm); }
   if (r.status === 401) {
     const entered = await _promptForToken();
     if (entered) return J(url);
@@ -1726,10 +1812,17 @@ function renderPlan(){
   const usualNew = (p.usual || []).filter(u => !have.has(u.name + '@' + u.start));
   if (usualNew.length) add('+ USUAL ' + new Date().toLocaleDateString('en-US', { weekday: 'long' }).toUpperCase(), () => planSend('set', loads.map(strip).concat(usualNew.map(strip))));
   const t0 = nowT(), nowH = t0.getHours() + t0.getMinutes() / 60;
-  (p.presets || []).slice(0, 2).forEach(pr => add('+ ' + pr.name.toUpperCase(), () => {
-    const start = pr.start + pr.hours < nowH ? Math.min(23, Math.ceil(nowH + 0.5)) : pr.start;
-    planSend('set', loads.map(strip).filter(l => l.name !== pr.name).concat([{ name: pr.name, start, hours: pr.hours, kw: pr.kw }]));
-  }));
+  (p.presets || []).slice(0, 2).forEach(pr => {
+    // With a best time for today, the button says it and plans the load there.
+    const bt = S.best && S.best[pr.name], b = bt && bt.best && bt.best.start_h >= nowH - 0.02 ? bt.best : null;
+    const clock = iso => new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }).toUpperCase();
+    const btn = add('+ ' + pr.name.toUpperCase() + (b ? ' · ' + clock(b.start) : ''), () => {
+      const start = b ? b.start_h : (pr.start + pr.hours < nowH ? Math.min(23, Math.ceil(nowH + 0.5)) : pr.start);
+      planSend('set', loads.map(strip).filter(l => l.name !== pr.name).concat([{ name: pr.name, start, hours: (bt && bt.hours) || pr.hours, kw: (bt && bt.kw) || pr.kw }]));
+    });
+    if (b) btn.title = 'Cheapest time today: about $' + b.cost.toFixed(2)
+      + (bt.worst ? ' (worst ' + clock(bt.worst.start) + ', about $' + bt.worst.cost.toFixed(2) + ')' : '');
+  });
   add('CUSTOM…', () => { const e = $('pl-edit'); e.style.display = e.style.display === 'none' ? 'flex' : 'none'; });
   add('NO BIG LOADS', () => planSend('none', []), p.declared && !loads.length);
   if (p.declared) add('CLEAR', () => planSend('clear', []));
@@ -1746,8 +1839,32 @@ $('pl-add').addEventListener('click', () => {
   const ld = { name: $('pl-name').value, start: hh + (mm || 0) / 60, hours: +$('pl-hours').value || 1, kw: +$('pl-kw').value || 1 };
   planSend('set', (S.plan.loads || []).map(strip).filter(l => l.name !== ld.name).concat([ld]));
 });
+// Routines as a week: Sunday-first columns, midnight at the top, one block per routine, shaded by kW.
+function habitWeekCells(habits){
+  return (habits || []).map(it => ({
+    col: (it.weekday + 1) % 7, top: it.start / 24, height: it.hours / 24, kw: it.kw,
+    label: it.name || '', key: it.key,
+  }));
+}
+function renderHabitWeek(habits){
+  const box = $('hb-week'); if (!box) return;
+  if (!habits || !habits.length) { box.innerHTML = ''; return; }
+  const cells = habitWeekCells(habits), days = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+  const cols = days.map((d, i) => {
+    const blocks = cells.filter(c => c.col === i).map(c => {
+      const a = Math.min(.85, .3 + c.kw / 8);
+      const tip = `${['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][i]} ${c.label || 'routine'} · ${c.kw.toFixed(1)} kW`;
+      return `<div class="hbw-blk" title="${tip}" style="top:${(c.top * 100).toFixed(2)}%;height:${(c.height * 100).toFixed(2)}%;background:rgba(199,155,255,${a.toFixed(2)});"></div>`;
+    }).join('');
+    return `<div style="display:flex;flex-direction:column;gap:4px;align-items:stretch;"><div class="mono" style="text-align:center;font-size:11px;color:#8a8a96;">${d}</div><div class="hbw-col">${blocks}</div></div>`;
+  }).join('');
+  box.innerHTML = `<div style="display:grid;grid-template-columns:28px repeat(7,1fr);gap:6px;align-items:end;">`
+    + `<div class="mono" style="display:flex;flex-direction:column;justify-content:space-between;height:168px;font-size:11px;color:#6e6e7a;text-align:right;"><span>12a</span><span>6a</span><span>12p</span><span>6p</span><span>12a</span></div>`
+    + cols + `</div>`;
+}
 function renderHabits(){
   const h = S.habits; if (!h) return;
+  renderHabitWeek(h.habits);
   const list = $('hb-list'); list.innerHTML = '';
   $('hb-status').textContent = h.habits.length ? h.habits.length + ' LEARNED' : 'NONE YET';
   if (!h.habits.length) { list.appendChild(mkEl('div', 'font-size:13.5px;color:#a0a0ac;line-height:1.5;', 'A big load counts once it shows up three or more times on at least a third of a weekday, over the last 12 weeks.')); return; }
@@ -1802,7 +1919,7 @@ function renderHero(){
   setT('hero-soc', soc + '%');
   setT('hero-soc-s', (S.chg > 0.05 ? '↑ ' + S.chg.toFixed(1) + ' kW' : S.dis > 0.05 ? '↓ ' + S.dis.toFixed(1) + ' kW' : 'idle') + (readingAgeSec() == null ? '' : ' · ' + fmtAge(readingAgeSec())));
   const sd = S.sundown;
-  if (sd && sd.ok) { setT('hero-sd', Math.round(sd.projected_pct) + '%'); setT('hero-sd-s', sd.band ? 'likely ' + Math.round(sd.band.lo) + '–' + Math.round(sd.band.hi) + '%' : ''); }
+  if (sd && sd.ok) { tweenNum($('hero-sd'), Math.round(sd.projected_pct), v => Math.round(v) + '%'); setT('hero-sd-s', sd.band ? 'likely ' + Math.round(sd.band.lo) + '–' + Math.round(sd.band.hi) + '%' : ''); }
   else { setT('hero-sd', sd && sd.reason === 'solar_done' ? 'done' : '—'); setT('hero-sd-s', sd && sd.reason === 'solar_done' ? 'solar is over for today' : ''); }
   const t = nowT(), h = t.getHours() + t.getMinutes() / 60;
   const fmt = hrs => Math.floor(hrs) + 'h ' + String(Math.round((hrs % 1) * 60)).padStart(2, '0') + 'm';
@@ -1830,6 +1947,7 @@ async function pollFast(){
       S.savedToday = c.saved_today || 0;
       S.lastPoll = c.last_poll; S.nextPoll = c.next_poll;
       S.hasData = true; S.fetchFailStreak = 0;
+      markLoaded('battery'); markLoaded('flow');
       renderBanners(); sweep();
     }
     const a = await J('/api/alerts?limit=30');
@@ -1843,76 +1961,255 @@ async function pollFast(){
     S.fetchFailStreak++;
   }
 }
+// ── Day ribbon ─────────────────────────────────────────────────────────
+// Midnight to midnight at the panel's real pixel width (so text never stretches): rate periods as
+// bands, sun as an area, the battery as a line (solid = what happened, dashed = the /sundown walk),
+// the likely range at sundown, planned loads, and sunrise / sunset / now markers.
+const RB = { H: 230, top: 18, bot: 178, padL: 38, padR: 12 };
+function rbX(h, W){ return RB.padL + h / 24 * (W - RB.padL - RB.padR); }
+function rbHour(iso, day){ const t = new Date(iso); return (t - day) / 3600000; }
+function renderRibbon(){
+  const r = S.ribbon, svg = $('rb-svg'), wrap = $('rb-wrap');
+  if (!r || !svg || !wrap) return;
+  const W = Math.max(200, wrap.clientWidth || 600);
+  const day = new Date(r.day + 'T00:00');
+  const x = h => rbX(Math.max(0, Math.min(24, h)), W);
+  const yS = p => RB.bot - Math.max(0, Math.min(100, p)) / 100 * (RB.bot - RB.top);
+  const act = (r.actual || []).map(a => ({ h: rbHour(a.ts, day), soc: a.soc, solar: a.solar, load: a.load }));
+  const proj = (r.projection || []).map(a => ({ h: rbHour(a.ts, day), soc: a.soc, solar: a.solar, load: a.load }));
+  const peak = Math.max(4, ...act.map(a => a.solar || 0), ...proj.map(a => a.solar || 0));
+  const yK = k => RB.bot - Math.max(0, k) / peak * (RB.bot - RB.top) * 0.62;
+  const parts = [];
+  // rate periods, merged into runs
+  const col = { 'ON PEAK': 'rgba(255,194,71,.10)', 'SUPER OFF PEAK': 'rgba(110,150,220,.08)' };
+  let run = null;
+  (r.tou || []).concat([{ hour: 24, period: '' }]).forEach(t => {
+    if (run && run.period === t.period) return;
+    if (run && col[run.period]) parts.push(`<rect x="${x(run.hour).toFixed(1)}" y="${RB.top - 8}" width="${(x(t.hour) - x(run.hour)).toFixed(1)}" height="${RB.bot - RB.top + 8}" fill="${col[run.period]}"/>`
+      + `<text x="${(x(run.hour) + 4).toFixed(1)}" y="${RB.top - 10}" font-size="11" letter-spacing="1.2" fill="${run.period === 'ON PEAK' ? '#a38b4e' : '#6f84a8'}" font-family="Space Grotesk,sans-serif">${run.period === 'ON PEAK' ? 'ON-PEAK' : 'CHEAP'}</text>`);
+    run = t;
+  });
+  // grid lines + % labels
+  [0, 50, 100].forEach(p => parts.push(`<line x1="${RB.padL}" x2="${W - RB.padR}" y1="${yS(p).toFixed(1)}" y2="${yS(p).toFixed(1)}" stroke="rgba(255,255,255,${p ? .06 : .16})"/><text x="${RB.padL - 6}" y="${(yS(p) + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="#8a8a96" font-family="Space Grotesk,sans-serif">${p}%</text>`));
+  // sun: actual solid, forecast faint
+  const area = (pts, fill, stroke, dash) => {
+    if (pts.length < 2) return '';
+    const line = pts.map((p, i) => (i ? 'L' : 'M') + x(p.h).toFixed(1) + ',' + yK(p.solar || 0).toFixed(1)).join('');
+    return `<path d="${line}L${x(pts[pts.length - 1].h).toFixed(1)},${RB.bot}L${x(pts[0].h).toFixed(1)},${RB.bot}Z" fill="${fill}"/><path d="${line}" fill="none" stroke="${stroke}" stroke-width="1.2"${dash ? ' stroke-dasharray="3 3"' : ''}/>`;
+  };
+  parts.push(area(act, 'rgba(255,194,71,.16)', 'rgba(255,194,71,.55)', false));
+  parts.push(area(proj, 'rgba(255,194,71,.07)', 'rgba(255,194,71,.35)', true));
+  // planned loads along the bottom
+  (r.plan || []).forEach(ld => {
+    const x0 = x(+ld.start), x1 = x(+ld.start + +ld.hours);
+    parts.push(`<rect x="${x0.toFixed(1)}" y="${RB.bot - 9}" width="${Math.max(3, x1 - x0).toFixed(1)}" height="7" rx="3" fill="rgba(199,155,255,.55)"><title>${String(ld.name).replace(/[<&>"]/g, '')} · ${(+ld.kw).toFixed(1)} kW</title></rect>`);
+    if (x1 - x0 > 34) parts.push(`<text x="${((x0 + x1) / 2).toFixed(1)}" y="${RB.bot - 13}" text-anchor="middle" font-size="11" fill="#c7a9f0" font-family="Inter,sans-serif">${String(ld.name).replace(/[<&>"]/g, '')}</text>`);
+  });
+  // battery line
+  const path = pts => pts.map((p, i) => (i ? 'L' : 'M') + x(p.h).toFixed(1) + ',' + yS(p.soc).toFixed(1)).join('');
+  if (act.length > 1) parts.push(`<path d="${path(act)}" fill="none" stroke="#3ddc97" stroke-width="2.2" stroke-linejoin="round"/>`);
+  if (proj.length > 1) parts.push(`<path d="${path(proj)}" fill="none" stroke="#3ddc97" stroke-width="1.8" stroke-dasharray="5 4" opacity=".75"/>`);
+  // likely range at sundown + sunset marker
+  if (r.sunset) {
+    const sx = x(rbHour(r.sunset, day));
+    parts.push(`<line x1="${sx.toFixed(1)}" x2="${sx.toFixed(1)}" y1="${RB.top - 4}" y2="${RB.bot}" stroke="rgba(255,255,255,.22)" stroke-dasharray="2 4"/>`);
+    parts.push(`<text x="${sx.toFixed(1)}" y="${RB.bot + 30}" text-anchor="middle" font-size="11" fill="#c8b07a" font-family="Space Grotesk,sans-serif">SUNSET ${new Date(r.sunset).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</text>`);
+    if (r.band) parts.push(`<rect x="${(sx - 4).toFixed(1)}" y="${yS(r.band.hi).toFixed(1)}" width="8" height="${Math.max(2, yS(r.band.lo) - yS(r.band.hi)).toFixed(1)}" rx="4" fill="rgba(61,220,151,.28)"><title>likely ${Math.round(r.band.lo)}–${Math.round(r.band.hi)}% at sundown</title></rect>`);
+    if (r.sundown_pct != null) parts.push(`<circle cx="${sx.toFixed(1)}" cy="${yS(r.sundown_pct).toFixed(1)}" r="4.5" fill="#3ddc97" stroke="#050507" stroke-width="2"/><text x="${(sx + 9).toFixed(1)}" y="${(yS(r.sundown_pct) - 7).toFixed(1)}" font-size="12" fill="#e8f7ef" font-family="Space Grotesk,sans-serif">${Math.round(r.sundown_pct)}%</text>`);
+  }
+  // now marker
+  const nh = rbHour(r.now, day);
+  parts.push(`<line x1="${x(nh).toFixed(1)}" x2="${x(nh).toFixed(1)}" y1="${RB.top - 4}" y2="${RB.bot}" stroke="rgba(255,255,255,.55)"/><text x="${x(nh).toFixed(1)}" y="${RB.bot + 30}" text-anchor="middle" font-size="11" letter-spacing="1" fill="#f2f2f5" font-family="Space Grotesk,sans-serif">NOW</text>`);
+  // hour labels
+  [0, 6, 12, 18, 24].forEach(h => parts.push(`<text x="${x(h).toFixed(1)}" y="${RB.bot + 15}" text-anchor="middle" font-size="11" fill="#8a8a96" font-family="Space Grotesk,sans-serif">${h === 12 ? '12p' : h % 24 === 0 ? '12a' : h < 12 ? h + 'a' : (h - 12) + 'p'}</text>`));
+  parts.push(`<line id="rb-cur" x1="0" x2="0" y1="${RB.top - 4}" y2="${RB.bot}" stroke="#ffc247" stroke-width="1.2" style="display:none"/>`);
+  svg.setAttribute('viewBox', `0 0 ${W} ${RB.H}`);
+  svg.innerHTML = parts.join('');
+  S.ribbonGeom = { W, act, proj, day };
+}
+// Scrub: the readout has its own fixed-height line, so the panel never changes height.
+(() => {
+  const wrap = $('rb-wrap'); if (!wrap) return;
+  let pending = null;
+  const show = ev => {
+    const g = S.ribbonGeom, r = S.ribbon; if (!g || !r) return;
+    const box = wrap.getBoundingClientRect();
+    const h = Math.max(0, Math.min(24, (ev.clientX - box.left - RB.padL) / (box.width - RB.padL - RB.padR) * 24));
+    const pick = (pts) => pts.reduce((b, p) => !b || Math.abs(p.h - h) < Math.abs(b.h - h) ? p : b, null);
+    const a = pick(g.act), p = pick(g.proj);
+    const src = (a && (!p || Math.abs(a.h - h) <= Math.abs(p.h - h))) ? a : p;
+    const cur = $('rb-cur');
+    if (cur) { cur.style.display = ''; cur.setAttribute('x1', rbX(h, g.W).toFixed(1)); cur.setAttribute('x2', rbX(h, g.W).toFixed(1)); }
+    const t = new Date(g.day.getTime() + h * 3600000);
+    const tou = (r.tou || [])[Math.min(23, Math.floor(h))];
+    const when = t.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    $('rb-info').textContent = src ? `${when} · battery ${Math.round(src.soc)}%${src === p ? ' (projected)' : ''} · sun ${(src.solar || 0).toFixed(1)} kW · house ${(src.load || 0).toFixed(1)} kW${tou ? ' · ' + tou.period + ' $' + (+tou.rate).toFixed(2) : ''}` : when;
+  };
+  wrap.addEventListener('pointermove', ev => { if (pending) return; pending = requestAnimationFrame(() => { pending = null; show(ev); }); });
+  wrap.addEventListener('pointerleave', () => { const cur = $('rb-cur'); if (cur) cur.style.display = 'none'; $('rb-info').textContent = ''; });
+  if ('ResizeObserver' in window) new ResizeObserver(() => renderRibbon()).observe(wrap);
+})();
+
+// ── Year heatmap ───────────────────────────────────────────────────────
+// One square per day, Sunday-to-Saturday columns, one green ramp (darker = less). Tap or hover a
+// square for its numbers; the readout has its own line so nothing moves.
+const CAL_RAMP = ['rgba(255,255,255,.06)', '#173d2e', '#1f6347', '#2b8f63', '#3ddc97'];
+function calBin(v, metric, max){
+  if (v == null) return 0;
+  const f = metric === 'self' ? v / 100 : (max > 0 ? v / max : 0);
+  return f >= .9 ? 4 : f >= .7 ? 3 : f >= .4 ? 2 : 1;
+}
+function renderCalendar(){
+  const c = S.calendar, grid = $('cal-grid'); if (!c || !grid) return;
+  const metric = c.metric || 'self';
+  $('cal-title').textContent = metric === 'self' ? 'YEAR · SELF-SUFFICIENCY' : 'YEAR · SAVED BY BATTERY + SOLAR';
+  $('cal-self').classList.toggle('on', metric === 'self'); $('cal-saved').classList.toggle('on', metric === 'saved');
+  const byDate = new Map((c.days || []).map(d => [d.date, d]));
+  const max = Math.max(0, ...(c.days || []).map(d => d.value || 0));
+  const end = new Date(); end.setHours(0, 0, 0, 0);
+  const start = new Date(end); start.setDate(start.getDate() - 364 - start.getDay());     // a Sunday, ~a year back
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const cells = [];
+  for (const d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    const k = iso(d), row = byDate.get(k);
+    cells.push(`<div data-d="${k}" style="width:12px;height:12px;border-radius:3px;background:${CAL_RAMP[calBin(row && row.value, metric, max)]};${k === iso(end) ? 'outline:1px solid rgba(255,255,255,.5);outline-offset:1px;' : ''}"></div>`);
+  }
+  grid.innerHTML = cells.join('');
+  $('cal-key').innerHTML = 'less ' + CAL_RAMP.map(col => `<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${col}"></span>`).join('') + ' more';
+  const sc = $('cal-scroll'); sc.scrollLeft = sc.scrollWidth;                               // today in view on a phone
+  const n = (c.days || []).length;
+  const avg = n ? (c.days.reduce((a, d) => a + d.value, 0) / n) : 0;
+  $('cal-info').textContent = n ? (metric === 'self' ? `${n} days · ${avg.toFixed(0)}% self-sufficient on average` : `${n} days · $${(avg * n).toFixed(0)} saved in all`) : 'collecting days…';
+  S.calByDate = byDate;
+}
+(() => {
+  const grid = $('cal-grid'); if (!grid) return;
+  const show = el => {
+    const k = el && el.dataset && el.dataset.d; if (!k) return;
+    const row = S.calByDate && S.calByDate.get(k), metric = (S.calendar && S.calendar.metric) || 'self';
+    const day = new Date(k + 'T12:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    if (!row) { $('cal-info').textContent = day + ' · no data'; return; }
+    const d = row.detail || {};
+    $('cal-info').textContent = metric === 'self'
+      ? `${day} · ${Math.round(row.value)}% self-sufficient · battery ${(+d.battery_kwh || 0).toFixed(1)} · sun ${(+d.solar_kwh || 0).toFixed(1)} · grid ${(+d.grid_kwh || 0).toFixed(1)} kWh`
+      : `${day} · saved $${row.value.toFixed(2)} · paid $${(+d.import_cost || 0).toFixed(2)} for imports`;
+  };
+  grid.addEventListener('pointerover', e => show(e.target));
+  grid.addEventListener('click', e => show(e.target));
+  const pick = m => { S.calMetric = m; const t = SLOW_TASKS.find(x => String(x.url()).includes('/api/calendar')); if (t) runTask(t); };
+  $('cal-self').addEventListener('click', () => pick('self'));
+  $('cal-saved').addEventListener('click', () => pick('saved'));
+})();
+
+// ── Loading states: skeleton until a panel's first data, a retry row if that fails ──
+const _loaded = new Set();
+function markLoading(id){
+  const el = grid.querySelector(`[data-panel="${id}"]`);
+  if (!el || _loaded.has(id) || el.querySelector(':scope > .skel')) return;
+  el.classList.add('loading');
+  const sk = document.createElement('div');
+  sk.className = 'skel'; sk.innerHTML = '<i></i><i></i><i></i><i></i>';
+  el.appendChild(sk);
+}
+function markLoaded(id){
+  _loaded.add(id);
+  const el = grid.querySelector(`[data-panel="${id}"]`);
+  if (!el) return;
+  el.classList.remove('loading');
+  el.querySelectorAll(':scope > .skel, :scope > .pfail, :scope > .pstale').forEach(n => n.remove());
+}
+function markFailed(id, retry){
+  const el = grid.querySelector(`[data-panel="${id}"]`);
+  if (!el) return;
+  el.querySelectorAll(':scope > .pfail, :scope > .pstale').forEach(n => n.remove());
+  if (_loaded.has(id)) {                       // keep the last good data, just say the refresh failed
+    const tag = document.createElement('span');
+    tag.className = 'pstale mono'; tag.textContent = '⚠ UPDATE FAILED · RETRY';
+    tag.title = 'Showing the last data that loaded. Click to retry.';
+    tag.addEventListener('click', e => { e.stopPropagation(); tag.remove(); retry(); });
+    el.appendChild(tag);
+    return;
+  }
+  el.querySelectorAll(':scope > .skel').forEach(n => n.remove());
+  const row = document.createElement('div');
+  row.className = 'pfail';
+  row.innerHTML = '<span>Couldn\'t load this panel.</span><button type="button">RETRY</button>';
+  row.querySelector('button').addEventListener('click', e => { e.stopPropagation(); row.remove(); markLoading(id); retry(); });
+  el.appendChild(row);
+}
+
+// Each slow endpoint paints its own panel the moment it lands. They used to be awaited
+// together, so one slow endpoint (the weather API timing out) left every panel blank.
+const SLOW_TASKS = [
+  { url: () => '/api/history?hours=48', panels: ['history'], apply: hv => {
+      const todayStart = Date.now() - 24*3600000;
+      S.hist = resample(hv.samples, todayStart); S.histY = resample(hv.samples, todayStart - 24*3600000); renderHistory(); } },
+  { url: () => '/api/forecast', panels: ['forecast'], apply: fv => {
+      S.forecast = (fv.hours || []).slice(0, 12);
+      S.cap = fv.battery_capacity_kwh || S.cap;
+      S.forecastHealth = { perfRatio: fv.perf_ratio, cloudy: fv.cloudy_today, systemPeakKw: fv.system_peak_kw };
+      S.forecastSrc = { source: fv.forecast_source, ageMin: fv.forecast_age_min };
+      renderForecastSource(); renderForecast(); } },
+  { url: () => '/api/accuracy', panels: ['accuracy'], apply: v => { S.acc = v.days; renderAccuracy(); } },
+  { url: () => '/api/tou', panels: ['touclock'], apply: v => { S.tou = v; renderTou(); } },
+  { url: () => '/api/bill', panels: ['bill'], apply: v => { S.bill = v; renderBill(); } },
+  { url: () => '/api/recommendation', panels: ['mode', 'ebplan'], apply: v => { S.rec = v.recommendation || null; S.eb = v.eb_plan; renderMode(); } },
+  { url: () => '/api/health', panels: [], apply: healthv => {
+      S.apiHealth = healthv || S.apiHealth;
+      const badge = $('hd-apierrors');
+      if (healthv && healthv.consec_errors > 0) {
+        badge.style.display = '';
+        badge.title = `${healthv.consec_errors} consecutive poll failures — ${healthv.last_error || 'unknown error'}`;
+      } else if (healthv) badge.style.display = 'none'; } },
+  { url: () => '/api/battery-health', panels: ['batteryhealth'], apply: v => { S.batteryHealth = v.weeks || []; S.batteryHealthNameplate = v.nameplate_kwh || 0; renderBatteryHealth(); } },
+  { url: () => '/api/ev', panels: ['ev'], apply: v => { S.ev = v; renderEv(); } },
+  { url: () => `/api/attribution?days=${S.attrWindowDays}`, panels: ['attribution'], apply: v => { S.attribution = v.days || []; renderAttribution(); } },
+  { url: () => '/api/savings?days=30', panels: ['savings'], apply: v => { if (v.error) throw new Error('savings: ' + v.error); S.savings = v; renderSavings(); } },
+  { url: () => '/api/vpp', panels: ['vpp'], apply: v => { S.vpp = v; renderVpp(); } },
+  { url: () => '/api/sundown', panels: ['sundown'], apply: v => { S.sundown = v; renderSundown(); } },
+  { url: () => '/api/plan', panels: ['plan'], apply: v => { S.plan = v; renderPlan(); } },
+  { url: () => '/api/habits', panels: ['habits'], apply: v => { S.habits = v; renderHabits(); } },
+  // Cheapest start for each quick-add load (besttime.py); feeds the Plan panel's buttons.
+  { url: () => '/api/besttime', panels: [], apply: v => { S.best = v && v.ok ? v.loads : null; renderPlan(); } },
+  { url: () => '/api/ribbon', panels: ['ribbon'], apply: v => { S.ribbon = v; renderRibbon(); } },
+  { url: () => '/api/calendar?metric=' + (S.calMetric || 'self'), panels: ['calendar'], apply: v => { S.calendar = v; renderCalendar(); } },
+];
+function runTask(t){
+  return J(t.url()).then(v => { t.apply(v); t.panels.forEach(markLoaded); return v; })
+    .catch(e => { t.panels.forEach(id => markFailed(id, () => runTask(t))); throw e; });
+}
 async function pollSlow(){
-  // allSettled (not all) so one failing endpoint only skips its own panel's
-  // update instead of blanking all 7 slow-refresh panels for the cycle —
-  // each panel keeps showing its last-known-good data until that specific
-  // endpoint recovers.
-  const [h, f, acc, tou, bill, rec, health, bh, ev, attr, sav, vpp, sd, pl, hb] = await Promise.allSettled([
-    J('/api/history?hours=48'), J('/api/forecast'), J('/api/accuracy'),
-    J('/api/tou'), J('/api/bill'), J('/api/recommendation'), J('/api/health'),
-    J('/api/battery-health'), J('/api/ev'), J(`/api/attribution?days=${S.attrWindowDays}`), J('/api/savings?days=30'),
-    J('/api/vpp'), J('/api/sundown'), J('/api/plan'), J('/api/habits'),
-  ]);
-  const ok = r => r.status === 'fulfilled' ? r.value : null;
-  const now = Date.now();
-  const todayStart = now - 24*3600000;
+  return Promise.allSettled(SLOW_TASKS.map(runTask));
+}
 
-  const hv = ok(h);
-  if (hv) { S.hist = resample(hv.samples, todayStart); S.histY = resample(hv.samples, todayStart - 24*3600000); renderHistory(); }
-
-  const fv = ok(f);
-  if (fv) {
-    S.forecast = (fv.hours || []).slice(0, 12);
-    S.cap = fv.battery_capacity_kwh || S.cap;
-    S.forecastHealth = { perfRatio: fv.perf_ratio, cloudy: fv.cloudy_today, systemPeakKw: fv.system_peak_kw };
-    renderForecast();
+function renderForecastSource(){
+  const el = $('f-src'), src = S.forecastSrc;
+  if (!el || !src) return;
+  let txt = '';
+  if (src.source === 'nws') txt = 'NWS FALLBACK';
+  else if (src.ageMin != null && src.ageMin > 60) {
+    const d = new Date(Date.now() - src.ageMin * 60000);
+    txt = 'FORECAST FROM ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }).toUpperCase();
   }
+  el.textContent = txt; el.style.display = txt ? '' : 'none';
+  el.title = src.source === 'nws' ? 'Open-Meteo is unavailable; this is the National Weather Service sky-cover estimate.'
+                                  : 'Open-Meteo has not answered recently; this is the last forecast it gave.';
+}
 
-  const sdv = ok(sd);
-  if (sdv) { S.sundown = sdv; renderSundown(); }
-
-  const plv = ok(pl);
-  if (plv) { S.plan = plv; renderPlan(); }
-  const hbv = ok(hb);
-  if (hbv) { S.habits = hbv; renderHabits(); }
-
-  const accv = ok(acc);
-  if (accv) { S.acc = accv.days; renderAccuracy(); }
-
-  const touv = ok(tou);
-  if (touv) { S.tou = touv; renderTou(); }
-
-  const billv = ok(bill);
-  if (billv) { S.bill = billv; renderBill(); }
-
-  const recv = ok(rec);
-  if (recv) { S.rec = recv.recommendation || null; S.eb = recv.eb_plan; renderMode(); }
-
-  const bhv = ok(bh);
-  if (bhv) { S.batteryHealth = bhv.weeks || []; S.batteryHealthNameplate = bhv.nameplate_kwh || 0; renderBatteryHealth(); }
-
-  const evv = ok(ev);
-  if (evv) { S.ev = evv; renderEv(); }
-
-  const vppv = ok(vpp);
-  if (vppv) { S.vpp = vppv; renderVpp(); }
-
-  const attrv = ok(attr);
-  if (attrv) { S.attribution = attrv.days || []; renderAttribution(); }
-
-  const savv = ok(sav);
-  if (savv && !savv.error) { S.savings = savv; renderSavings(); }
-
-  const healthv = ok(health);
-  S.apiHealth = healthv || S.apiHealth;
-  const badge = $('hd-apierrors');
-  if (healthv && healthv.consec_errors > 0) {
-    badge.style.display = '';
-    badge.title = `${healthv.consec_errors} consecutive poll failures — ${healthv.last_error || 'unknown error'}`;
-  } else if (healthv) {
-    badge.style.display = 'none';
-  }
+// Count a number up/down to its new value. Battery %, solar, load and saved already ease through D.
+function tweenNum(el, to, fmt){
+  if (!el || !Number.isFinite(to)) return;
+  const from = Number.isFinite(el._tv) ? el._tv : to;
+  el._tv = to;
+  if (from === to || (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches)) { el.textContent = fmt(to); return; }
+  const t0 = performance.now(), dur = 400, tok = (el._tt = (el._tt || 0) + 1);
+  const step = now => {
+    if (el._tt !== tok) return;                // a newer tween took over
+    const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = fmt(k >= 1 ? to : from + (to - from) * e);
+    if (k < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 // ── Demo simulation (?demo=1) — prototype engine, no server needed ──
@@ -2052,6 +2349,33 @@ buildToolbar();
 applyPanelStyles();
 renderDigests();
 renderAlerts();
+// Phone tab bar and the tall panels capped (phones only; the CSS does nothing on wider screens).
+{
+  const bar = document.createElement('nav'); bar.id = 'tabbar'; bar.setAttribute('aria-label', 'Dashboard sections');
+  document.body.appendChild(bar); renderTabbar();
+  try { PHONE_MQ.addEventListener('change', () => { applyPanelStyles(); renderTabbar(); }); } catch(e) {}
+  CAPPED_PANELS.forEach(id => {
+    const el = grid.querySelector(`[data-panel="${id}"]`); if (!el) return;
+    el.classList.add('capped');
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'capbtn'; b.textContent = 'SHOW ALL ▾';
+    b.addEventListener('click', e => { e.stopPropagation(); el.classList.remove('capped'); });
+    el.appendChild(b);
+  });
+  applyPanelStyles();
+}
+// Entry animation only while it runs: a card can never be left invisible by a stalled
+// animation (a background tab, a slow phone), because the class goes after 2 s regardless.
+if (!WALL) {
+  document.querySelectorAll('main#grid > .card, .hero-tile').forEach(el => {
+    el.classList.add('enter');
+    el.addEventListener('animationend', e => { if (e.target === el) el.classList.remove('enter'); });
+  });
+  setTimeout(() => document.querySelectorAll('.enter').forEach(el => el.classList.remove('enter')), 2000);
+}
+if (!DEMO) {
+  SLOW_TASKS.forEach(t => t.panels.forEach(markLoading));
+  ['battery', 'flow'].forEach(markLoading);
+}
 if (DEMO) {
   demoData();
 } else {

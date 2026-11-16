@@ -285,13 +285,13 @@ def wait_with_fast_polls(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     now: Callable[[], datetime] = datetime.now,
+    on_reading: Callable[[Any], None] | None = None,
 ) -> None:
     """Replace `sleep(until the next normal poll)`: with fast polling off, or a quiet house,
     this is exactly one sleep. While load is high it wakes every few minutes to re-read the
     gateway, then returns at `deadline` (a `monotonic()` time) so the normal poll stays on time."""
     outdir = Path(outdir)
     interval = effective_interval_s(cfg)
-    threshold = load_threshold_kw(cfg)
     stats = last_stats
     announced = False
 
@@ -299,7 +299,7 @@ def wait_with_fast_polls(
         remaining = deadline - monotonic()
         if remaining <= 0:
             return
-        if not is_enabled(cfg, outdir) or guard.stopped or not is_hot(stats, threshold):
+        if not is_enabled(cfg, outdir) or guard.stopped or not wants_fast(stats, cfg, now()):
             sleep(remaining)
             return
         if not announced:                    # tell the dashboard the next reading is sooner than 5 min
@@ -333,6 +333,133 @@ def wait_with_fast_polls(
         if guard.ok(now()):
             save_state(outdir, guard)
         stats = new
+        append_reading(outdir, now(), new)
         after = deadline - monotonic()
-        soon = now() + timedelta(seconds=max(0.0, min(after, interval)) if is_hot(stats, threshold) else max(0.0, after))
+        soon = now() + timedelta(seconds=max(0.0, min(after, interval)) if wants_fast(stats, cfg, now()) else max(0.0, after))
         write_live(outdir, stats, now(), soon)
+        if on_reading is not None:
+            try:
+                on_reading(new)
+            except Exception:                # noqa: BLE001  (a detector bug must not break the wait)
+                logger.exception("Fast-reading hook failed")
+
+
+# ── the normal poll's own back-off ───────────────────────────────────────────────────────────────
+#
+# The 5-minute poll used to retry at the same pace however long FranklinWH was failing, which is
+# the pattern most likely to get an account throttled. It now stretches the wait after repeated
+# failures, waits 30 minutes on throttling and an hour on a locked login, and never polls faster
+# than watch_interval. The outage alert keeps firing after ~40 minutes of failures, not after a
+# fixed count that the longer waits would delay.
+
+_BACKOFF_CAP_S = 30 * 60
+_OUTAGE_ALERT_AFTER_S = 35 * 60
+
+
+def normal_poll_wait_s(consec_errors: int, last_exc: BaseException | None, interval_min: float) -> int:
+    """Seconds until the next normal poll."""
+    base = int(round(max(1.0, float(interval_min)) * 60))
+    if consec_errors <= 0 or last_exc is None:
+        return base
+    kind = classify(last_exc)
+    if kind == "locked":
+        return max(base, 60 * 60)
+    if kind == "throttled":
+        return max(base, _BACKOFF_CAP_S)
+    if consec_errors >= 5:
+        wait = 20 * 60
+    elif consec_errors >= 3:
+        wait = 10 * 60
+    else:
+        wait = base
+    return max(base, min(wait, _BACKOFF_CAP_S))
+
+
+def error_alert_threshold(interval_min: float) -> int:
+    """How many failures in a row make the ~40-minute outage alert, given the back-off above."""
+    waited, n = 0, 1
+    while waited < _OUTAGE_ALERT_AFTER_S and n < 100:
+        waited += normal_poll_wait_s(n, RuntimeError("poll failed"), interval_min)
+        n += 1
+    return max(2, n)
+
+
+# ── fast readings for the detectors that care about minutes ──────────────────────────────────────
+#
+# The last hour of fast readings, kept in a small file (never in history.db). Only two detectors
+# read them, through MergedStore: the car-charging-on-peak alert (minutes there cost on-peak money)
+# and "what was that?". Their rules are in minutes, not reading counts, so a denser stretch can't
+# make a short draw look long.
+
+FAST_READINGS_FILE = ".fast_readings.json"
+_FAST_KEEP = timedelta(minutes=60)
+_DEFAULT_PEAK_LOAD_KW = 1.6        # the car-on-peak signature's floor
+
+
+def append_reading(outdir: Path, at: datetime, stats: Any) -> None:
+    """Add one fast reading and drop anything older than an hour. Never raises."""
+    try:
+        c = stats.current
+        home = _finite(c.home_load_kw)
+        if home is None:
+            return
+        row = [at.isoformat(), _finite(c.grid_use_kw) or 0.0, home, _finite(c.solar_production_kw) or 0.0]
+        target = Path(outdir) / FAST_READINGS_FILE
+        cutoff = (at - _FAST_KEEP).isoformat()
+        rows = [r for r in _read_rows(target) if r[0] >= cutoff] + [row]
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(rows, allow_nan=False))
+        tmp.replace(target)
+    except (OSError, AttributeError, TypeError, ValueError):
+        logger.debug("Couldn't record a fast reading", exc_info=True)
+
+
+def _read_rows(target: Path) -> list:
+    try:
+        rows = json.loads(target.read_text())
+    except (OSError, ValueError):
+        return []
+    return [r for r in rows if isinstance(r, list) and len(r) == 4 and isinstance(r[0], str)] if isinstance(rows, list) else []
+
+
+def recent(outdir: Path, since: datetime, now: datetime | None = None) -> list[tuple[str, float, float, float]]:
+    """Fast readings at or after `since` and within the last hour, oldest first."""
+    now = now or datetime.now()
+    lo = max(since, now - _FAST_KEEP).isoformat()
+    return [(r[0], float(r[1]), float(r[2]), float(r[3])) for r in _read_rows(Path(outdir) / FAST_READINGS_FILE)
+            if r[0] >= lo]
+
+
+class MergedStore:
+    """A HistoryStore whose readings_between also includes the fast readings. Everything else is
+    passed straight through to the real store."""
+
+    def __init__(self, store: Any, outdir: Path, now: Callable[[], datetime] = datetime.now):
+        self._store, self._outdir, self._now = store, Path(outdir), now
+
+    def readings_between(self, start_iso: str, end_iso: str):
+        rows = list(self._store.readings_between(start_iso, end_iso))
+        seen = {r[0] for r in rows}
+        try:
+            since = datetime.fromisoformat(start_iso)
+        except ValueError:
+            return rows
+        for r in recent(self._outdir, since=since, now=self._now()):
+            if start_iso <= r[0] < end_iso and r[0] not in seen:
+                rows.append(r)
+        return sorted(rows, key=lambda r: r[0])
+
+    def __getattr__(self, name: str):
+        return getattr(self._store, name)
+
+
+def wants_fast(stats: Any, cfg: Any, at: datetime) -> bool:
+    """Poll fast while the house draws a lot, and during on-peak while it draws a car's worth."""
+    if is_hot(stats, load_threshold_kw(cfg)):
+        return True
+    try:
+        peak_kw = float(getattr(cfg, "fast_poll_peak_load_kw", _DEFAULT_PEAK_LOAD_KW))
+    except (TypeError, ValueError):
+        peak_kw = _DEFAULT_PEAK_LOAD_KW
+    from .tou import TouPeriod, period_at
+    return period_at(at) == TouPeriod.ON_PEAK and is_hot(stats, peak_kw)

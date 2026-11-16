@@ -24,6 +24,7 @@ from .alerts import (
     _PR_BIAS_FIX_DATE,
     _SOLAR_CAL_LOG_FILE,
     _check_peak_alerts,
+    check_fast_alerts as _check_fast_alerts,
     ewma_vs_constant_backtest,
     maybe_probe_mode,
     _get_hourly_bias,
@@ -2250,6 +2251,10 @@ def cmd_advise(
     _enforce_run_on_host(cfg, watch)
 
     outdir    = Path(out)
+    # The last good forecast goes to outdir too, so the dashboard reads it instead of
+    # calling Open-Meteo itself, and a restart during an outage still has one.
+    from .weather import set_cache_dir
+    set_cache_dir(outdir)
     log_path  = outdir / "advisor_log.jsonl"
     db_path   = outdir / "history.db"
     last_mode = _load_last_mode(outdir)   # persists across cron runs
@@ -2327,7 +2332,13 @@ def cmd_advise(
         # can still accumulate a multi-cycle failure streak instead of the
         # "N poll errors in a row" alert being structurally unreachable.
         _consec_errors   = _read_consec_errors(outdir)
-        _ERROR_THRESHOLD = 8
+        # Failures in a row that make the ~40-minute outage alert. The normal poll backs off
+        # after repeated failures (fastpoll.normal_poll_wait_s), so this is worked out from the
+        # back-off rather than fixed at 8 x 5 minutes.
+        from . import fastpoll as _fastpoll
+        _ERROR_THRESHOLD = _fastpoll.error_alert_threshold(interval)
+        _last_poll_exc: Exception | None = None
+        _lock_alerted = False
         _last_stats      = _load_last_stats(outdir)  # cached for time-gated alerts during API outages; survives a restart
         _lic_warn_date   = ""    # one grace-period Telegram warning per day
 
@@ -2352,7 +2363,6 @@ def cmd_advise(
 
         # Faster readings while the house draws a lot (fastpoll.py). Off unless fast_poll is set;
         # the breaker state is reloaded so a restart can't forget a throttle or an account lock.
-        from . import fastpoll as _fastpoll
         _fast_guard = _fastpoll.load_state(outdir, _fastpoll.FastPollGuard.for_config(cfg))
         if getattr(cfg, "fast_poll", False):
             if _fast_guard.stopped:
@@ -2485,7 +2495,8 @@ def cmd_advise(
                 _print_recommendation(rec, stats, usage_forecast, cfg.location_name)
                 notify_log(rec, log_path)
                 _dispatch_notifications(rec, cfg, notify, last_mode, outdir)
-                _check_peak_alerts(stats, cfg, outdir, outlook=outlook, usage_forecast=usage_forecast, store=history)
+                _check_peak_alerts(stats, cfg, outdir, outlook=outlook, usage_forecast=usage_forecast, store=history,
+                                   fast_store=_fastpoll.MergedStore(history, outdir))
 
                 # EV controller runs on its own try/except: a Tesla failure
                 # must never inflate _consec_errors (that path alerts about
@@ -2505,10 +2516,19 @@ def cmd_advise(
                     _recovered_msg = "✅ FranklinWH Advisor: poll errors resolved — alerts resuming."
                     _send_alert(_recovered_msg, cfg, urgent=False)
                 _consec_errors = 0
+                _last_poll_exc = None
+                _lock_alerted = False
                 _write_health_marker(outdir, 0, None, success=True)
 
             except Exception as e:
                 _consec_errors += 1
+                _last_poll_exc = e
+                if _fastpoll.classify(e) == "locked" and not _lock_alerted:
+                    _lock_alerted = True
+                    _send_alert(
+                        f"🔒 FranklinWH rejected the advisor's login (locked account or wrong password): {e}\n"
+                        "Polling slows to once an hour so it can't make a lockout worse. Check the FranklinWH "
+                        "app; the advisor speeds back up on its own once a login works.", cfg, urgent=True)
                 if not _poll_timed:
                     _record_poll_timing(history, _poll_t0, False, f"{type(e).__name__}: {e}")
                 logger.exception("Watch loop error")
@@ -2568,7 +2588,7 @@ def cmd_advise(
                 break
 
             click.echo(click.style(
-                f"  Next check in {interval} min — Ctrl+C to stop",
+                f"  Next check in {_fastpoll.normal_poll_wait_s(_consec_errors, _last_poll_exc, interval) // 60} min — Ctrl+C to stop",
                 dim=True,
             ))
             try:
@@ -2578,9 +2598,12 @@ def cmd_advise(
                 _fastpoll.wait_with_fast_polls(
                     client=client, gateway=gateway, outdir=outdir, cfg=cfg,
                     last_stats=_last_stats if _consec_errors == 0 else None,
-                    deadline=time.monotonic() + interval * 60, guard=_fast_guard,
+                    deadline=time.monotonic() + _fastpoll.normal_poll_wait_s(_consec_errors, _last_poll_exc, interval),
+                    guard=_fast_guard,
                     alert=lambda msg, urgent=False: _send_alert(msg, cfg, urgent=urgent),
                     sleep=time.sleep,
+                    # the car-on-peak check right after each fast reading, not 5 minutes later
+                    on_reading=lambda st: _check_fast_alerts(st, cfg, outdir, _fastpoll.MergedStore(history, outdir)),
                 )
                 click.echo()
             except KeyboardInterrupt:
