@@ -131,6 +131,17 @@ class Config:
     ev_battery_first_soc: float = 80.0  # FWH battery tops up before EV gets surplus
     ev_reserve_kw: float = 0.25       # headroom so rounding never imports from grid
 
+    # Rheem heat pump water heater control (EcoNet). See wh_policy.py.
+    # Credentials live in ~/.franklinwh_econet.json, not here.
+    wh_control_enabled: bool = False  # master gate
+    wh_dry_run: bool = True           # log decisions, send no commands (safe rollout)
+    wh_normal_mode: str = "heat_pump"  # heat_pump (most efficient) | energy_saver | high_demand
+    wh_normal_setpoint_f: int = 125
+    wh_peak_setpoint_f: int = 120     # wh_policy floors every setpoint at 120 F
+    wh_pre_peak_setpoint_f: int = 130
+    wh_bank_setpoint_f: int = 135     # solar banking; capped at 140 F
+    wh_battery_first_soc: float = 80.0  # FWH battery tops up before the tank banks heat
+
     # Per-alert opt-outs.  Empty = all alerts enabled.
     # Values are alert-name strings (function suffix after _alert_).
     disabled_alerts: list[str] = field(default_factory=list)
