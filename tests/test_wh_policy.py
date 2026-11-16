@@ -21,7 +21,7 @@ from franklinwh_scraper.wh_policy import (
 
 def _heater(**kw) -> WaterHeaterState:
     defaults = dict(
-        mode=WhMode.HEAT_PUMP, setpoint_f=125, running=False,
+        mode=WhMode.HEAT_PUMP, setpoint_f=120, running=False,
         fetched_at=datetime(2026, 7, 15, 12, 0),
     )
     defaults.update(kw)
@@ -60,7 +60,8 @@ def test_clamp_never_above_scald_ceiling():
 
 def test_misconfigured_peak_setpoint_still_floored():
     # A config typo (110 F) must never reach the heater: Legionella risk.
-    d = decide(_inputs(now=datetime(2026, 7, 15, 17, 0), tou_period=TouPeriod.ON_PEAK),
+    d = decide(_inputs(now=datetime(2026, 7, 15, 17, 0), tou_period=TouPeriod.ON_PEAK,
+                       heater=_heater(mode=WhMode.ENERGY_SAVER, setpoint_f=130)),
                WhParams(peak_setpoint_f=110))
     assert d.action == WhAction.SET
     assert d.setpoint_f == MIN_SAFE_SETPOINT_F
@@ -81,6 +82,11 @@ def test_every_set_decision_respects_floor_across_a_day():
 
 # ---------------------------------------------------------------- heat-pump-only default
 
+def test_default_normal_setpoint_is_rheem_factory_120():
+    # 120 F is the Rheem factory default and the user's own setting.
+    assert WhParams().normal_setpoint_f == 120
+
+
 def test_default_normal_mode_is_heat_pump():
     # Heat pump only is the most efficient mode and the user's own choice;
     # Energy Saver would let the resistance element back in off-peak.
@@ -89,7 +95,7 @@ def test_default_normal_mode_is_heat_pump():
 
 def test_defaults_never_leave_heat_pump_over_a_day():
     # Walk a sunny day at 5-min ticks, applying every SET, from the user's
-    # real starting point: heat pump only at 125 F.
+    # real starting point: heat pump only at 120 F.
     heater = _heater()
     high = low = 0
     for i in range(24 * 12):
@@ -162,7 +168,8 @@ def test_on_peak_overrides_manual_electric_mode():
 
 def test_on_peak_ignores_command_rate_limit():
     d = decide(_inputs(now=datetime(2026, 7, 15, 16, 0), tou_period=TouPeriod.ON_PEAK,
-                       minutes_since_last_command=1.0), P)
+                       minutes_since_last_command=1.0,
+                       heater=_heater(mode=WhMode.ENERGY_SAVER)), P)
     assert d.action == WhAction.SET
 
 
@@ -230,9 +237,9 @@ def test_banking_ends_on_sustained_low_surplus():
 
 # ---------------------------------------------------------------- normal / flap control
 
-def test_off_peak_restores_normal_after_peak():
+def test_off_peak_restores_normal_from_raised_setpoint():
     d = decide(_inputs(now=datetime(2026, 7, 15, 21, 5),
-                       heater=_heater(mode=WhMode.HEAT_PUMP, setpoint_f=P.peak_setpoint_f)), P)
+                       heater=_heater(mode=WhMode.HEAT_PUMP, setpoint_f=P.pre_peak_setpoint_f)), P)
     assert d.action == WhAction.SET
     assert d.mode == P.normal_mode
     assert d.setpoint_f == P.normal_setpoint_f
@@ -245,8 +252,8 @@ def test_at_normal_is_noop():
 
 def test_non_peak_change_is_rate_limited():
     d = decide(_inputs(now=datetime(2026, 7, 15, 21, 5), minutes_since_last_command=5.0,
-                       heater=_heater(mode=WhMode.HEAT_PUMP, setpoint_f=P.peak_setpoint_f)), P)
-    assert d.action == WhAction.NONE
+                       heater=_heater(mode=WhMode.HEAT_PUMP, setpoint_f=P.pre_peak_setpoint_f)), P)
+    assert d.action == WhAction.NONE and "rate limited" in d.reason
 
 
 def test_every_decision_has_a_reason():

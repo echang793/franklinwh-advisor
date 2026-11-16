@@ -136,7 +136,7 @@ class Config:
     wh_control_enabled: bool = False  # master gate
     wh_dry_run: bool = True           # log decisions, send no commands (safe rollout)
     wh_normal_mode: str = "heat_pump"  # heat_pump (most efficient) | energy_saver | high_demand
-    wh_normal_setpoint_f: int = 125
+    wh_normal_setpoint_f: int = 120   # Rheem factory default
     wh_peak_setpoint_f: int = 120     # wh_policy floors every setpoint at 120 F
     wh_pre_peak_setpoint_f: int = 130
     wh_bank_setpoint_f: int = 135     # solar banking; capped at 140 F

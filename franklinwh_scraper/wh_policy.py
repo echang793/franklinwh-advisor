@@ -75,7 +75,7 @@ class WaterHeaterState:
 class WhParams:
     """Config-derived knobs; trivial to construct in tests."""
     normal_mode: WhMode = WhMode.HEAT_PUMP   # most efficient; Energy Saver lets the element in
-    normal_setpoint_f: int = 125
+    normal_setpoint_f: int = 120             # Rheem factory default
     peak_setpoint_f: int = 120
     pre_peak_setpoint_f: int = 130
     bank_setpoint_f: int = 135

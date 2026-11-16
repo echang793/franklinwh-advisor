@@ -118,6 +118,8 @@ def test_params_from_config():
 def test_config_default_is_heat_pump():
     assert Config().wh_normal_mode == "heat_pump"
     assert params_from_config(Config()).normal_mode == WhMode.HEAT_PUMP
+    assert Config().wh_normal_setpoint_f == 120
+    assert params_from_config(Config()).normal_setpoint_f == 120
 
 
 def test_params_bad_mode_falls_back():
@@ -234,7 +236,7 @@ def test_sustained_poll_failure_alerts_once(tmp_path):
 
 def test_surplus_ticks_drive_banking(tmp_path):
     noon = datetime(2026, 11, 16, 12, 0)
-    fc = FakeClient()
+    fc = FakeClient(setpoint=120)                  # already at the normal setpoint
     ctl = WhController(_cfg(wh_dry_run=False), tmp_path, client=fc)
     sunny = _stats(solar_production_kw=4.0, home_load_kw=1.0)
     ctl.tick(sunny, noon)
