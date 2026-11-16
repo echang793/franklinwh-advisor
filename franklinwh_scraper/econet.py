@@ -56,6 +56,19 @@ class EcoNetAuthError(EcoNetError):
     pass
 
 
+class EcoNetRateLimited(EcoNetError):
+    """HTTP 429. Never retried here: a retry only extends the block."""
+
+    def __init__(self, stage: str):
+        super().__init__(f"EcoNet rate-limited the {stage} (HTTP 429)")
+        self.stage = stage
+
+
+def _is_429(e: Exception) -> bool:
+    """pyeconet raises GenericHTTPError(resp.status), so the status is args[0]."""
+    return bool(getattr(e, "args", None)) and e.args[0] == 429
+
+
 @dataclass(frozen=True)
 class HeaterReading:
     state: WaterHeaterState
@@ -168,16 +181,27 @@ class EcoNetClient:
     # ------------------------------------------------------------ internals
 
     async def _heater(self) -> tuple[Any, Any]:
-        """(api, first water heater). Retries once with a fresh login."""
+        """(api, first water heater). With a cached token, retries once with a fresh login;
+        without one the first attempt already is the login, so there is no second try.
+        A 429 at any step stops at once."""
         creds = read_creds(self.creds_path)
+        have_token = bool(creds.get("user_token") and creds.get("account_id"))
         last: Exception | None = None
-        for fresh in (False, True):
+        for fresh in ((False, True) if have_token else (True,)):
             try:
                 api = await self._connect(creds, fresh)
-                heaters = await api.water_heaters()
             except EcoNetAuthError:
                 raise
+            except Exception as e:      # HTTP error, network
+                if _is_429(e):
+                    raise EcoNetRateLimited("login") from e
+                last = e
+                continue
+            try:
+                heaters = await api.water_heaters()
             except Exception as e:      # stale token, HTTP error, network
+                if _is_429(e):
+                    raise EcoNetRateLimited("equipment list") from e
                 last = e
                 continue
             self._remember_token(creds, api)

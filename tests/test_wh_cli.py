@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from franklinwh_scraper import wh_cli
 from franklinwh_scraper.config import Config
-from franklinwh_scraper.econet import EcoNetError, HeaterReading
+from franklinwh_scraper.econet import EcoNetError, EcoNetRateLimited, HeaterReading
 from franklinwh_scraper.wh_policy import WaterHeaterState, WhMode
 
 
@@ -88,3 +88,16 @@ def test_status_summarizes_log(env):
     res = CliRunner().invoke(root, ["waterheater", "status"])
     assert res.exit_code == 0, res.output
     assert "on-peak element runs: 1" in res.output
+
+
+class _LimitedClient:
+    def read_state(self, now):
+        raise EcoNetRateLimited("login")
+
+
+def test_setup_rate_limited_says_to_wait(env, monkeypatch):
+    root, cfg, saved, _ = env
+    monkeypatch.setattr(wh_cli, "EcoNetClient", lambda creds_path=None: _LimitedClient())
+    res = CliRunner().invoke(root, ["waterheater", "setup"], input="me@x.com\npw\n")
+    assert res.exit_code != 0 and saved == []
+    assert "wait 30 minutes" in res.output and "once" in res.output

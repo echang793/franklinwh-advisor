@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from franklinwh_scraper.config import Config
-from franklinwh_scraper.econet import EcoNetError, HeaterReading
+from franklinwh_scraper.econet import EcoNetError, EcoNetRateLimited, HeaterReading
 from franklinwh_scraper.wh_controller import (
     WhController,
     ev_draw_from_state,
@@ -39,7 +39,10 @@ class FakeClient:
         self.applied: list[tuple] = []
         self.apply_fail: Exception | None = None
 
+    reads = 0
+
     def read_state(self, now):
+        self.reads += 1
         if self.fail:
             raise self.fail
         return HeaterReading(
@@ -246,3 +249,45 @@ def test_away_flag_reaches_policy(tmp_path):
     ctl = WhController(_cfg(wh_dry_run=False), tmp_path, client=fc)
     ctl.tick(_stats(), NIGHT)
     assert fc.applied == [(WhMode.VACATION, None)]
+
+
+# ---------------------------------------------------------------- rate limits (HTTP 429)
+
+def test_rate_limit_pauses_polling_then_retries(tmp_path):
+    fc = FakeClient(fail=EcoNetRateLimited("login"))
+    ctl = WhController(_cfg(), tmp_path, client=fc)
+    d = ctl.tick(_stats(), PEAK)
+    assert fc.reads == 1 and d.action == WhAction.NONE
+    for m in (5, 10, 25):                        # inside the 30-min backoff: no EcoNet calls
+        ctl.tick(_stats(), PEAK + timedelta(minutes=m))
+    assert fc.reads == 1
+    ctl.tick(_stats(), PEAK + timedelta(minutes=31))
+    assert fc.reads == 2
+
+
+def test_repeated_rate_limit_doubles_backoff_up_to_cap(tmp_path):
+    fc = FakeClient(fail=EcoNetRateLimited("login"))
+    ctl = WhController(_cfg(), tmp_path, client=fc)
+    t = PEAK
+    waits = []
+    for _ in range(5):
+        ctl.tick(_stats(), t)
+        until = datetime.fromisoformat(ctl.state["backoff_until_iso"])
+        waits.append(round((until - t).total_seconds() / 60))
+        t = until + timedelta(minutes=1)
+    assert waits == [30, 60, 120, 240, 240]
+
+
+def test_success_clears_backoff(tmp_path):
+    fc = FakeClient(fail=EcoNetRateLimited("login"))
+    ctl = WhController(_cfg(), tmp_path, client=fc)
+    ctl.tick(_stats(), PEAK)
+    fc.fail = None
+    ctl.tick(_stats(), PEAK + timedelta(minutes=31))
+    assert "backoff_until_iso" not in ctl.state and "backoff_min" not in ctl.state
+
+
+def test_backoff_is_logged(tmp_path):
+    ctl = WhController(_cfg(), tmp_path, client=FakeClient(fail=EcoNetRateLimited("login")))
+    ctl.tick(_stats(), PEAK)
+    assert "429" in _log(tmp_path)[-1]["error"] or "rate" in _log(tmp_path)[-1]["error"].lower()

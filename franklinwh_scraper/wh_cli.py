@@ -12,7 +12,7 @@ from pathlib import Path
 import click
 
 from .config import save as save_config
-from .econet import CREDS_PATH, EcoNetClient, EcoNetError, write_creds
+from .econet import CREDS_PATH, EcoNetClient, EcoNetError, EcoNetRateLimited, write_creds
 
 _RESTART = ("     launchctl stop com.franklinwh.advisor && "
             "launchctl start com.franklinwh.advisor")
@@ -33,6 +33,10 @@ def wh_setup(ctx: click.Context) -> None:
     write_creds({"email": email, "password": password}, CREDS_PATH)
     try:
         r = EcoNetClient(creds_path=CREDS_PATH).read_state(datetime.now())
+    except EcoNetRateLimited as e:
+        raise click.ClickException(
+            f"EcoNet is rate-limiting this account ({e}). Your login is saved. "
+            "Please wait 30 minutes, then run setup once; retrying sooner restarts the block.")
     except EcoNetError as e:
         raise click.ClickException(f"Could not read the water heater: {e}")
     s = r.state

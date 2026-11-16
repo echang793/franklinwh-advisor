@@ -14,6 +14,7 @@ from franklinwh_scraper.econet import (
     EcoNetAuthError,
     EcoNetClient,
     EcoNetError,
+    EcoNetRateLimited,
     econet_name_for,
     mode_from_econet,
     read_creds,
@@ -81,16 +82,25 @@ class FakeApi:
         self.unsubscribed = True
 
 
-def _client(api_or_apis, tmp_path, **kw):
+class FakeHTTPError(Exception):
+    """Shaped like pyeconet's GenericHTTPError(resp.status)."""
+
+
+TOKEN = {"user_token": "old", "account_id": "acct"}
+
+
+def _client(api_or_apis, tmp_path, creds_extra=None, connect_error=None, **kw):
     apis = list(api_or_apis) if isinstance(api_or_apis, list) else [api_or_apis]
     connects: list[bool] = []
 
     async def connect(creds, fresh):
         connects.append(fresh)
+        if connect_error is not None:
+            raise connect_error
         return apis.pop(0) if len(apis) > 1 else apis[0]
 
     path = tmp_path / "econet.json"
-    write_creds({"email": "a@b.c", "password": "pw"}, path)
+    write_creds({"email": "a@b.c", "password": "pw", **(creds_extra or {})}, path)
     c = EcoNetClient(connect=connect, creds_path=path, mode_enum=FakeOpMode,
                      settle_s=0, connect_timeout_s=0.05, **kw)
     return c, connects
@@ -152,9 +162,42 @@ def test_read_state_caches_token(tmp_path):
 def test_read_state_relogs_in_once_on_stale_token(tmp_path):
     stale = FakeApi([FakeHeater()], fail_first=RuntimeError("401"))
     fresh = FakeApi([FakeHeater()])
-    c, connects = _client([stale, fresh], tmp_path)
+    c, connects = _client([stale, fresh], tmp_path, creds_extra=TOKEN)
     assert c.read_state(NOW).state.mode == WhMode.ENERGY_SAVER
     assert connects == [False, True]
+
+
+# ---------------------------------------------------------------- rate limits (HTTP 429)
+
+def test_first_login_is_attempted_once(tmp_path):
+    # No cached token: the first attempt already logs in; a second would double the hits.
+    c, connects = _client(FakeApi([FakeHeater()], fail_first=RuntimeError("boom")), tmp_path)
+    with pytest.raises(EcoNetError):
+        c.read_state(NOW)
+    assert connects == [True]
+
+
+def test_429_on_login_raises_rate_limited_without_retry(tmp_path):
+    c, connects = _client(FakeApi([FakeHeater()]), tmp_path, creds_extra=TOKEN,
+                          connect_error=FakeHTTPError(429))
+    with pytest.raises(EcoNetRateLimited) as ei:
+        c.read_state(NOW)
+    assert connects == [False]
+    assert ei.value.stage == "login"
+    assert "429" in str(ei.value)
+
+
+def test_429_on_equipment_list_raises_rate_limited_without_retry(tmp_path):
+    c, connects = _client(FakeApi([FakeHeater()], fail_first=FakeHTTPError(429)), tmp_path,
+                          creds_extra=TOKEN)
+    with pytest.raises(EcoNetRateLimited) as ei:
+        c.read_state(NOW)
+    assert connects == [False]
+    assert ei.value.stage == "equipment list"
+
+
+def test_rate_limited_is_an_econet_error():
+    assert issubclass(EcoNetRateLimited, EcoNetError)
 
 
 def test_read_state_no_heater_raises(tmp_path):

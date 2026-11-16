@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import tou
 from .config import Config
-from .econet import EcoNetClient, EcoNetError, HeaterReading
+from .econet import EcoNetClient, EcoNetError, EcoNetRateLimited, HeaterReading
 from .notifier import notify_telegram
 from .wh_policy import (WaterHeaterState, WhAction, WhDecision, WhInputs, WhMode,
                         WhParams, compute_wh_surplus_kw, decide)
@@ -41,6 +41,8 @@ _OVERRIDE_HOURS = 4          # stand down this long after a change made in the a
 _PROPAGATION_MIN = 10.0      # a command can take a poll or two to show up in EcoNet
 _ERROR_ALERT_TICKS = 6       # ~30 min of failed polls before one Telegram alert
 _HEARTBEAT_MIN = 60.0
+_BACKOFF_START_MIN = 30      # after an HTTP 429, leave EcoNet alone this long...
+_BACKOFF_MAX_MIN = 240       # ...doubling on each repeat, up to this
 _NEVER = 1e9
 
 
@@ -188,20 +190,37 @@ class WhController:
                      f"advisor hands off until {until:%-I:%M %p}.")
 
     def _poll(self, now: datetime) -> HeaterReading | None:
+        raw = self.state.get("backoff_until_iso")
+        if raw:
+            try:
+                if now < datetime.fromisoformat(raw):
+                    return None         # rate-limited: don't touch EcoNet until the pause ends
+            except ValueError:
+                self.state.pop("backoff_until_iso", None)
         try:
             reading = self.client.read_state(now)
+        except EcoNetRateLimited as e:
+            mins = min(_BACKOFF_MAX_MIN, (self.state.get("backoff_min") or 0) * 2 or _BACKOFF_START_MIN)
+            self.state["backoff_min"] = mins
+            self.state["backoff_until_iso"] = (now + timedelta(minutes=mins)).isoformat(timespec="seconds")
+            return self._poll_failed(f"{e}; pausing {mins} min")
         except EcoNetError as e:
-            n = self.state.get("consec_errors", 0) + 1
-            self.state["consec_errors"] = n
-            self.state["last_error"] = str(e)
-            if n >= _ERROR_ALERT_TICKS and not self.state.get("error_alerted"):
-                self.state["error_alerted"] = True
-                self._notify(f"🚿 Water heater: EcoNet unreachable for ~{n * 5} min ({e}). "
-                             f"Advisor is leaving the heater alone until it's back.")
-            return None
+            return self._poll_failed(str(e))
         self.state["consec_errors"] = 0
         self.state.pop("error_alerted", None)
+        self.state.pop("backoff_until_iso", None)
+        self.state.pop("backoff_min", None)
         return reading
+
+    def _poll_failed(self, msg: str) -> None:
+        n = self.state.get("consec_errors", 0) + 1
+        self.state["consec_errors"] = n
+        self.state["last_error"] = msg
+        if n >= _ERROR_ALERT_TICKS and not self.state.get("error_alerted"):
+            self.state["error_alerted"] = True
+            self._notify(f"🚿 Water heater: EcoNet unreachable for ~{n * 5} min ({msg}). "
+                         f"Advisor is leaving the heater alone until it's back.")
+        return None
 
     def _bump_ticks(self, surplus: float) -> None:
         high = surplus >= self.params.bank_start_kw
