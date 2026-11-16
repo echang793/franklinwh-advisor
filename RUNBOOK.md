@@ -135,7 +135,9 @@ If your bill's `Export Pricing:` line names a different vintage (Legacy 2023/202
 
 **Reach it from anywhere with Tailscale** (no router changes, works on any Wi-Fi/cellular): install Tailscale on the iPhone, sign in to the same tailnet as the Mac, and use the host's tailnet address — `tailscale ip -4` on the host, currently `100.77.88.77` (or its MagicDNS name). Do **not** port-forward or expose the dashboard publicly.
 
-**Shortcuts app** (iPhone): New Shortcut →
+**Scriptable widget** (recommended; live Home Screen + Lock Screen widgets): install the free Scriptable app, create a new script, paste in `scripts/scriptable/franklinwh-widget.js` (AirDrop or iCloud Drive → Scriptable folder also works), and run it once in the app. It asks for the dashboard address (default `http://100.77.88.77:8093`) and the `dashboard_token`; both go in the iOS Keychain, not the script, so the file is safe to share. Then long-press the Home Screen → add a Scriptable widget (small or medium) → Edit Widget → Script: the one you created. Lock Screen: add Scriptable's circular (battery ring), rectangular, or inline widget the same way. iOS refreshes widgets on its own schedule (about every 15–30 min); a stale reading shows `⚠ Nm old`, an unreachable dashboard shows the last cached reading as `⚠ offline · Nm`, a wrong token shows `token rejected`. Tapping the widget opens the dashboard. Run the script in the app again to preview or change the address/token. Needs Tailscale connected on the phone.
+
+**Shortcuts app** (iPhone, tap-to-run only): New Shortcut →
 1. *Get Contents of URL* — URL `http://100.77.88.77:8093/api/glance`, Method GET, Headers: `X-Dashboard-Token` = the `dashboard_token` from `~/.franklinwh.json`.
 2. *Get Dictionary Value* — key `text` (from the previous step).
 3. *Show Result* (or *Show Notification*).
