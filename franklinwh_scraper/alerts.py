@@ -998,7 +998,8 @@ def _send_alert(body: str, cfg: Config, urgent: bool = False, alert_name: str | 
         if extra_buttons:  # alert-specific answer buttons go first, above mute/snooze (one row, or a list of rows)
             rows = extra_buttons if isinstance(extra_buttons[0], list) else [extra_buttons]
             kb = {"inline_keyboard": rows + (kb["inline_keyboard"] if kb else [])}
-        notify_telegram(body, cfg.telegram_bot_token, cfg.telegram_chat_id, reply_markup=kb)
+        notify_telegram(body, cfg.telegram_bot_token, cfg.telegram_chat_id, reply_markup=kb,
+                        silent=not urgent)  # only urgent alerts buzz the phone/watch
     if cfg.smtp_host and cfg.email_to:
         notify_email(body, cfg)
     if cfg.webhook_url:

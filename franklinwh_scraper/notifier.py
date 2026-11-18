@@ -134,14 +134,18 @@ def _with_retry(fn, label: str, attempts: int = 3, base_delay: float = 2.0) -> b
 
 
 def notify_telegram(body: str, bot_token: str, chat_id: str,
-                     reply_markup: dict | None = None) -> None:
+                     reply_markup: dict | None = None, silent: bool = False) -> None:
     """Send a Telegram message via the Bot API (cross-platform, free).
 
     `reply_markup` — optional inline keyboard dict (e.g. mute buttons on an
     alert), passed straight through to the Bot API as-is.
+    `silent` — deliver without sound or vibration (Bot API `disable_notification`);
+    the message still appears in the chat and counts as unread.
     """
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": body, "parse_mode": "HTML"}
+    if silent:
+        payload["disable_notification"] = True
     if reply_markup:
         payload["reply_markup"] = reply_markup
     for attempt in range(3):

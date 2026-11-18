@@ -5666,7 +5666,7 @@ def test_send_alert_attaches_mute_buttons_except_always_on(monkeypatch, tmp_path
     calls = []
     monkeypatch.setattr(
         alerts, "notify_telegram",
-        lambda body, token, chat_id, reply_markup=None: calls.append(reply_markup))
+        lambda body, token, chat_id, reply_markup=None, **_k: calls.append(reply_markup))
 
     # output_dir defaults to the relative "output" — without overriding it,
     # _send_alert's _log_alert call falls through to the real production
@@ -7317,7 +7317,7 @@ def test_snooze_refuses_safety_alerts_and_suggests_for_typos():
 def test_send_alert_logs_the_alert_name_and_offers_snooze(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(alerts, "notify_telegram",
-                        lambda body, token, chat_id, reply_markup=None: calls.append(reply_markup))
+                        lambda body, token, chat_id, reply_markup=None, **_k: calls.append(reply_markup))
     cfg = Config(telegram_bot_token="x", telegram_chat_id="y", output_dir=str(tmp_path))
 
     alerts._send_alert("noon low", cfg, alert_name="low_noon_soc")
@@ -9625,7 +9625,7 @@ def test_alert_car_question_stays_quiet_when_nothing_steady_or_already_labeled(t
 def test_send_alert_puts_the_extra_buttons_first(monkeypatch):
     sent = {}
     monkeypatch.setattr(alerts, "notify_telegram",
-                        lambda body, tok, chat, reply_markup=None: sent.update(markup=reply_markup))
+                        lambda body, tok, chat, reply_markup=None, **_k: sent.update(markup=reply_markup))
     monkeypatch.setattr(alerts, "_log_alert", lambda *a, **k: None)
     cfg = Config(telegram_bot_token="t", telegram_chat_id="1")
     extra = [{"text": "🚗 Car", "callback_data": "car:2026-10-09:1"},
@@ -13503,7 +13503,7 @@ def test_plan_prompt_is_gone_once_you_have_answered(tmp_path):
 
 def test_alert_extra_buttons_can_be_several_rows(monkeypatch):
     sent: dict = {}
-    monkeypatch.setattr(alerts, "notify_telegram", lambda body, tok, chat, reply_markup=None: sent.update(kb=reply_markup))
+    monkeypatch.setattr(alerts, "notify_telegram", lambda body, tok, chat, reply_markup=None, **_k: sent.update(kb=reply_markup))
     cfg = Config(telegram_bot_token="t", telegram_chat_id="1", output_dir="/nonexistent-dir-for-test")
     alerts._send_alert("hi", cfg, alert_name="bill_pace", extra_buttons=[[{"text": "a", "callback_data": "x:1"}],
                                                                            [{"text": "b", "callback_data": "x:2"}]])
@@ -13521,7 +13521,7 @@ def test_the_morning_alert_and_the_corrections_carry_the_next_step_buttons():
 def test_replies_end_with_buttons_for_the_next_step(tmp_path):
     now = datetime(2026, 11, 6, 13, 20)
     bot, sent = _evening_bot(tmp_path, now, soc=60.0, forecast_solar=_SUNNY)
-    bot._send = lambda chat_id, text, reply_markup=None: sent.update(text=text, kb=reply_markup)
+    bot._send = lambda chat_id, text, reply_markup=None, **_k: sent.update(text=text, kb=reply_markup)
     _run_at(now, bot._send_sundown, "1")
     cbs = _callbacks(sent["kb"])
     assert "cmd:evening" in cbs and "cmd:ebplan" in cbs and "cmd:plan" in cbs and "cmd:sundown" not in cbs
@@ -13535,7 +13535,7 @@ def test_plan_with_nothing_planned_offers_the_quick_picks(tmp_path):
     now = datetime(2026, 11, 15, 9, 0)
     bot, sent = _evening_bot(tmp_path, now)
     bot._hist_store = _strong_sundays(tmp_path)
-    bot._send = lambda chat_id, text, reply_markup=None: sent.update(text=text, kb=reply_markup)
+    bot._send = lambda chat_id, text, reply_markup=None, **_k: sent.update(text=text, kb=reply_markup)
     _run_at(now, bot._send_plan, "1", {})
     cbs = _callbacks(sent["kb"])
     assert "plan:usual" in cbs and "plan:none" in cbs
@@ -13576,7 +13576,7 @@ def test_tapping_plan_buttons_sets_the_plan(tmp_path, monkeypatch):
     now = datetime(2026, 11, 15, 8, 0)
     bot, sent = _evening_bot(tmp_path, now)
     bot._hist_store = _strong_sundays(tmp_path)
-    bot._send = lambda chat_id, text, reply_markup=None: sent.update(text=text, kb=reply_markup)
+    bot._send = lambda chat_id, text, reply_markup=None, **_k: sent.update(text=text, kb=reply_markup)
     from franklinwh_scraper import chatbot as chatbot_mod
     real = chatbot_mod.datetime
 
@@ -14060,3 +14060,29 @@ def test_fmt_age_reads_naturally_and_never_goes_negative():
     assert got[10] == "10s ago" and got[45] == "45s ago" and got[59] == "59s ago"
     assert got[60] == "1 min ago" and got[119] == "1 min ago" and got[240] == "4 min ago" and got[3599] == "59 min ago"
     assert got[3600] == "1h 0m ago" and got[3660] == "1h 1m ago" and got[7500] == "2h 5m ago"
+
+
+def test_notify_telegram_silent_sets_disable_notification(monkeypatch):
+    """Silent alerts land in the chat with no sound or vibration; the default stays loud."""
+    posted = []
+
+    class _R:
+        ok = True
+
+    monkeypatch.setattr(notifier.requests, "post", lambda url, json=None, timeout=None: posted.append(json) or _R())
+    notifier.notify_telegram("quiet", "tok", "1", silent=True)
+    notifier.notify_telegram("loud", "tok", "1")
+    assert posted[0]["disable_notification"] is True
+    assert "disable_notification" not in posted[1]
+
+
+def test_send_alert_is_silent_unless_urgent(monkeypatch):
+    """Only urgent alerts (grid down, area outage, fast drain) may buzz the phone and watch."""
+    kw = []
+    monkeypatch.setattr(alerts, "notify_telegram",
+                        lambda body, tok, chat, reply_markup=None, silent=False: kw.append(silent))
+    monkeypatch.setattr(alerts, "_log_alert", lambda *a, **k: None)
+    cfg = Config(telegram_bot_token="t", telegram_chat_id="1", output_dir="/nonexistent-dir-for-test")
+    alerts._send_alert("routine", cfg, alert_name="bill_pace")
+    alerts._send_alert("outage", cfg, urgent=True, alert_name="grid_down")
+    assert kw == [True, False]
