@@ -145,6 +145,16 @@ def format_report(r: OutageReport, now: datetime, grid_down: bool) -> str:
     return "\n".join(lines)
 
 
+def glance_line(r: OutageReport) -> str:
+    """One short line for the watch and widget: runtime at this load plus the sunrise verdict."""
+    parts = ["lasts 24h+" if r.survives else f"{fmt_duration(r.runtime_h)} left"]
+    if r.makes_sunrise is True:
+        parts.append("✅ sunrise")
+    elif r.makes_sunrise is False:
+        parts.append("⚠ sunrise only if shed" if r.makes_sunrise_if_shed else "🚨 no sunrise")
+    return " · ".join(parts)
+
+
 def to_dict(r: OutageReport) -> dict:
     """JSON-safe form for the API (datetimes as ISO strings, no NaN)."""
     def f(x):

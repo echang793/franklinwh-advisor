@@ -79,3 +79,29 @@ def test_view_handles_missing_numbers_without_nan():
 def test_inline_text_is_short_for_the_lock_screen():
     s = _run(f"W.inlineText(W.view({json.dumps(SAMPLE)}, {{}}))")
     assert s.startswith("52%") and len(s) <= 28
+
+
+def test_grid_down_with_an_outage_line_leads_with_runtime_and_verdict():
+    g = dict(SAMPLE, grid_status="down", outage_line="5h 28m left · 🚨 no sunrise")
+    v = _run(f"W.view({json.dumps(g)}, {{}})")
+    assert v["warn"] == "GRID DOWN · 5h 28m left" and v["detail"] == "🚨 no sunrise"
+    assert v["warn"].startswith("GRID")                      # still drawn in the alarm colour
+
+
+def test_grid_down_inline_text_keeps_the_runtime_on_the_lock_screen():
+    g = dict(SAMPLE, grid_status="down", outage_line="lasts 24h+ · ✅ sunrise")
+    s = _run(f"W.inlineText(W.view({json.dumps(g)}, {{}}))")
+    assert "lasts 24h+" in s and len(s) <= 40
+
+
+def test_grid_down_without_an_outage_line_is_the_old_behaviour():
+    g = dict(SAMPLE, grid_status="down", outage_line=None)
+    v = _run(f"W.view({json.dumps(g)}, {{}})")
+    assert v["warn"] == "GRID DOWN" and v["detail"] == "empty in 12h 16m"
+
+
+def test_outage_line_is_ignored_when_the_data_is_stale_or_the_grid_is_up():
+    up = _run(f"W.view({json.dumps(dict(SAMPLE, outage_line='3h left'))}, {{}})")
+    assert up["warn"] is None
+    old = _run(f"W.view({json.dumps(dict(SAMPLE, grid_status='down', stale=True, age_min=40, outage_line='3h left'))}, {{}})")
+    assert old["level"] == "stale" and old["warn"].startswith("GRID DOWN")

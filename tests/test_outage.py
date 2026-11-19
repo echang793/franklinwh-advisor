@@ -231,3 +231,90 @@ def test_api_outage(tmp_path, monkeypatch):
     assert body["report"]["makes_sunrise"] is False and body["report"]["makes_sunrise_if_shed"] is True
     monkeypatch.setattr(webapi, "_besttime_inputs", lambda: None)
     assert TestClient(webapi.app).get("/api/outage").json()["ok"] is False
+
+
+# ---------------------------------------------------------------- watch / widget glance line
+
+def _report(soc=50.0, load=1.0, now=NOW, solar=None):
+    return outage.outage_report(soc, CAP, load, _hours(now, 24, solar), now, SUNRISE)
+
+
+def test_glance_line_covers_each_verdict():
+    short =outage.glance_line(_report(soc=10.0, load=2.0))            # empty fast, even on essentials
+    assert "left" in short and "🚨 no sunrise" in short
+    ok = outage.glance_line(_report(soc=100.0, load=0.3))
+    assert "lasts 24h+" in ok and "✅ sunrise" in ok
+    shed = outage.glance_line(_report(soc=50.0, load=1.0))
+    assert "⚠ sunrise only if shed" in shed and "left" in shed
+
+
+def test_glance_line_has_no_verdict_without_a_known_sunrise():
+    r = outage.outage_report(50.0, CAP, 1.0, _hours(NOW, 24), NOW, None)
+    line = outage.glance_line(r)
+    assert "sunrise" not in line and "left" in line
+
+
+def _glance_down(monkeypatch, tmp_path, reading, inputs):
+    from fastapi.testclient import TestClient
+
+    from franklinwh_scraper import webapi
+    monkeypatch.setattr(webapi, "_OUT", tmp_path)
+    monkeypatch.setattr(webapi, "_cfg", Config(dashboard_token="", battery_capacity_kwh=CAP), raising=False)
+    monkeypatch.setattr(webapi, "_BAT_CAP", CAP, raising=False)
+    monkeypatch.setattr(webapi, "_latest_reading", lambda: reading)
+    monkeypatch.setattr(webapi, "_besttime_inputs", inputs)
+    return TestClient(webapi.app)
+
+
+def _reading(status="down", soc=50.0, load=1.0, minutes_old=1):
+    ts = (datetime.now() - timedelta(minutes=minutes_old)).isoformat()
+    return {"timestamp": ts, "battery_soc": soc, "solar_kw": 0.0, "home_load_kw": load, "battery_use_kw": load,
+            "grid_use_kw": 0.0, "grid_status": status, "solar_total_kwh": 1.0}
+
+
+def _inputs():
+    c = types.SimpleNamespace(battery_soc_pct=99.0, home_load_kw=9.0, solar_production_kw=0.0, battery_use_kw=9.0,
+                              grid_use_kw=0.0)          # deliberately NOT the glance reading: the reading must win
+    return c, {}, _outlook(), _forecast(), None, NOW
+
+
+def test_glance_leads_with_runtime_and_sunrise_verdict_when_the_grid_is_down(monkeypatch, tmp_path):
+    body = _glance_down(monkeypatch, tmp_path, _reading(), _inputs).get("/api/glance").json()
+    assert body["ok"] and body["grid_status"] == "down"
+    assert "GRID DOWN" in body["text"] and "left" in body["text"] and "sunrise" in body["text"]
+    assert body["outage_line"] and body["outage"]["makes_sunrise"] is False
+    assert body["outage"]["soc_pct"] == 50.0                 # computed from the reading the glance shows
+    assert "NaN" not in json.dumps(body)
+
+
+def test_glance_is_unchanged_when_the_grid_is_up(monkeypatch, tmp_path):
+    calls = []
+    body = _glance_down(monkeypatch, tmp_path, _reading(status="normal"),
+                        lambda: calls.append(1) or _inputs()).get("/api/glance").json()
+    assert body["outage"] is None and body["outage_line"] is None and "left" not in body["text"]
+    assert calls == []                                       # no forecast work on the normal path
+
+
+def test_glance_skips_the_outage_math_on_stale_data(monkeypatch, tmp_path):
+    calls = []
+    body = _glance_down(monkeypatch, tmp_path, _reading(minutes_old=90),
+                        lambda: calls.append(1) or _inputs()).get("/api/glance").json()
+    assert body["stale"] is True and body["outage"] is None and calls == []
+    assert body["text"].startswith("⚠") and "GRID DOWN" in body["text"]
+
+
+def test_glance_survives_a_forecast_failure_during_an_outage(monkeypatch, tmp_path):
+    def boom():
+        raise RuntimeError("history db locked")
+    resp = _glance_down(monkeypatch, tmp_path, _reading(), boom).get("/api/glance")
+    body = resp.json()
+    assert resp.status_code == 200 and body["ok"] and "GRID DOWN" in body["text"]
+    assert body["outage"] is None and body["outage_line"] is None
+
+
+def test_glance_closes_the_history_store(monkeypatch, tmp_path):
+    closed = []
+    store = types.SimpleNamespace(close=lambda: closed.append(1))
+    _glance_down(monkeypatch, tmp_path, _reading(),
+                 lambda: (_inputs()[0], {}, _outlook(), _forecast(), store, NOW)).get("/api/glance")
+    assert closed == [1]

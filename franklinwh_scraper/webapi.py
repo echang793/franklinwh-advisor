@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import math
 import sqlite3
 import types
@@ -209,6 +210,34 @@ def _finite(x, ndigits: int = 2):
     return round(f, ndigits) if math.isfinite(f) else None
 
 
+def _glance_outage(soc, load, solar, batt, grid):
+    """(report dict, one-line summary) for the glance while the grid is down, or (None, None).
+
+    Computed from the same reading the glance shows, with the forecast inputs of /api/outage. Never
+    raises: a locked history DB must not blank the watch during an outage."""
+    from . import outage
+    from .alerts import _outage_report_now
+    store = None
+    try:
+        inputs = _besttime_inputs()
+        if inputs is None or soc is None or load is None:
+            return None, None
+        _c, state, outlook, fc, store, now = inputs
+        c = types.SimpleNamespace(battery_soc_pct=soc, home_load_kw=load, solar_production_kw=solar or 0.0,
+                                  battery_use_kw=batt or 0.0, grid_use_kw=grid or 0.0)
+        report = _outage_report_now(c, _cfg, outlook, fc, store, state, now)
+        return (outage.to_dict(report), outage.glance_line(report)) if report is not None else (None, None)
+    except Exception:
+        logging.getLogger(__name__).exception("glance outage report failed")
+        return None, None
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+
 @app.get("/api/glance", dependencies=_authed)
 def api_glance():
     """Tiny payload for an iPhone/Watch Shortcuts widget (see RUNBOOK).
@@ -257,6 +286,12 @@ def api_glance():
     if load is not None:
         parts.append(f"🏠{load:.1f}kW")
     text = " ".join(parts)
+    outage_report, outage_line = None, None
+    if status == "down" and not stale:        # the one time the watch should answer "how long do I have?"
+        outage_report, outage_line = _glance_outage(
+            soc, load, solar, batt, _finite(r.get("grid_use_kw")))
+        if outage_line:
+            text = f"{text} · {outage_line}"
     if status not in ("normal", "unknown"):
         text = f"GRID {'DOWN' if status == 'down' else status.upper()} · {text}"
     if stale:
@@ -268,6 +303,7 @@ def api_glance():
         "solar_kw": solar, "load_kw": load, "grid_kw": _finite(r.get("grid_use_kw")),
         "grid_status": status, "eta_full_min": eta_full, "eta_empty_min": eta_empty,
         "solar_today_kwh": _finite(r.get("solar_total_kwh"), 1),
+        "outage": outage_report, "outage_line": outage_line,
         "text": text,
     }
 

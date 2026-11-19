@@ -39,6 +39,12 @@ function view(g, opts) {
   let warn = null;
   const grid = g && g.grid_status;
   if (grid && grid !== "normal" && grid !== "unknown") warn = grid === "down" ? "GRID DOWN" : `GRID ${String(grid).toUpperCase()}`;
+  // Grid down: the server's outage line ("5h 28m left · 🚨 no sunrise") answers "how long do I have?"
+  if (warn === "GRID DOWN" && g.outage_line && !g.stale && !opts.offline) {
+    const [runtime, ...verdict] = String(g.outage_line).split(" · ");
+    warn = `GRID DOWN · ${runtime}`;
+    if (verdict.length) detail = verdict.join(" · ");
+  }
   let level = pct === null ? "stale" : pct < LOW_PCT ? "low" : pct < MID_PCT ? "mid" : "ok";
   if (opts.offline) {
     level = "stale";
