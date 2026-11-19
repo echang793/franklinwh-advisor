@@ -3868,15 +3868,18 @@ def test_bill_record_defaults_to_most_recently_closed_cycle(tmp_path):
     from franklinwh_scraper.alerts import _load_peak_state
     from franklinwh_scraper.tou import cycle_bounds
 
-    cfg = Config(output_dir=str(tmp_path), billing_cycle_start_day=20)
+    # Start day follows today so the closed cycle ended ~yesterday: a fixed day made this
+    # fail whenever that cycle was >30 days old (bill-record refuses stale cycle ends).
+    start_day = min(datetime.now().day, 28)
+    cfg = Config(output_dir=str(tmp_path), billing_cycle_start_day=start_day)
     runner = CliRunner()
     with patch("franklinwh_scraper.cli.load_config", return_value=cfg):
         res = runner.invoke(cli_mod.cli, ["bill-record", "--amount", "88"])
     assert res.exit_code == 0, res.output
 
     state = _load_peak_state(tmp_path)
-    cur_start, _cur_end = cycle_bounds(datetime.now().date(), 20)
-    _, expected_end = cycle_bounds(cur_start - timedelta(days=1), 20)
+    cur_start, _cur_end = cycle_bounds(datetime.now().date(), start_day)
+    _, expected_end = cycle_bounds(cur_start - timedelta(days=1), start_day)
     assert state[f"actual_bill_{expected_end.isoformat()}"] == 88.0
 
 
