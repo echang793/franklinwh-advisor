@@ -978,9 +978,11 @@ def _alert_keyboard(alert_name: str) -> dict:
 
 
 def _send_alert(body: str, cfg: Config, urgent: bool = False, alert_name: str | None = None,
-                extra_buttons: list[dict] | None = None) -> None:
+                extra_buttons: list[dict] | None = None, loud: bool | None = None) -> None:
     """Send to all configured channels.
 
+    `loud` — whether Telegram may vibrate/sound; defaults to `urgent`. A promoted alert
+    (see `_is_loud`) buzzes without being logged or webhooked as an emergency.
     `alert_name` — when given and not one of `_ALWAYS_ON_ALERTS`, the
     Telegram message carries the mute buttons (same as the standalone
     `/mute` command) plus a per-alert snooze button, so silencing a noisy
@@ -999,7 +1001,7 @@ def _send_alert(body: str, cfg: Config, urgent: bool = False, alert_name: str | 
             rows = extra_buttons if isinstance(extra_buttons[0], list) else [extra_buttons]
             kb = {"inline_keyboard": rows + (kb["inline_keyboard"] if kb else [])}
         notify_telegram(body, cfg.telegram_bot_token, cfg.telegram_chat_id, reply_markup=kb,
-                        silent=not urgent)  # only urgent alerts buzz the phone/watch
+                        silent=not (urgent if loud is None else loud))  # only loud alerts buzz the phone/watch
     if cfg.smtp_host and cfg.email_to:
         notify_email(body, cfg)
     if cfg.webhook_url:
@@ -1060,6 +1062,43 @@ _ALWAYS_ON_ALERTS = frozenset({"grid_down", "grid_restored", "area_power_outage"
 # all, so notify_webhook's urgent flag was dead and every entry in
 # alerts_log.jsonl was urgent:false — including grid_down.
 _URGENT_ALERTS = frozenset({"grid_down", "area_power_outage", "fast_drain"})
+
+
+def _is_loud(name: str, cfg: Config, state: dict | None = None) -> bool:
+    """Whether `name` may buzz the phone and watch: urgent alerts always, plus any the user
+    promoted (static `cfg.loud_alerts`, or the /loud list kept in the alert state)."""
+    if name in _URGENT_ALERTS or name in (getattr(cfg, "loud_alerts", None) or []):
+        return True
+    promoted = (state or {}).get("loud_alerts")
+    return isinstance(promoted, list) and name in promoted
+
+
+def set_loud(state: dict, name: str, on: bool) -> tuple[bool, str]:
+    """Promote (on) or demote one alert to/from buzzing. Returns (ok, message). Names are
+    matched tolerantly like `snooze_alert`; typos get did-you-mean suggestions."""
+    import difflib
+    key = name.strip().lower().replace("-", "_")
+    if key.startswith("_alert_"):
+        key = key[len("_alert_"):]
+    if key in _URGENT_ALERTS:
+        return True, f"{key} is an urgent alert and is always loud."
+    known = known_alert_names()
+    if key not in known:
+        close = difflib.get_close_matches(key, known, n=3)
+        hint = f" Did you mean: {', '.join(close)}?" if close else " Run `franklinwh alerts-report` to see alert names."
+        return False, f"Unknown alert '{name}'.{hint}"
+    loud = [n for n in (state.get("loud_alerts") or []) if isinstance(n, str)]
+    if on:
+        if key not in loud:
+            loud.append(key)
+        state["loud_alerts"] = sorted(loud)
+        return True, f"🔔 {key} will now buzz your phone and watch."
+    loud = [n for n in loud if n != key]
+    if loud:
+        state["loud_alerts"] = loud
+    else:
+        state.pop("loud_alerts", None)
+    return True, f"🔕 {key} is no longer loud (silent delivery)."
 
 
 def _alerts_muted(state: dict, now: datetime) -> bool:
@@ -6101,8 +6140,9 @@ def check_fast_alerts(stats, cfg: Config, out: Path, store) -> None:
         except Exception:
             logger.exception("Fast car-on-peak check raised")
         _save_peak_state(out, state)
+        loud = _is_loud("car_on_peak", cfg, state)
     if body:
-        _send_alert(body, cfg, urgent="car_on_peak" in _URGENT_ALERTS, alert_name="car_on_peak")
+        _send_alert(body, cfg, urgent="car_on_peak" in _URGENT_ALERTS, alert_name="car_on_peak", loud=loud)
 
 
 def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_forecast=None, store=None,
@@ -6209,10 +6249,10 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
                     logger.exception("Alert candidate '%s' raised; skipping it this cycle", _name)
                     continue
                 if _body:
-                    to_send.append((_body, _name in _URGENT_ALERTS, _name))
+                    to_send.append((_body, _name in _URGENT_ALERTS, _name, _is_loud(_name, cfg, state)))
         _save_peak_state(out, state)
 
-    for body, urgent, name in to_send:
+    for body, urgent, name, loud in to_send:
         extra = {}
         if name == "car_question":
             extra = {"extra_buttons": _car_question_buttons(today)}
@@ -6229,5 +6269,5 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             extra = {"extra_buttons": _pattern_question_buttons(state["pattern_question_key"])}
         elif name == "load_question" and state.get("load_question_key"):
             extra = {"extra_buttons": _spike_question_buttons(state["load_question_key"])}
-        _send_alert(body, cfg, urgent=urgent, alert_name=name, **extra)
+        _send_alert(body, cfg, urgent=urgent, alert_name=name, loud=loud, **extra)
 

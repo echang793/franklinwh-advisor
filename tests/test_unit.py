@@ -2877,7 +2877,7 @@ def test_check_peak_alerts_survives_one_candidate_raising(tmp_path, monkeypatch)
     import types
     sent = []
     monkeypatch.setattr(alerts, "_send_alert",
-                        lambda body, cfg, urgent=False, alert_name=None: sent.append((body, alert_name)))
+                        lambda body, cfg, urgent=False, alert_name=None, **_k: sent.append((body, alert_name)))
     monkeypatch.setattr(alerts, "_alert_morning_preview",
                         lambda *a, **kw: (_ for _ in ()).throw(ValueError("boom")))
 

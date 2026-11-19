@@ -149,6 +149,9 @@ class Config:
     # Per-alert opt-outs.  Empty = all alerts enabled.
     # Values are alert-name strings (function suffix after _alert_).
     disabled_alerts: list[str] = field(default_factory=list)
+    # Alerts promoted to buzz the phone/watch (everything but urgent alerts is delivered silently).
+    # /loud and /quiet in Telegram edit a second list in the alert state file; both apply.
+    loud_alerts: list[str] = field(default_factory=list)
     # Loads that recur on a given weekday, used by /ebplan when you name none:
     # {"sunday": [["dryer", "14:00", 1.0, 4.0], ["oven", "17:00", 2.0, 2.5]]}
     # (name, start HH:MM, hours, kW).

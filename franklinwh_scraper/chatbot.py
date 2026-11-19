@@ -602,6 +602,8 @@ class TelegramChatBot:
                             "/unmute   — cancel an active mute\n"
                             "/snooze   — silence ONE alert: /snooze <alert> [hours]\n"
                             "/unsnooze — cancel: /unsnooze <alert>\n"
+                            "/loud     — choose which alerts buzz your phone/watch (the rest arrive silently)\n"
+                            "/quiet    — back to silent: /quiet <alert>\n"
                             "/clear    — reset conversation history"
                         )
                         continue
@@ -678,6 +680,11 @@ class TelegramChatBot:
                         continue
                     if re.match(r"/(un)?snooze(\s|$)", text.lower()):
                         self._send(chat_id, self._snooze_command(text))
+                        continue
+                    if re.match(r"/(loud|quiet)(\s|$)", text.lower()):
+                        _lreply = self._loud_command(text)
+                        self._send(chat_id, _lreply,
+                                   reply_markup=self._loud_keyboard() if text.lower().strip() == "/loud" else None)
                         continue
                     # /mute — buttons for the two durations, matching the
                     # CMR News bot's mute UX. /mute N (hours) skips the
@@ -2315,6 +2322,12 @@ class TelegramChatBot:
             self._answer_callback_query(cq_id, "Muted" if hours > 0 else "Unmuted")
             self._send(chat_id, reply)
             return
+        if data.startswith("loud:"):
+            _, name, flag = (data.split(":", 2) + ["", ""])[:3]
+            ok, reply = self._set_loud(name, flag == "1")
+            self._answer_callback_query(cq_id, ("Loud" if flag == "1" else "Silent") if ok else "Can't change")
+            self._send(chat_id, reply, reply_markup=self._loud_keyboard() if ok else None)
+            return
         if data.startswith("snooze:"):
             _, _, rest = data.partition(":")
             name, _, hrs = rest.rpartition(":")
@@ -2616,6 +2629,50 @@ class TelegramChatBot:
             if ok:
                 _save_peak_state(out, state)
         return ok, msg
+
+    # Alerts worth offering as one-tap buzz toggles in /loud (any promoted alert is listed too).
+    _LOUD_SUGGESTED = ("low_soc_1pm", "car_on_peak", "evening_short", "drain_target_reached")
+
+    def _set_loud(self, name: str, on: bool) -> tuple[bool, str]:
+        """Promote/demote ONE alert to buzz. Same state file and lock as _set_mute/_set_snooze."""
+        from pathlib import Path
+
+        from .alerts import _save_peak_state, _state_lock, set_loud
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        with _state_lock(out):
+            state = _load_peak_state(out)
+            ok, msg = set_loud(state, name, on)
+            if ok:
+                _save_peak_state(out, state)
+        return ok, msg
+
+    def _loud_names(self) -> list[str]:
+        from pathlib import Path
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        promoted = _load_peak_state(out).get("loud_alerts")
+        names = set(promoted) if isinstance(promoted, list) else set()
+        return sorted(names | set(getattr(self._cfg, "loud_alerts", None) or []))
+
+    def _loud_keyboard(self) -> dict:
+        loud = set(self._loud_names())
+        shown = list(self._LOUD_SUGGESTED) + sorted(loud - set(self._LOUD_SUGGESTED))
+        rows = [[{"text": f"🔔 {n} (tap to silence)" if n in loud else f"🔕 {n} (tap to buzz)",
+                  "callback_data": f"loud:{n}:{0 if n in loud else 1}"}] for n in shown]
+        return {"inline_keyboard": rows}
+
+    def _loud_command(self, text: str) -> str:
+        """Handle `/loud [alert]` and `/quiet <alert>`."""
+        parts = text.split()
+        cmd, args = parts[0].lower(), parts[1:]
+        usage = ("Usage: /loud <alert> buzzes for that alert  ·  /quiet <alert> goes back to silent.\n"
+                 "Grid down, area outage and fast drain always buzz.")
+        if cmd == "/quiet":
+            return self._set_loud(args[0], False)[1] if args else usage
+        if args:
+            return self._set_loud(args[0], True)[1]
+        loud = self._loud_names()
+        head = "🔔 Buzzing: " + ", ".join(loud) if loud else "No extra alerts buzz right now."
+        return head + "\nEverything else arrives silently. Tap one below to change it.\n" + usage
 
     def _snooze_command(self, text: str) -> str:
         """Handle `/snooze [alert [hours]]` and `/unsnooze <alert>`."""
