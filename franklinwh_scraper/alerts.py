@@ -21,6 +21,7 @@ from .advisor import _EB_CHARGE_KW
 from .config import Config
 from .format_utils import fmt_hours, soc_bar, time_to_pct
 from .history import integrate_intervals
+from . import tailscale_watch
 from .notifier import (notify_email, notify_imessage_text, notify_ntfy,
                        notify_telegram, notify_webhook)
 from .tou import (TouPeriod, base_service_cost, cheap_charge_deadline,
@@ -6136,6 +6137,94 @@ def _alert_solar_back_to_baseline(
     )
 
 
+_TAILSCALE_BAD_READS_TO_ALERT = 2          # two cycles in a row (~10 min), so one slow read isn't an incident
+_TAILSCALE_ADOPT_NEW_NAME_AFTER = timedelta(hours=24)
+_TAILSCALE_KEY_REMINDER_DAYS = (30, 7, 1)  # silent at 30, buzzing at 7 and 1
+
+
+def _alert_tailscale_health(state: dict, today: str, now: datetime, status) -> str | None:
+    """The Mac's Tailscale node is down, offline, or has been renamed (another Mac signed in as it).
+    The dashboard, phone widget and watch shortcut all ride on this node, and the advisor's Telegram
+    alert doesn't need it, so this is the way you hear about it. Once per incident; one quiet note
+    when it recovers. `status` is None when Tailscale isn't installed (nothing to watch)."""
+    if status is None:
+        return None
+    baseline = state.get("tailscale_hostname")
+    problem = None
+    adopted = False
+    if status.backend_state != "Running":
+        problem = f"Tailscale is {status.backend_state}"
+        fix = ("Open the Tailscale menu bar icon and Connect or sign in again."
+               if status.backend_state != "Unreachable" else "The Tailscale app isn't responding; relaunch it.")
+    elif not status.online:
+        problem = "this Mac's Tailscale node shows offline"
+        fix = "In the Tailscale menu bar: Disconnect, then Connect."
+    elif baseline and status.host_name and status.host_name != baseline:
+        seen = state.get("tailscale_name_seen")
+        if not isinstance(seen, dict) or seen.get("name") != status.host_name:
+            seen = {"name": status.host_name, "since": now.isoformat()}
+            state["tailscale_name_seen"] = seen
+        try:
+            stable = now - datetime.fromisoformat(seen["since"]) >= _TAILSCALE_ADOPT_NEW_NAME_AFTER
+        except (ValueError, KeyError, TypeError):
+            stable = False
+        if stable:       # renamed on purpose and stayed that way: make it the new normal
+            state["tailscale_hostname"] = status.host_name
+            state.pop("tailscale_name_seen", None)
+            adopted = True
+        else:
+            problem = f"this Mac now shows up as '{status.host_name}' (it was '{baseline}')"
+            fix = ("Another Mac probably signed in as this node. In the menu bar: Disconnect, then Connect "
+                   "on this Mac, and keep Tailscale off the other one.")
+    if problem is None:
+        state["tailscale_bad_reads"] = 0
+        if not baseline and status.host_name:
+            state["tailscale_hostname"] = status.host_name
+        if status.host_name == state.get("tailscale_hostname"):
+            state.pop("tailscale_name_seen", None)
+        if state.pop("tailscale_incident", None) and not adopted:
+            return f"🟢 <b>FranklinWH: Tailscale is back</b> as '{status.host_name}'. The dashboard and widgets can connect again."
+        return None
+    state["tailscale_bad_reads"] = state.get("tailscale_bad_reads", 0) + 1
+    if state["tailscale_bad_reads"] < _TAILSCALE_BAD_READS_TO_ALERT or state.get("tailscale_incident"):
+        return None
+    state["tailscale_incident"] = problem
+    state["tailscale_health_force_loud"] = True
+    logger.warning("Tailscale watchdog: %s", problem)
+    return (f"🔌 <b>FranklinWH: Tailscale problem</b>\n{problem[0].upper()}{problem[1:]}.\n"
+            f"The dashboard, phone widget and watch shortcut can't reach this Mac until it's fixed.\n{fix}")
+
+
+def _alert_tailscale_key_expiry(state: dict, today: str, now: datetime, status) -> str | None:
+    """Reminders at 30, 7 and 1 days before this node's Tailscale key expires (an expired key signs
+    the node out, which takes the widget and watch offline). Once per threshold per key."""
+    if status is None or status.key_expiry is None:
+        return None
+    expiry = status.key_expiry.astimezone().replace(tzinfo=None)
+    rec = state.get("tailscale_key_alerts")
+    try:
+        same_key = isinstance(rec, dict) and abs(datetime.fromisoformat(rec["expiry"]) - expiry) < timedelta(days=1)
+    except (ValueError, KeyError, TypeError):
+        same_key = False
+    if not same_key:        # first sight, or the key was renewed: start the reminders over
+        rec = {"expiry": expiry.isoformat(), "sent": []}
+        state["tailscale_key_alerts"] = rec
+    days_left = (expiry - now).total_seconds() / 86400.0
+    due = [t for t in _TAILSCALE_KEY_REMINDER_DAYS if days_left <= t]
+    if not due or min(due) in rec["sent"]:
+        return None
+    nearest = min(due)
+    rec["sent"] = sorted(set(rec["sent"]) | {t for t in _TAILSCALE_KEY_REMINDER_DAYS if t >= nearest})
+    if nearest <= 7:
+        state["tailscale_key_expiry_force_loud"] = True
+    when = "in under a day" if days_left < 1 else f"in {int(days_left)} days"
+    if days_left <= 0:
+        when = "now"
+    return (f"🔑 <b>FranklinWH: Tailscale key expires {when}</b> ({expiry.strftime('%a %b %-d')})\n"
+            f"When it does, this Mac signs out and the dashboard, phone widget and watch shortcut go dark.\n"
+            f"Fix: Tailscale admin console → Machines → this Mac → ⋯ → Disable key expiry.")
+
+
 def _alert_tou_rates_stale(state: dict, today: str, now: datetime) -> str | None:
     """One-time critical alert the first time TOU rates cross the 180-day staleness
     threshold — previously this only surfaced as a buried note in the weekly summary,
@@ -6291,6 +6380,8 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
                                                                     _effective_reserve_pct(cfg, store, now))),
             ("area_power_outage",    lambda: _alert_area_power_outage(state, today, now, c, cfg)),
             ("tou_rates_stale",      lambda: _alert_tou_rates_stale(state, today, now)),
+            ("tailscale_health",     lambda: _alert_tailscale_health(state, today, now, tailscale_watch.cached_status())),
+            ("tailscale_key_expiry", lambda: _alert_tailscale_key_expiry(state, today, now, tailscale_watch.cached_status())),
             ("weather_stale",        lambda: _alert_weather_stale(state, today, now)),
             ("vpp_event_prep",       lambda: _alert_vpp_event_prep(state, today, now, c, cfg)),
             ("vpp_event_started",    lambda: _alert_vpp_event_started(state, today, now, cfg)),
