@@ -602,6 +602,7 @@ class TelegramChatBot:
                             "/unmute   — cancel an active mute\n"
                             "/snooze   — silence ONE alert: /snooze <alert> [hours]\n"
                             "/unsnooze — cancel: /unsnooze <alert>\n"
+                            "/outage   — backup runtime, will it reach sunrise, what to shed (a what-if when the grid is up)\n"
                             "/loud     — choose which alerts buzz your phone/watch (the rest arrive silently)\n"
                             "/quiet    — back to silent: /quiet <alert>\n"
                             "/clear    — reset conversation history"
@@ -680,6 +681,9 @@ class TelegramChatBot:
                         continue
                     if re.match(r"/(un)?snooze(\s|$)", text.lower()):
                         self._send(chat_id, self._snooze_command(text))
+                        continue
+                    if text.lower() == "/outage":
+                        threading.Thread(target=self._send_outage, args=(chat_id,), daemon=True).start()
                         continue
                     if re.match(r"/(loud|quiet)(\s|$)", text.lower()):
                         _lreply = self._loud_command(text)
@@ -2629,6 +2633,27 @@ class TelegramChatBot:
             if ok:
                 _save_peak_state(out, state)
         return ok, msg
+
+    def _outage_text(self, now: datetime) -> str:
+        """/outage: backup runtime and the sunrise verdict at the current load — live when the grid is
+        down, a what-if when it is up (outage.py)."""
+        from . import outage
+        from .alerts import _outage_report_now
+        stats, forecast, outlook, store, state = self._snapshot_for_report()
+        if stats is None or forecast is None:
+            return "No data yet — advisor hasn't completed its first check."
+        c = stats.current
+        report = _outage_report_now(c, self._cfg, outlook, forecast, store, state, now)
+        if report is None:
+            return "Can't work out the backup runtime without a forecast yet."
+        return outage.format_report(report, now, grid_down=getattr(c, "grid_status", "normal") == "down")
+
+    def _send_outage(self, chat_id: str) -> None:
+        try:
+            self._send(chat_id, self._outage_text(datetime.now()))
+        except Exception:
+            logger.exception("/outage failed")
+            self._send(chat_id, "Couldn't work out the outage numbers just now. Try again in a minute.")
 
     # Alerts worth offering as one-tap buzz toggles in /loud (any promoted alert is listed too).
     _LOUD_SUGGESTED = ("low_soc_1pm", "car_on_peak", "evening_short", "drain_target_reached")

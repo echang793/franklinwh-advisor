@@ -1051,7 +1051,7 @@ _PEAK_STATE_FILE = ".peak_alert_state.json"
 _CMR_OUTAGE_FLAG = Path.home() / ".cmr-power-outage.flag"
 
 # Safety alerts that cannot be disabled by the user.
-_ALWAYS_ON_ALERTS = frozenset({"grid_down", "grid_restored", "area_power_outage", "fast_drain"})
+_ALWAYS_ON_ALERTS = frozenset({"grid_down", "grid_restored", "area_power_outage", "fast_drain", "outage_update"})
 
 # Alerts that set the `urgent` flag on the webhook payload and in the alert
 # log. Deliberately NOT the same set as _ALWAYS_ON_ALERTS: grid_restored is
@@ -4711,16 +4711,47 @@ def _conservation_advice(soc: float, load_kw: float, bat_cap: float) -> str:
     )
 
 
-def _alert_grid_down(state: dict, today: str, now: datetime, c, cfg: Config) -> str | None:
+def _outage_report_now(c, cfg: Config, outlook, usage_forecast, store, state: dict, now: datetime):
+    """The backup-runtime report for the current reading, or None without a forecast or battery size
+    (callers then fall back to the plain runtime line). Never raises: it runs inside a safety alert."""
+    from . import outage
+    try:
+        live = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
+        hours = list(getattr(live, "hours", None) or [])
+        if not hours:
+            return None
+        sunrise = None
+        if outlook is not None:
+            for d in (now, now + timedelta(days=1)):
+                s = outlook.sunrise_on(d)
+                if s is not None and s > now:
+                    sunrise = s
+                    break
+        return outage.outage_report(
+            c.battery_soc_pct, cfg.battery_capacity_kwh or _BATTERY_CAPACITY_KWH, c.home_load_kw, hours, now,
+            sunrise, outage.learned_loads(state.get("appliance_events", [])))
+    except Exception:
+        logger.exception("Outage report failed")
+        return None
+
+
+def _alert_grid_down(state: dict, today: str, now: datetime, c, cfg: Config,
+                     outlook=None, usage_forecast=None, store=None) -> str | None:
     if c.grid_status != "down" or _already_alerted(state, "grid_down_alerted_date", today):
         return None
     _mark_alerted(state, "grid_down_alerted_date", today)
     state["grid_down_start"]        = now.isoformat()
     state["grid_down_soc"]          = c.battery_soc_pct
+    state["outage_last_update"]     = now.isoformat()   # the hourly update counts from here
     logger.info("Grid-down alert sent for %s", today)
-    conservation = _conservation_advice(c.battery_soc_pct, c.home_load_kw, cfg.battery_capacity_kwh)
     gen_str = (f"\n🔌 Generator: {c.generator_production_kw:.2f} kW running"
                if c.generator_enabled and c.generator_production_kw > 0.1 else "")
+    report = _outage_report_now(c, cfg, outlook, usage_forecast, store, state, now)
+    if report is not None:
+        from . import outage
+        return (f"🔴 <b>FranklinWH: GRID DOWN at {now.strftime('%-I:%M %p')}</b>{gen_str}\n"
+                + outage.format_report(report, now, grid_down=True))
+    conservation = _conservation_advice(c.battery_soc_pct, c.home_load_kw, cfg.battery_capacity_kwh)
     tte = _time_to_pct(c.battery_soc_pct, 0.0, cfg.battery_capacity_kwh, c.battery_use_kw)
     tte_str = f"\n⏱ ~{_fmt_hours(tte)} to empty at current load" if tte is not None else ""
     return (
@@ -4728,6 +4759,33 @@ def _alert_grid_down(state: dict, today: str, now: datetime, c, cfg: Config) -> 
         f"🔋 {_soc_bar(c.battery_soc_pct)}  ·  Load <b>{c.home_load_kw:.2f} kW</b>\n"
         f"Solar {c.solar_production_kw:.2f} kW{gen_str}{tte_str}{conservation}"
     )
+
+
+def _alert_outage_update(state: dict, today: str, now: datetime, c, cfg: Config,
+                         outlook=None, usage_forecast=None, store=None) -> str | None:
+    """Every hour while the grid is down: where the battery stands and whether it reaches sunrise.
+    Silent unless it will NOT reach sunrise (`outage_update_force_loud` makes the dispatcher buzz)."""
+    from . import outage
+    if c.grid_status != "down" or "grid_down_start" not in state:
+        return None
+    try:
+        started = datetime.fromisoformat(state["grid_down_start"])
+        last = datetime.fromisoformat(state.get("outage_last_update") or state["grid_down_start"])
+    except (ValueError, TypeError):
+        return None
+    if now - last < timedelta(hours=1):
+        return None
+    report = _outage_report_now(c, cfg, outlook, usage_forecast, store, state, now)
+    if report is None:
+        return None
+    state["outage_last_update"] = now.isoformat()
+    if report.makes_sunrise is False:
+        state["outage_update_force_loud"] = True
+    else:
+        state.pop("outage_update_force_loud", None)
+    out_h = (now - started).total_seconds() / 3600.0
+    return (f"🔴 <b>FranklinWH: Outage update</b> · grid down {outage.fmt_duration(out_h)}\n"
+            + outage.format_report(report, now, grid_down=True).split("\n", 1)[1])
 
 
 def _alert_grid_restored(state: dict, now: datetime, c, cfg: Config) -> str | None:
@@ -4742,6 +4800,8 @@ def _alert_grid_restored(state: dict, now: datetime, c, cfg: Config) -> str | No
         return None
 
     soc_start    = state.pop("grid_down_soc", c.battery_soc_pct)
+    state.pop("outage_last_update", None)
+    state.pop("outage_update_force_loud", None)
     state.pop("grid_down_start")
     # Clear the per-day dedup flag on restore, not just on outage-start — grid
     # can drop more than once in a day, and grid_down/grid_restored are
@@ -6187,7 +6247,8 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("weekly_summary",    lambda: _alert_weekly_summary(state, today, now, store, cfg)),
             ("monthly_summary",   lambda: _alert_monthly_summary(state, today, now, store, cfg)),
             ("wh_mode_report",    lambda: _alert_wh_mode_report(state, today, now, store, cfg)),
-            ("grid_down",         lambda: _alert_grid_down(state, today, now, c, cfg)),
+            ("grid_down",         lambda: _alert_grid_down(state, today, now, c, cfg, outlook, usage_forecast, store)),
+            ("outage_update",     lambda: _alert_outage_update(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("grid_restored",     lambda: _alert_grid_restored(state, now, c, cfg)),
             ("fast_drain",        lambda: _alert_fast_drain(state, today, now, c, cfg, outlook, usage_forecast, store)),
             ("not_charging",      lambda: _alert_not_charging(state, today, now, c)),
@@ -6249,7 +6310,9 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
                     logger.exception("Alert candidate '%s' raised; skipping it this cycle", _name)
                     continue
                 if _body:
-                    to_send.append((_body, _name in _URGENT_ALERTS, _name, _is_loud(_name, cfg, state)))
+                    # A candidate can force this one send loud (e.g. an outage update that won't reach sunrise).
+                    _forced = bool(state.pop(f"{_name}_force_loud", False))
+                    to_send.append((_body, _name in _URGENT_ALERTS, _name, _forced or _is_loud(_name, cfg, state)))
         _save_peak_state(out, state)
 
     for body, urgent, name, loud in to_send:

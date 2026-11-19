@@ -574,6 +574,26 @@ def _besttime_inputs():
     return c, state, outlook, fc, history, _sundown_now()
 
 
+@app.get("/api/outage", dependencies=_authed)
+def api_outage():
+    """Backup runtime at the current load, whether it reaches sunrise, and the same on essentials only
+    (outage.py). Read-only; `grid_down` says whether an outage is actually in progress."""
+    from . import outage
+    from .alerts import _outage_report_now
+    inputs = _besttime_inputs()
+    if inputs is None:
+        return {"ok": False, "reason": "no_forecast", "grid_down": False, "report": None}
+    c, state, outlook, fc, store, now = inputs
+    try:
+        report = _outage_report_now(c, _cfg, outlook, fc, store, state, now)
+    finally:
+        if store is not None:
+            store.close()
+    if report is None:
+        return {"ok": False, "reason": "no_forecast", "grid_down": False, "report": None}
+    return {"ok": True, "grid_down": "grid_down_start" in state, "report": outage.to_dict(report)}
+
+
 _BESTTIME_PRESETS = ("dryer", "oven", "kitchen", "ac", "dishwasher")
 
 
