@@ -3375,7 +3375,7 @@ def _soft_eb_stats_outlook(soc=20.0):
 def test_vpp_event_overrides_soft_emergency_backup(monkeypatch):
     from franklinwh_scraper import advisor
 
-    now = datetime(2026, 8, 25, 17, 0, 0)
+    now = datetime(2026, 8, 25, 11, 0, 0)
     monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
     stats, outlook = _soft_eb_stats_outlook(soc=20.0)
 
@@ -3416,7 +3416,7 @@ def test_vpp_event_inactive_does_not_override(monkeypatch):
     ended) must not touch the recommendation at all."""
     from franklinwh_scraper import advisor
 
-    now = datetime(2026, 8, 25, 17, 0, 0)
+    now = datetime(2026, 8, 25, 11, 0, 0)
     monkeypatch.setattr(advisor, "datetime", _frozen_dt(now))
     stats, outlook = _soft_eb_stats_outlook(soc=20.0)
 

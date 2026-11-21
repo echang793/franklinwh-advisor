@@ -8,7 +8,7 @@ from enum import Enum
 
 from .account import Stats
 from .predictor import UsageForecast
-from .tou import cheap_charge_deadline, on_peak_window, period_at, rate_at
+from .tou import TouPeriod, cheap_charge_deadline, on_peak_window, period_at, rate_at
 from .weather import SolarOutlook
 
 
@@ -111,17 +111,18 @@ def _tou_eb_plan(
     peak_conf     = _window_confidence(forecast, peak_start, peak_end)
     window_conf   = _window_confidence(forecast, now, peak_end)
 
-    # ── Simulate battery from now → 4 pm ────────────────────────────
-    solar_until_peak = 0.0
-    load_until_peak  = 0.0
+    # ── Simulate battery from now → 4 pm, hour by hour ──────────────
+    # Walk the hours and clamp at empty/full EVERY step. Summing the whole span and clamping once
+    # (the old way) counted an early-morning dip to empty — which the grid covers at off-peak
+    # rates — as a debt that tomorrow's solar had to repay, and counted midday surplus that a full
+    # battery would have exported as if it could be banked. On 2026-11-20 that turned ~35% at 4 pm
+    # into 0% and produced a false "Switch to Emergency Backup" at 9 PM.
+    kwh_at_peak = max(0.0, min(capacity_kwh, current_kwh))
     if forecast and pre_peak_conf != "none":
-        for h in forecast.hours:
+        for h in sorted(forecast.hours, key=lambda x: x.dt):
             if now <= h.dt < peak_start:
-                solar_until_peak += max(0.0, h.predicted_solar_kw)
-                load_until_peak  += max(0.0, h.predicted_load_kw)
-
-    kwh_at_peak = max(0.0, min(capacity_kwh,
-                               current_kwh + solar_until_peak - load_until_peak))
+                net = max(0.0, h.predicted_solar_kw) - max(0.0, h.predicted_load_kw)
+                kwh_at_peak = max(0.0, min(capacity_kwh, kwh_at_peak + net))
     soc_at_peak = kwh_at_peak / capacity_kwh * 100.0
 
     # ── Forecast energy needed during 4–9 pm ────────────────────────
@@ -280,6 +281,11 @@ def _recommend_raw(
     # Compute TOU plan once — appended to all EB recommendations below
     now  = datetime.now()
     plan = _tou_eb_plan(now, soc, battery_capacity_kwh, forecast)
+    # Soft (reserve-building) EB calls only fire while the grid is at its cheapest. Outside a super
+    # off-peak window the user doesn't want "switch to EB" nudges (asked 2026-11-20): the projected
+    # shortfall still shows in `details`, the call just waits. Grid-down and critical-SoC calls
+    # below ignore this.
+    in_super_off_peak = period_at(now) == TouPeriod.SUPER_OFF_PEAK
     details.update({
         "tou_period":              plan["current_period"],
         "tou_rate_per_kwh":        plan["current_rate"],
@@ -344,7 +350,7 @@ def _recommend_raw(
         # 4pm. plan["eb_needed"] is derived from kwh_at_peak, which already
         # incorporates current SoC, so an extra current-SoC gate here only
         # ever suppresses correct recommendations, never adds useful signal.
-        if plan["eb_needed"]:
+        if plan["eb_needed"] and in_super_off_peak:
             return Recommendation(
                 mode=Mode.EMERGENCY_BACKUP,
                 reason=(
@@ -358,7 +364,7 @@ def _recommend_raw(
             )
         # Forecast shows battery sufficient — fall through to self-consumption / no-change
 
-    else:
+    elif in_super_off_peak:
         # No reliable history — fall back to static threshold logic
 
         # ── WARNING: usage pattern predicts large deficit + low SoC ─────
