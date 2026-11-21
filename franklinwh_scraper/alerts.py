@@ -5577,6 +5577,8 @@ def _alert_bill_projection(
 
 
 _BILL_MATCH_TOLERANCE_DAYS = 3
+_BILL_POSTS_AFTER_DAYS = 7       # SDG&E dates the bill ~6 days after close (Oct 16 -> Oct 22); +1 day margin
+_BILL_REMINDER_SPAN_DAYS = 7     # keep reminding this many days past the first one (late posting)
 _BILL_PCT_MIN_ESTIMATE = 5.0  # $ — below this, a percent-off figure is noise
 
 
@@ -5619,8 +5621,11 @@ def _alert_bill_reconciliation(
     `_alert_bill_projection` above only ever compares the model to itself
     (a partial-cycle extrapolation vs. its own inputs); this is the only
     place the estimate gets checked against a real, external number. Fires
-    once per cycle in a 3-10 day window after close (long enough for the
-    bill to likely be available, short enough to still be useful).
+    once per cycle, starting `bill_reminder_after_days` (default 7) after close
+    and running 7 more days: SDG&E dates the bill about 6 days after the cycle
+    ends (the Oct 16 bill appeared Oct 22), the extra day is margin so the
+    reminder never asks for a bill that isn't up yet, and the tail covers a
+    late posting.
     """
     if store is None or now.hour not in (8, 9):
         return None
@@ -5628,7 +5633,8 @@ def _alert_bill_reconciliation(
     cur_start, _cur_end = cycle_bounds(now.date(), start_day)
     prior_start, prior_end = cycle_bounds(cur_start - timedelta(days=1), start_day)
     days_since_close = (now.date() - prior_end).days
-    if days_since_close < 3 or days_since_close > 10:
+    first_day = max(1, int(getattr(cfg, "bill_reminder_after_days", _BILL_POSTS_AFTER_DAYS)))
+    if days_since_close < first_day or days_since_close > first_day + _BILL_REMINDER_SPAN_DAYS:
         return None
 
     reminded_key = f"bill_reconcile_reminded_{prior_end.isoformat()}"

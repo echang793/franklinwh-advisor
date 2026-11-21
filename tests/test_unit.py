@@ -2364,12 +2364,12 @@ def test_bill_reconciliation_reminds_when_no_actual_recorded(tmp_path):
     from franklinwh_scraper.config import Config as _C
 
     db = HistoryStore(tmp_path / "h.db")
-    # Cycle Jul 20 - Aug 19 closed; probe 5 days after close (Aug 24).
+    # Cycle Jul 20 - Aug 19 closed; probe 7 days after close (Aug 26).
     _insert_cycle_readings(db, 20, "2026-07", range(20, 32))
     _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
-    now = datetime(2026, 8, 24, 8, 30)
+    now = datetime(2026, 8, 26, 8, 30)
 
-    msg = alerts._alert_bill_reconciliation({}, "2026-08-24", now, _C(billing_cycle_start_day=20), db)
+    msg = alerts._alert_bill_reconciliation({}, "2026-08-26", now, _C(billing_cycle_start_day=20), db)
     assert msg is not None
     assert "Log your real bill" in msg
     assert "bill-record --amount" in msg
@@ -2381,10 +2381,10 @@ def test_bill_reconciliation_reports_diff_once_actual_recorded(tmp_path):
     db = HistoryStore(tmp_path / "h.db")
     _insert_cycle_readings(db, 20, "2026-07", range(20, 32))
     _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
-    now = datetime(2026, 8, 24, 8, 30)
+    now = datetime(2026, 8, 26, 8, 30)
 
     state = {"actual_bill_2026-08-19": 999.0}  # deliberately way off from the tiny synthetic load
-    msg = alerts._alert_bill_reconciliation(state, "2026-08-24", now, _C(billing_cycle_start_day=20), db)
+    msg = alerts._alert_bill_reconciliation(state, "2026-08-26", now, _C(billing_cycle_start_day=20), db)
     assert msg is not None
     assert "Bill reconciliation" in msg
     assert "actual $999.00" in msg
@@ -2392,7 +2392,7 @@ def test_bill_reconciliation_reports_diff_once_actual_recorded(tmp_path):
 
 
 def test_bill_reconciliation_report_sent_once_per_cycle_not_daily(tmp_path):
-    """Regression: the report re-fired every morning for the whole 3-10 day
+    """Regression: the report re-fired every morning for the whole 6-14 day
     window because dedup was per-day. Once reported, later days stay quiet."""
     from franklinwh_scraper.config import Config as _C
 
@@ -2401,12 +2401,12 @@ def test_bill_reconciliation_report_sent_once_per_cycle_not_daily(tmp_path):
     _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
     cfg = _C(billing_cycle_start_day=20)
     state = {"actual_bill_2026-08-19": 999.0}
-    day1 = datetime(2026, 8, 24, 8, 30)
-    assert alerts._alert_bill_reconciliation(state, "2026-08-24", day1, cfg, db) is not None
-    day2 = datetime(2026, 8, 25, 8, 30)
-    assert alerts._alert_bill_reconciliation(state, "2026-08-25", day2, cfg, db) is None
-    day3 = datetime(2026, 8, 26, 9, 5)
-    assert alerts._alert_bill_reconciliation(state, "2026-08-26", day3, cfg, db) is None
+    day1 = datetime(2026, 8, 26, 8, 30)
+    assert alerts._alert_bill_reconciliation(state, "2026-08-26", day1, cfg, db) is not None
+    day2 = datetime(2026, 8, 27, 8, 30)
+    assert alerts._alert_bill_reconciliation(state, "2026-08-27", day2, cfg, db) is None
+    day3 = datetime(2026, 8, 28, 9, 5)
+    assert alerts._alert_bill_reconciliation(state, "2026-08-28", day3, cfg, db) is None
 
 
 def test_find_actual_bill_tolerates_drifting_read_dates():
@@ -2449,10 +2449,10 @@ def test_bill_reconciliation_finds_bill_recorded_on_real_cycle_end(tmp_path):
     db = HistoryStore(tmp_path / "h.db")
     _insert_cycle_readings(db, 20, "2026-07", range(20, 32))
     _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
-    now = datetime(2026, 8, 24, 8, 30)  # app's prior cycle ends Aug 19
+    now = datetime(2026, 8, 26, 8, 30)  # app's prior cycle ends Aug 19
 
     state = {"actual_bill_2026-08-17": 999.0}  # user's real cycle ended 2 days earlier
-    msg = alerts._alert_bill_reconciliation(state, "2026-08-24", now, _C(billing_cycle_start_day=20), db)
+    msg = alerts._alert_bill_reconciliation(state, "2026-08-26", now, _C(billing_cycle_start_day=20), db)
     assert msg is not None
     assert "Bill reconciliation" in msg
     assert "actual $999.00" in msg
@@ -2473,7 +2473,7 @@ def _reconcile_with_estimate(tmp_path, monkeypatch, estimated, actual):
         actual_net_energy_cost=estimated - alerts.base_service_cost(31)))
     state = {"actual_bill_2026-08-19": actual}
     return alerts._alert_bill_reconciliation(
-        state, "2026-08-24", datetime(2026, 8, 24, 8, 30), _C(billing_cycle_start_day=20), db)
+        state, "2026-08-26", datetime(2026, 8, 26, 8, 30), _C(billing_cycle_start_day=20), db)
 
 
 def test_bill_reconciliation_percent_sane_when_estimate_is_negative(tmp_path, monkeypatch):
@@ -2495,6 +2495,46 @@ def test_bill_reconciliation_omits_percent_when_estimate_near_zero(tmp_path, mon
     assert "%" not in msg
 
 
+def test_bill_reconciliation_waits_for_sdge_to_post_the_bill(tmp_path):
+    """Regression 2026-11-21: reminders started 3 days after the cycle closed, but SDG&E posted the
+    Oct 16 bill on Oct 22 (6 days after), so Oct 19-21 nagged about a bill that wasn't there yet.
+    Cycle here closes Aug 19: quiet through day 6 (the day the bill is dated, with a day of margin
+    for it to actually show up), reminding from day 7 (Aug 26) through day 14."""
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    _insert_cycle_readings(db, 20, "2026-07", range(20, 32))
+    _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
+    cfg = _C(billing_cycle_start_day=20)
+
+    def remind(day):
+        return alerts._alert_bill_reconciliation({}, day.strftime("%Y-%m-%d"), day, cfg, db)
+
+    assert remind(datetime(2026, 8, 22, 8, 30)) is None       # day 3: used to fire
+    assert remind(datetime(2026, 8, 25, 8, 30)) is None       # day 6: bill dated today, may not show yet
+    assert "Log your real bill" in remind(datetime(2026, 8, 26, 8, 30))   # day 7
+    assert "Log your real bill" in remind(datetime(2026, 9, 2, 8, 30))    # day 14: last day
+    assert remind(datetime(2026, 9, 3, 8, 30)) is None                    # day 15: window over
+
+
+def test_bill_reconciliation_start_is_configurable_for_a_late_posting_utility(tmp_path):
+    """If the bill ever posts later than the default, `bill_reminder_after_days` pushes the nag back."""
+    from franklinwh_scraper.config import Config as _C
+
+    db = HistoryStore(tmp_path / "h.db")
+    _insert_cycle_readings(db, 20, "2026-07", range(20, 32))
+    _insert_cycle_readings(db, 20, "2026-08", range(1, 20))
+    cfg = _C(billing_cycle_start_day=20, bill_reminder_after_days=9)
+
+    def remind(day):
+        return alerts._alert_bill_reconciliation({}, day.strftime("%Y-%m-%d"), day, cfg, db)
+
+    assert remind(datetime(2026, 8, 27, 8, 30)) is None                    # day 8
+    assert "Log your real bill" in remind(datetime(2026, 8, 28, 8, 30))    # day 9
+    assert "Log your real bill" in remind(datetime(2026, 9, 4, 8, 30))     # day 16: start + 7
+    assert remind(datetime(2026, 9, 5, 8, 30)) is None                     # day 17
+
+
 def test_bill_reconciliation_gates_on_window_and_dedup(tmp_path):
     from franklinwh_scraper.config import Config as _C
 
@@ -2512,14 +2552,14 @@ def test_bill_reconciliation_gates_on_window_and_dedup(tmp_path):
     assert alerts._alert_bill_reconciliation({}, "2026-09-03", too_late, cfg, db) is None
 
     # In-window, wrong hour — gated to 8-9am.
-    wrong_hour = datetime(2026, 8, 24, 14, 0)
-    assert alerts._alert_bill_reconciliation({}, "2026-08-24", wrong_hour, cfg, db) is None
+    wrong_hour = datetime(2026, 8, 26, 14, 0)
+    assert alerts._alert_bill_reconciliation({}, "2026-08-26", wrong_hour, cfg, db) is None
 
     # In-window, right hour — fires once, then dedups same day.
-    now = datetime(2026, 8, 24, 8, 30)
+    now = datetime(2026, 8, 26, 8, 30)
     state = {}
-    assert alerts._alert_bill_reconciliation(state, "2026-08-24", now, cfg, db) is not None
-    assert alerts._alert_bill_reconciliation(state, "2026-08-24", now, cfg, db) is None
+    assert alerts._alert_bill_reconciliation(state, "2026-08-26", now, cfg, db) is not None
+    assert alerts._alert_bill_reconciliation(state, "2026-08-26", now, cfg, db) is None
 
 
 def test_get_vpp_event_active_upcoming_expired():
