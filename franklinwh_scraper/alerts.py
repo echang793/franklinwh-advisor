@@ -3970,6 +3970,68 @@ def _ev_car_gain_pct(home_kwh: float, pack_kwh: float, efficiency: float) -> flo
     return home_kwh * efficiency / pack_kwh * 100.0
 
 
+_EV_ROOM_MIN_COVER_HOUR = 16   # with no known sunset, tomorrow's forecast must reach at least this hour
+
+
+def _tomorrow_ev_room(state: dict, now: datetime, soc_at_sunrise: float, sunrise: datetime, cfg, outlook,
+                      forecast, store) -> dict | None:
+    """/evroom for TOMORROW: how much energy can go into the car, with nothing imported from the grid
+    through tomorrow's sundown and on until the following sunrise.
+
+    Walks tomorrow from `sunrise` at `soc_at_sunrise` (the digest's own overnight prediction) using the
+    forecast's solar and a *typical* load for tomorrow's weekday (typicalload: learned per weekday, car days
+    left out because the car is what is being sized; the forecast's own load when too little history). The
+    room is then _ev_room_plan's: battery above the reserve plus baseline until the next sunrise, plus the
+    surplus the battery was too full to take. None when there is no forecast or it ends before sundown, so a
+    half-covered day never produces a made-up number. `no_sun` is True when tomorrow has no sunny hour at
+    all: no room, and the line says so instead of staying silent."""
+    import dataclasses
+
+    from . import typicalload
+    hours = list(getattr(forecast, "hours", None) or [])
+    if not hours or soc_at_sunrise is None:
+        return None
+    tomorrow = sunrise.date()
+    sunset = _sunset_today(outlook, sunrise)
+    covered_until = max(h.dt for h in hours) + timedelta(hours=1)
+    needed_until = sunset or datetime(tomorrow.year, tomorrow.month, tomorrow.day, _EV_ROOM_MIN_COVER_HOUR)
+    if covered_until < needed_until:
+        return None
+
+    typical = typicalload.typical_hourly_load(store, tomorrow, state.get("car_day_labels"))
+    if typical is not None:
+        hours = [dataclasses.replace(h, predicted_load_kw=typical.by_hour.get(h.dt.hour, h.predicted_load_kw))
+                 if h.dt.date() == tomorrow else h for h in hours]
+    cap = getattr(cfg, "battery_capacity_kwh", None) or _BATTERY_CAPACITY_KWH
+    walk = _predict_sundown_soc(dataclasses.replace(forecast, hours=hours), sunrise, soc_at_sunrise, cap,
+                                getattr(cfg, "battery_reserve_pct", DEFAULT_RESERVE_PCT), sunset)
+    weekday = getattr(typical, "weekday_name", None) if typical is not None else None
+    if walk is None:
+        return {"no_sun": True, "soc_sundown_pct": None, "sundown_dt": None, "export_kwh": 0.0, "budget_kwh": 0.0,
+                "gain_pct": 0.0, "shortfall_kwh": 0.0, "typical_weekday": weekday}
+    raw_pct, sundown_dt, export_kwh = walk
+    soc_sundown = max(0.0, min(100.0, raw_pct + _get_sundown_bias(state)))
+    plan = _ev_room_plan(soc_sundown, export_kwh, sundown_dt, _next_sunrise_after(sundown_dt, outlook), cap,
+                         getattr(cfg, "ev_charge_floor_soc", 10.0), getattr(cfg, "no_ev_baseline_load_kw", 0.4))
+    gain = _ev_car_gain_pct(plan["budget_kwh"], getattr(cfg, "ev_pack_kwh", 75.0),
+                            getattr(cfg, "ev_charge_efficiency", 0.90))
+    return {"no_sun": False, "soc_sundown_pct": soc_sundown, "sundown_dt": sundown_dt, "export_kwh": export_kwh,
+            "budget_kwh": plan["budget_kwh"], "gain_pct": gain, "shortfall_kwh": plan["shortfall_kwh"],
+            "typical_weekday": weekday}
+
+
+def _tomorrow_ev_room_line(r: dict) -> str:
+    """The digest line for `_tomorrow_ev_room`'s answer ('\\n'-led like the digest's other optional lines)."""
+    if r["no_sun"]:
+        return "\n🚗 Tomorrow's car room: no room. Too little sun is forecast, so any car charging would import."
+    if r["budget_kwh"] < 0.1:
+        short = f" (~{r['shortfall_kwh']:.1f} kWh short even without the car)" if r["shortfall_kwh"] > 0.1 else ""
+        return f"\n🚗 Tomorrow's car room: no room. Any car charging would import from the grid{short}."
+    basis = f" ({r['typical_weekday']} load)" if r.get("typical_weekday") else ""
+    return (f"\n🚗 Tomorrow's car room: ~{r['budget_kwh']:.1f} kWh, about +{min(100.0, r['gain_pct']):.0f}% on the car, "
+            f"with no grid import through tomorrow night{basis}")
+
+
 def _sundown_window_had_ev_load(store, sundown_pred: dict) -> bool:
     """True if home load hit EV-charging level between the /sundown request
     and the predicted sundown. Such a day's miss is unforecastable noise —
@@ -4161,6 +4223,7 @@ def _alert_eod_digest(
     # Tonight's reserve: what to charge to so the morning needs no grid, with the margin
     # you have usually added on top. Recorded (it feeds the learned margin and /accuracy)
     # but not shown in the digest, by request 2026-10-28; /reserve still shows it.
+    live_fc = None
     try:
         live_fc = _live_anchored_forecast(state, c, outlook, usage_forecast, store)
         if live_fc is not None and getattr(live_fc, "hours", None):
@@ -4172,6 +4235,18 @@ def _alert_eod_digest(
                                                   "natural_6am_pct": round(rp["natural_6am_pct"], 1)}
     except Exception:
         logger.exception("Tonight's reserve suggestion failed; digest sent without it")
+
+    # Tomorrow's car room (by request 2026-11-21): how much the car can take tomorrow with no grid
+    # import, from the sunrise battery level above, tomorrow's solar and a typical load for its weekday.
+    ev_room_str = ""
+    if getattr(cfg, "ev_charging", False) and overnight is not None:
+        try:
+            room = _tomorrow_ev_room(state, now, overnight[0], checkpoint_dt, cfg, outlook,
+                                     live_fc or usage_forecast, store)
+            if room is not None:
+                ev_room_str = _tomorrow_ev_room_line(room)
+        except Exception:
+            logger.exception("Tomorrow's car room failed; digest sent without it")
 
     self_suff_str = ""
     attribution_str = ""
@@ -4295,7 +4370,7 @@ def _alert_eod_digest(
         f"Batt dis: {batt_dis_kwh:.1f} kWh\n"
         f"Home:     {home_kwh:.1f} kWh</code>{attribution_str}{self_suff_str}{peak_cov_str}{tou_str}{outage_str}\n"
         f"<code>─────────────────────</code>\n"
-        f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{precharge_str}"
+        f"🔋 {_soc_bar(soc)}{soc_6am_str}{solar_delta_str}{sundown_acc_str}{tmrw_solar_str}{ev_room_str}{precharge_str}"
     )
 
 
