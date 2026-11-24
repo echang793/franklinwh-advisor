@@ -5653,7 +5653,8 @@ def _alert_bill_projection(
 
 _BILL_MATCH_TOLERANCE_DAYS = 3
 _BILL_POSTS_AFTER_DAYS = 7       # SDG&E dates the bill ~6 days after close (Oct 16 -> Oct 22); +1 day margin
-_BILL_REMINDER_SPAN_DAYS = 7     # keep reminding this many days past the first one (late posting)
+_BILL_REMIND_EVERY_DAYS = 3      # then repeat this often until the bill is recorded
+_BILL_LAST_DAY = 29              # a bill can't be saved for a cycle older than this (entries expire at 30 days)
 _BILL_PCT_MIN_ESTIMATE = 5.0  # $ — below this, a percent-off figure is noise
 
 
@@ -5719,9 +5720,6 @@ def record_actual_bill(out: Path, cfg: Config, amount: float, cycle_end: date | 
     return end
 
 
-_BILL_REPLY_WINDOW_DAYS = 3      # a bare "$53.63" only counts this long after the reminder
-
-
 def bill_reply_pending(state: dict, cfg: Config, today: date) -> date | None:
     """End date of the cycle whose "Log your real bill?" reminder went out in the last few days
     and has no bill recorded yet, else None. Gates the bare-number reply so an unrelated number
@@ -5732,7 +5730,7 @@ def bill_reply_pending(state: dict, cfg: Config, today: date) -> date | None:
         sent_day = datetime.strptime(sent, "%Y-%m-%d").date()
     except (TypeError, ValueError):
         return None
-    if not 0 <= (today - sent_day).days < _BILL_REPLY_WINDOW_DAYS:
+    if not 0 <= (today - sent_day).days < _BILL_REMIND_EVERY_DAYS:
         return None
     return None if _find_actual_bill(state, end) is not None else end
 
@@ -5770,17 +5768,19 @@ def _alert_bill_reconciliation(
     state: dict, today: str, now: datetime, cfg: Config, store,
 ) -> str | None:
     """A few days after each billing cycle closes: remind the user to log
-    their real utility bill via `franklinwh bill-record --amount X`, or —
-    once they have — report how far the app's own cost model was off.
+    their real utility bill (reply `/bill 53.63`, or `franklinwh bill-record
+    --amount X`), or — once they have — report how far the app's own cost
+    model was off.
 
     `_alert_bill_projection` above only ever compares the model to itself
     (a partial-cycle extrapolation vs. its own inputs); this is the only
-    place the estimate gets checked against a real, external number. Fires
-    once per cycle, starting `bill_reminder_after_days` (default 7) after close
-    and running 7 more days: SDG&E dates the bill about 6 days after the cycle
-    ends (the Oct 16 bill appeared Oct 22), the extra day is margin so the
-    reminder never asks for a bill that isn't up yet, and the tail covers a
-    late posting.
+    place the estimate gets checked against a real, external number. The
+    first reminder comes `bill_reminder_after_days` (default 7) after close:
+    SDG&E dates the bill about 6 days after the cycle ends (the Oct 16 bill
+    appeared Oct 22) and the extra day is margin so the reminder never asks
+    for a bill that isn't up yet. It then repeats every 3 days until a bill
+    is recorded, or day 29, the last day one can still be saved. The
+    comparison itself is sent once.
     """
     if store is None or now.hour not in (8, 9):
         return None
@@ -5789,28 +5789,34 @@ def _alert_bill_reconciliation(
     prior_start, prior_end = cycle_bounds(cur_start - timedelta(days=1), start_day)
     days_since_close = (now.date() - prior_end).days
     first_day = max(1, int(getattr(cfg, "bill_reminder_after_days", _BILL_POSTS_AFTER_DAYS)))
-    if days_since_close < first_day or days_since_close > first_day + _BILL_REMINDER_SPAN_DAYS:
+    if days_since_close < first_day or days_since_close > _BILL_LAST_DAY:
         return None
 
     reminded_key = f"bill_reconcile_reminded_{prior_end.isoformat()}"
-    if state.get(reminded_key) == today:
-        return None
-    state[reminded_key] = today
-
     actual = _find_actual_bill(state, prior_end)
     if actual is None:
+        # Cadence runs from the last reminder actually sent, so a missed morning (advisor down at
+        # 8-9 AM) is caught up the next day instead of waiting out another 3 days.
+        try:
+            last = datetime.strptime(state.get(reminded_key), "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            last = None
+        if last is not None and (now.date() - last).days < _BILL_REMIND_EVERY_DAYS:
+            return None
+        state[reminded_key] = today
         logger.info("Bill reconciliation reminder sent for cycle ending %s", prior_end)
+        headline = "Log your real bill?" if last is None else "Still need your real bill"
         return (
-            f"💵 <b>FranklinWH: Log your real bill?</b>\n"
+            f"💵 <b>FranklinWH: {headline}</b>\n"
             f"Billing cycle ending {prior_end.strftime('%b %-d')} closed {days_since_close} days ago.\n"
             f"Just reply here with the cycle's total <b>charges</b> (before any credit on your account), "
             f"like <code>/bill 53.63</code>, to compare it against the app's estimate. "
-            f"Or run <code>franklinwh bill-record --amount X</code>."
+            f"Or run <code>franklinwh bill-record --amount X</code>. "
+            f"I'll remind you every {_BILL_REMIND_EVERY_DAYS} days until it's in."
         )
 
-    # The report is a one-shot per cycle; the per-day key above only
-    # throttles the reminder, so without this it repeated every morning
-    # for the whole 3-10 day window.
+    # The report is a one-shot per cycle; without this key it repeated every
+    # morning for as long as the window was open.
     reported_key = f"bill_reconcile_reported_{prior_end.isoformat()}"
     if state.get(reported_key):
         return None

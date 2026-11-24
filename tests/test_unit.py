@@ -2499,7 +2499,7 @@ def test_bill_reconciliation_waits_for_sdge_to_post_the_bill(tmp_path):
     """Regression 2026-11-21: reminders started 3 days after the cycle closed, but SDG&E posted the
     Oct 16 bill on Oct 22 (6 days after), so Oct 19-21 nagged about a bill that wasn't there yet.
     Cycle here closes Aug 19: quiet through day 6 (the day the bill is dated, with a day of margin
-    for it to actually show up), reminding from day 7 (Aug 26) through day 14."""
+    for it to actually show up), reminding from day 7 (Aug 26) every 3 days until day 29."""
     from franklinwh_scraper.config import Config as _C
 
     db = HistoryStore(tmp_path / "h.db")
@@ -2513,8 +2513,8 @@ def test_bill_reconciliation_waits_for_sdge_to_post_the_bill(tmp_path):
     assert remind(datetime(2026, 8, 22, 8, 30)) is None       # day 3: used to fire
     assert remind(datetime(2026, 8, 25, 8, 30)) is None       # day 6: bill dated today, may not show yet
     assert "Log your real bill" in remind(datetime(2026, 8, 26, 8, 30))   # day 7
-    assert "Log your real bill" in remind(datetime(2026, 9, 2, 8, 30))    # day 14: last day
-    assert remind(datetime(2026, 9, 3, 8, 30)) is None                    # day 15: window over
+    assert "Log your real bill" in remind(datetime(2026, 9, 17, 8, 30))   # day 29: last day a bill can be saved
+    assert remind(datetime(2026, 9, 18, 8, 30)) is None                   # day 30: it couldn't be recorded now
 
 
 def test_bill_reconciliation_start_is_configurable_for_a_late_posting_utility(tmp_path):
@@ -2531,8 +2531,8 @@ def test_bill_reconciliation_start_is_configurable_for_a_late_posting_utility(tm
 
     assert remind(datetime(2026, 8, 27, 8, 30)) is None                    # day 8
     assert "Log your real bill" in remind(datetime(2026, 8, 28, 8, 30))    # day 9
-    assert "Log your real bill" in remind(datetime(2026, 9, 4, 8, 30))     # day 16: start + 7
-    assert remind(datetime(2026, 9, 5, 8, 30)) is None                     # day 17
+    assert "Log your real bill" in remind(datetime(2026, 9, 17, 8, 30))    # runs on to day 29
+    assert remind(datetime(2026, 9, 18, 8, 30)) is None                    # day 30
 
 
 def test_bill_reconciliation_gates_on_window_and_dedup(tmp_path):
@@ -2547,9 +2547,9 @@ def test_bill_reconciliation_gates_on_window_and_dedup(tmp_path):
     too_soon = datetime(2026, 8, 20, 8, 30)
     assert alerts._alert_bill_reconciliation({}, "2026-08-20", too_soon, cfg, db) is None
 
-    # Too late (15 days) — window has passed.
-    too_late = datetime(2026, 9, 3, 8, 30)
-    assert alerts._alert_bill_reconciliation({}, "2026-09-03", too_late, cfg, db) is None
+    # Too late (30 days) — a bill can no longer be saved for this cycle.
+    too_late = datetime(2026, 9, 18, 8, 30)
+    assert alerts._alert_bill_reconciliation({}, "2026-09-18", too_late, cfg, db) is None
 
     # In-window, wrong hour — gated to 8-9am.
     wrong_hour = datetime(2026, 8, 26, 14, 0)

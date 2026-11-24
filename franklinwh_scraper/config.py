@@ -33,8 +33,9 @@ class Config:
     # per-meter read date, not a utility-wide constant — check your bill.
     billing_cycle_start_day: int = 20
     # Days after a billing cycle closes before the "Log your real bill?" reminder starts (it then
-    # runs 7 more days). SDG&E dates the bill ~6 days after close; the default adds a day of margin
-    # so the reminder doesn't ask for a bill that hasn't shown up yet. Raise it if yours posts later.
+    # repeats every 3 days until you record the bill). SDG&E dates the bill ~6 days after close; the
+    # default adds a day of margin so the reminder doesn't ask for a bill that hasn't shown up yet.
+    # Raise it if yours posts later.
     bill_reminder_after_days: int = 7
     # YYYY-MM-DD. Blank is honest and supported: without it the weekly
     # summary reports cycles "since tracking start" rather than inventing a
