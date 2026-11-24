@@ -1270,38 +1270,28 @@ def bill_record(ctx: click.Context, amount: float | None, from_text: str | None,
             raise click.ClickException("--export-credit and --export-kwh must both be positive.")
         learned_rate = round(export_credit / export_kwh, 4)
 
-    today = datetime.now().date()
-    _load_peak_state(outdir)  # installs real bill cycles so "most recently closed" matches the utility
-    cur_start, _cur_end = cycle_bounds(today, cfg.billing_cycle_start_day)
+    cycle_end_date = None
     if cycle_end:
         try:
-            end = datetime.strptime(cycle_end, "%Y-%m-%d").date()
+            cycle_end_date = datetime.strptime(cycle_end, "%Y-%m-%d").date()
         except ValueError:
             raise click.ClickException("--cycle-end must be YYYY-MM-DD")
-    else:
-        _, end = cycle_bounds(cur_start - timedelta(days=1), cfg.billing_cycle_start_day)
 
-    # _prune_old_state drops any actual_bill_* entry more than 30 days old
-    # the moment _save_peak_state next runs — which, for this key, is right
-    # now. Saving anyway would silently discard it with no sign anything
-    # went wrong; refuse instead and say why.
-    age_days = (today - end).days
-    if age_days > 29:
-        raise click.ClickException(
-            f"Cycle end {end.isoformat()} is {age_days} days old — too old, "
-            f"won't be kept (state entries expire after 30 days). "
-            f"Use a more recent --cycle-end."
-        )
-
-    with _state_lock(outdir):
-        state = _load_peak_state(outdir)
-        state[f"actual_bill_{end.isoformat()}"] = amount
-        if learned_rate is not None:
+    # Shared with the Telegram "/bill 53.63" reply; it refuses a cycle too old to be kept
+    # (_prune_old_state would drop the entry the moment it is saved).
+    from .alerts import record_actual_bill
+    try:
+        end = record_actual_bill(outdir, cfg, amount, cycle_end_date)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    if learned_rate is not None:
+        with _state_lock(outdir):
+            state = _load_peak_state(outdir)
             state["learned_export_rate"] = {
                 "rate": learned_rate, "cycle_end": end.isoformat(),
                 "credit": export_credit, "kwh": export_kwh,
             }
-        _save_peak_state(outdir, state)
+            _save_peak_state(outdir, state)
 
     _ok(f"Recorded ${amount:.2f} for the cycle ending {end.strftime('%b %-d, %Y')}")
     if learned_rate is not None:

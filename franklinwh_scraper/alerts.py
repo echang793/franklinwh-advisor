@@ -5686,6 +5686,86 @@ def _find_actual_bill(state: dict, cycle_end) -> float | None:
     return best[2] if best else None
 
 
+def _last_closed_cycle(cfg: Config, today: date) -> tuple[date, date]:
+    """(start, end) of the most recently closed billing cycle, using the real cycle
+    dates recorded from bills (callers load the peak state first, which installs them)."""
+    start_day = getattr(cfg, "billing_cycle_start_day", 20)
+    cur_start, _cur_end = cycle_bounds(today, start_day)
+    return cycle_bounds(cur_start - timedelta(days=1), start_day)
+
+
+def record_actual_bill(out: Path, cfg: Config, amount: float, cycle_end: date | None = None,
+                       today: date | None = None, mark_reported: bool = False) -> date:
+    """Save the real bill for a cycle (default: the most recently closed one) and return its end date.
+
+    One definition for `franklinwh bill-record --amount` and the Telegram reply. Raises ValueError
+    when the cycle is too old to keep: _prune_old_state drops actual_bill_* entries after 30 days
+    the moment the state is saved, so saving anyway would silently discard it.
+    `mark_reported` also files the morning "Bill reconciliation" as already sent, for callers
+    that answer with the comparison themselves."""
+    today = today or datetime.now().date()
+    _load_peak_state(out)    # installs the real bill cycles so "most recently closed" matches the utility
+    end = cycle_end or _last_closed_cycle(cfg, today)[1]
+    age_days = (today - end).days
+    if age_days > 29:
+        raise ValueError(f"Cycle end {end.isoformat()} is {age_days} days old — too old, won't be kept "
+                         f"(state entries expire after 30 days). Use a more recent cycle end.")
+    with _state_lock(out):
+        state = _load_peak_state(out)
+        state[f"actual_bill_{end.isoformat()}"] = amount
+        if mark_reported:
+            state[f"bill_reconcile_reported_{end.isoformat()}"] = today.isoformat()
+        _save_peak_state(out, state)
+    return end
+
+
+_BILL_REPLY_WINDOW_DAYS = 3      # a bare "$53.63" only counts this long after the reminder
+
+
+def bill_reply_pending(state: dict, cfg: Config, today: date) -> date | None:
+    """End date of the cycle whose "Log your real bill?" reminder went out in the last few days
+    and has no bill recorded yet, else None. Gates the bare-number reply so an unrelated number
+    sent to the bot is never taken for a bill."""
+    _start, end = _last_closed_cycle(cfg, today)
+    sent = state.get(f"bill_reconcile_reminded_{end.isoformat()}")
+    try:
+        sent_day = datetime.strptime(sent, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= (today - sent_day).days < _BILL_REPLY_WINDOW_DAYS:
+        return None
+    return None if _find_actual_bill(state, end) is not None else end
+
+
+def _usd(x: float, signed: bool = False) -> str:
+    sign = ("+" if signed else "") if x >= 0 else "-"
+    return f"{sign}${abs(x):.2f}"
+
+
+def bill_estimate(store, cfg: Config, start: date, end: date) -> float | None:
+    """What the app's cost model says the cycle `start`..`end` should have cost (None: no readings)."""
+    readings = store.weekly_readings(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+    if not readings:
+        return None
+    # Reuse savings.compute rather than hand-rolling the import/export
+    # integration again — savings.py's own docstring documents a real past
+    # bug where three call sites computed "savings" slightly differently
+    # and disagreed; this is the single definition, same one webapi.py's
+    # /api/bill uses for its own prior-cycle net cost.
+    sv = savings_compute(integrate_intervals(readings))
+    return sv.actual_net_energy_cost + base_service_cost((end - start).days + 1)
+
+
+def bill_comparison(actual: float, estimated: float) -> str:
+    """"actual $X vs app estimate $Y — off by +$Z (N%)". The percent is of |estimate|, shown only
+    when the estimate is big enough to mean something — a net-credit month (negative estimate) once
+    printed 11420% via max(estimated, 0.01), and any miss on a ~$0 bill looks enormous."""
+    diff = actual - estimated
+    pct = (f" ({abs(diff) / abs(estimated) * 100:.0f}%)"
+           if abs(estimated) >= _BILL_PCT_MIN_ESTIMATE else "")
+    return f"actual {_usd(actual)} vs app estimate {_usd(estimated)} — off by {_usd(diff, signed=True)}{pct}"
+
+
 def _alert_bill_reconciliation(
     state: dict, today: str, now: datetime, cfg: Config, store,
 ) -> str | None:
@@ -5723,8 +5803,9 @@ def _alert_bill_reconciliation(
         return (
             f"💵 <b>FranklinWH: Log your real bill?</b>\n"
             f"Billing cycle ending {prior_end.strftime('%b %-d')} closed {days_since_close} days ago.\n"
-            f"Run <code>franklinwh bill-record --amount X</code> to compare it against "
-            f"the app's estimate."
+            f"Just reply here with the cycle's total <b>charges</b> (before any credit on your account), "
+            f"like <code>/bill 53.63</code>, to compare it against the app's estimate. "
+            f"Or run <code>franklinwh bill-record --amount X</code>."
         )
 
     # The report is a one-shot per cycle; the per-day key above only
@@ -5734,36 +5815,15 @@ def _alert_bill_reconciliation(
     if state.get(reported_key):
         return None
 
-    readings = store.weekly_readings(
-        prior_start.strftime("%Y-%m-%d"), prior_end.strftime("%Y-%m-%d")
-    )
-    if not readings:
+    estimated = bill_estimate(store, cfg, prior_start, prior_end)
+    if estimated is None:
         return None
-    # Reuse savings.compute rather than hand-rolling the import/export
-    # integration again — savings.py's own docstring documents a real past
-    # bug where three call sites computed "savings" slightly differently
-    # and disagreed; this is the single definition, same one webapi.py's
-    # /api/bill uses for its own prior-cycle net cost.
-    sv = savings_compute(integrate_intervals(readings))
-    cycle_days = (prior_end - prior_start).days + 1
-    estimated  = sv.actual_net_energy_cost + base_service_cost(cycle_days)
-    diff       = actual - estimated
     logger.info("Bill reconciliation: actual $%.2f vs estimated $%.2f (diff $%.2f)",
-                actual, estimated, diff)
-    def _usd(x: float, signed: bool = False) -> str:
-        sign = ("+" if signed else "") if x >= 0 else "-"
-        return f"{sign}${abs(x):.2f}"
-
-    # Percent of |estimate| only when the estimate is big enough to mean
-    # something — a net-credit month (negative estimate) once printed 11420%
-    # via max(estimated, 0.01), and any miss on a ~$0 bill looks enormous.
-    pct = (f" ({abs(diff) / abs(estimated) * 100:.0f}%)"
-           if abs(estimated) >= _BILL_PCT_MIN_ESTIMATE else "")
+                actual, estimated, actual - estimated)
     state[reported_key] = today
     return (
         f"💵 <b>FranklinWH: Bill reconciliation</b>\n"
-        f"Cycle ending {prior_end.strftime('%b %-d')}: actual {_usd(actual)} vs "
-        f"app estimate {_usd(estimated)} — off by {_usd(diff, signed=True)}{pct}."
+        f"Cycle ending {prior_end.strftime('%b %-d')}: {bill_comparison(actual, estimated)}."
     )
 
 

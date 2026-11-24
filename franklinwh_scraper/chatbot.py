@@ -7,7 +7,7 @@ import logging
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -456,6 +456,29 @@ _EVROOM_RE = re.compile(
 )
 
 
+_BILL_EXPLICIT = re.compile(
+    r"^/?bill(?:@\w+)?\s+(?:is\s+)?(-?)\s*\$?\s*(\d{1,4}(?:\.\d{1,2})?)(?:\s+(\d{4}-\d{2}-\d{2}))?$", re.I)
+_BILL_BARE = re.compile(r"^\$?\s*(\d{1,4}(?:\.\d{1,2})?)$")
+
+
+def _parse_bill_reply(text: str, pending: bool) -> tuple[float, date | None] | None:
+    """A real utility bill typed to the bot: "/bill 53.63", "bill $53.63", "/bill 53.63 2026-11-18"
+    (the cycle's end date), or -- only while the "Log your real bill?" reminder is waiting
+    (`pending`) -- a bare "$53.63". Returns (amount, cycle_end or None), or None when it isn't one."""
+    t = (text or "").strip()
+    m = _BILL_EXPLICIT.match(t)
+    if m:
+        amount = float(m.group(2)) * (-1 if m.group(1) else 1)
+        if m.group(3) is None:
+            return amount, None
+        try:
+            return amount, datetime.strptime(m.group(3), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+    m = _BILL_BARE.match(t) if pending else None
+    return (float(m.group(1)), None) if m else None
+
+
 def _parse_evroom(text: str) -> tuple[float | None, float | None] | None:
     """Parse '/evroom [car %] [[to] trip target %]' -> (car_soc, target), or
     None if it isn't a valid /evroom command (bad %, target below the car's
@@ -578,6 +601,7 @@ class TelegramChatBot:
                             "/forecast — solar &amp; weather outlook\n"
                             "/history  — 7-day energy summary\n"
                             "/bill     — current billing cycle cost + projection\n"
+                            "/bill 53.63 — record your real bill (the cycle's charges) and see how far the estimate was\n"
                             "/tip      — best action right now\n"
                             "/modes    — explain battery modes\n"
                             "/until N  — time to reach N% SoC at current rate\n"
@@ -650,6 +674,10 @@ class TelegramChatBot:
                             args=(chat_id,),
                             daemon=True,
                         ).start()
+                        continue
+                    _bill_reply = self._bill_command(text)
+                    if _bill_reply is not None:
+                        self._send(chat_id, _bill_reply)
                         continue
                     if text.lower() == "/bill":
                         threading.Thread(
@@ -1317,7 +1345,7 @@ class TelegramChatBot:
                     ("evening", "What tonight needs and what you will have"), ("ebplan", "When to run Emergency Backup"),
                     ("plan", "Tell me what you will run today"), ("when", "Cheapest time to run the dryer, oven or car"), ("habits", "The big loads I have learned"),
                     ("today", "The day so far"), ("reserve", "What to charge to overnight"),
-                    ("bill", "This billing cycle against the last"), ("alerts", "What I sent lately"),
+                    ("bill", "This cycle so far, or /bill 53.63 to log your real bill"), ("alerts", "What I sent lately"),
                     ("accuracy", "How accurate the projections have been"), ("mute", "Pause non-safety alerts")]
         payload = json.dumps({"commands": [{"command": c, "description": d} for c, d in commands]}).encode()
         req = Request(f"https://api.telegram.org/bot{self._cfg.telegram_bot_token}/setMyCommands", data=payload,
@@ -2684,6 +2712,36 @@ class TelegramChatBot:
         rows = [[{"text": f"🔔 {n} (tap to silence)" if n in loud else f"🔕 {n} (tap to buzz)",
                   "callback_data": f"loud:{n}:{0 if n in loud else 1}"}] for n in shown]
         return {"inline_keyboard": rows}
+
+    def _bill_command(self, text: str, now: datetime | None = None) -> str | None:
+        """Record a real bill typed to the bot and say how far the app's estimate was.
+        None when the text isn't a bill reply, so it falls through to the other handlers."""
+        from pathlib import Path
+
+        from . import alerts
+        from .tou import cycle_bounds
+        now = now or datetime.now()
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        state = _load_peak_state(out)    # also installs the real bill cycles cycle_bounds relies on
+        pending = alerts.bill_reply_pending(state, self._cfg, now.date()) is not None
+        parsed = _parse_bill_reply(text, pending)
+        if parsed is None:
+            return None
+        amount, cycle_end = parsed
+        try:
+            end = alerts.record_actual_bill(out, self._cfg, amount, cycle_end, now.date(), mark_reported=True)
+        except ValueError as e:
+            return f"Not recorded: {e}"
+        reply = f"💵 Recorded {alerts._usd(amount)} for the cycle ending {end.strftime('%b %-d')}"
+        try:
+            if self._hist_store is not None:
+                start, _ = cycle_bounds(end, getattr(self._cfg, "billing_cycle_start_day", 20))
+                estimated = alerts.bill_estimate(self._hist_store, self._cfg, start, end)
+                if estimated is not None:
+                    return f"{reply}: {alerts.bill_comparison(amount, estimated)}."
+        except Exception:
+            logger.warning("bill comparison failed", exc_info=True)
+        return reply + "."
 
     def _loud_command(self, text: str) -> str:
         """Handle `/loud [alert]` and `/quiet <alert>`."""
