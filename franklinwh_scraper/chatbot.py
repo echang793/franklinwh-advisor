@@ -457,7 +457,8 @@ _EVROOM_RE = re.compile(
 
 
 _BILL_EXPLICIT = re.compile(
-    r"^/?bill(?:@\w+)?\s+(?:is\s+)?(-?)\s*\$?\s*(\d{1,4}(?:\.\d{1,2})?)(?:\s+(\d{4}-\d{2}-\d{2}))?$", re.I)
+    r"^/?bill(?:@\w+)?\s+(?:is\s+)?(-?)\s*\$?\s*(\d{1,4}(?:\.\d{1,2})?)(?:\s+(\d{4}-\d{2}-\d{2}))?"
+    r"(?:\s+(due|credit)\s+\$?(\d{1,4}(?:\.\d{1,2})?))?$", re.I)
 _BILL_BARE = re.compile(r"^\$?\s*(\d{1,4}(?:\.\d{1,2})?)$")
 
 
@@ -477,6 +478,13 @@ def _parse_bill_reply(text: str, pending: bool) -> tuple[float, date | None] | N
             return None
     m = _BILL_BARE.match(t) if pending else None
     return (float(m.group(1)), None) if m else None
+
+
+def _parse_bill_extras(text: str) -> dict:
+    """`due 31.70` or `credit 21.93` after the amount: what was owed after account credit, or the
+    credit that was applied. {} when absent."""
+    m = _BILL_EXPLICIT.match((text or "").strip())
+    return {m.group(4).lower(): float(m.group(5))} if m and m.group(4) else {}
 
 
 def _parse_evroom(text: str) -> tuple[float | None, float | None] | None:
@@ -601,7 +609,8 @@ class TelegramChatBot:
                             "/forecast — solar &amp; weather outlook\n"
                             "/history  — 7-day energy summary\n"
                             "/bill     — current billing cycle cost + projection\n"
-                            "/bill 53.63 — record your real bill (the cycle's charges) and see how far the estimate was\n"
+                            "/bill 53.63 — record your real bill (the cycle's charges); add 'due 31.70' if credit covered part\n"
+                            "/bills    — your real bills vs the app's estimates, and how accurate it has been\n"
                             "/tip      — best action right now\n"
                             "/modes    — explain battery modes\n"
                             "/until N  — time to reach N% SoC at current rate\n"
@@ -674,6 +683,9 @@ class TelegramChatBot:
                             args=(chat_id,),
                             daemon=True,
                         ).start()
+                        continue
+                    if text.lower().split("@")[0].strip() == "/bills":
+                        self._send(chat_id, self._bills_command())
                         continue
                     _bill_reply = self._bill_command(text)
                     if _bill_reply is not None:
@@ -1026,6 +1038,14 @@ class TelegramChatBot:
                                  f"pace for <b>{pace['change_pct']:+.0f}%</b>.")
             except Exception:
                 logger.warning("bill pace line failed", exc_info=True)
+            expect_line = ""
+            try:
+                from . import billledger
+                _exp = billledger.expected_line(
+                    billledger.load(self._outdir or Path(getattr(self._cfg, "output_dir", "output"))), projected_net)
+                expect_line = f"\n\n{_exp}" if _exp else ""
+            except Exception:
+                logger.warning("bill expectation line failed", exc_info=True)
             self._send(chat_id,
                 f"💡 <b>Billing Cycle</b> — {cycle_label} ({days_so_far} days)\n"
                 f"Grid import:  ${import_cost:.2f}\n"
@@ -1037,6 +1057,7 @@ class TelegramChatBot:
                 f"  Export:  ${projected_exp:.2f}\n"
                 f"  Base:    ${projected_base:.2f}\n"
                 f"  Net:     <b>${projected_net:.2f}</b>  (${daily_net:.2f}/day avg)"
+                f"{expect_line}"
                 f"{pace_line}"
             )
         except Exception as e:
@@ -2718,8 +2739,7 @@ class TelegramChatBot:
         None when the text isn't a bill reply, so it falls through to the other handlers."""
         from pathlib import Path
 
-        from . import alerts
-        from .tou import cycle_bounds
+        from . import alerts, billledger
         now = now or datetime.now()
         out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
         state = _load_peak_state(out)    # also installs the real bill cycles cycle_bounds relies on
@@ -2728,20 +2748,34 @@ class TelegramChatBot:
         if parsed is None:
             return None
         amount, cycle_end = parsed
+        extras = _parse_bill_extras(text)
         try:
-            end = alerts.record_actual_bill(out, self._cfg, amount, cycle_end, now.date(), mark_reported=True)
+            end = alerts.record_actual_bill(out, self._cfg, amount, cycle_end, now.date(), mark_reported=True,
+                                            store=self._hist_store, due=extras.get("due"),
+                                            credit=extras.get("credit"), source="reply")
         except ValueError as e:
             return f"Not recorded: {e}"
         reply = f"💵 Recorded {alerts._usd(amount)} for the cycle ending {end.strftime('%b %-d')}"
-        try:
-            if self._hist_store is not None:
-                start, _ = cycle_bounds(end, getattr(self._cfg, "billing_cycle_start_day", 20))
-                estimated = alerts.bill_estimate(self._hist_store, self._cfg, start, end)
-                if estimated is not None:
-                    return f"{reply}: {alerts.bill_comparison(amount, estimated)}."
-        except Exception:
-            logger.warning("bill comparison failed", exc_info=True)
-        return reply + "."
+        row = next((r for r in billledger.load(out) if r["end"] == end.isoformat()), {})
+        if isinstance(row.get("estimate"), (int, float)):
+            reply += f": {alerts.bill_comparison(amount, row['estimate'])}"
+        reply += "."
+        if isinstance(row.get("credit_applied"), (int, float)):
+            reply += f"\nCredit {alerts._usd(row['credit_applied'])} applied, {alerts._usd(row['due'])} due."
+        elif isinstance(row.get("due"), (int, float)):
+            reply += f"\n{alerts._usd(row['due'])} due."
+        return reply
+
+    def _bills_command(self) -> str:
+        """The ledger of real bills against the app's estimates, and how the estimate has been running."""
+        from pathlib import Path
+
+        from . import billledger
+        out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        rows = billledger.load(out)
+        if not rows:
+            return "No bills recorded yet. Reply /bill 53.63 (the cycle's charges) after a bill posts."
+        return "💵 <b>Real bills vs the app's estimates</b>\n" + billledger.format_summary(rows)
 
     def _loud_command(self, text: str) -> str:
         """Handle `/loud [alert]` and `/quiet <alert>`."""

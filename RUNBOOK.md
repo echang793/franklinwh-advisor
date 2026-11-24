@@ -114,6 +114,12 @@ curl -s "https://api.open-meteo.com/v1/forecast?latitude=32.97&longitude=-117.07
 
 ## Recording your bill (keeps every estimate accurate)
 
+**Easiest: reply to the Telegram bot.** When a cycle closes, the bot asks "Log your real bill?" a week later (`bill_reminder_after_days`, default 7, since SDG&E dates the bill about 6 days after close) and repeats every 3 days until you answer, or until day 29, the last day a bill can still be saved. Reply `/bill 53.63` with the cycle's total **charges** (not the amount due after account credit); add `due 31.70` or `credit 21.93` if credit covered part. It records the bill and replies with how far the app's estimate was. `/bills` lists every recorded bill, the Solar Billing Plan credit bank and the estimate's track record. The same thing from a terminal: `franklinwh bill-record --amount 53.63 [--due 31.70 | --credit 21.93] [--cycle-end YYYY-MM-DD]`, and `franklinwh bill-ledger` (add `--backfill` once to recover earlier cycles from `alerts_log.jsonl`).
+
+Every recorded bill is also written to `output/bill_ledger.json`, which is **not** pruned (the `actual_bill_*` state entries expire after 30 days). With three or more cycles the projections (`/bill`, the monthly projection alert, `/api/bill` fields `expected` and `accuracy`) add "Expect on the real bill", corrected for how the estimate has run.
+
+For a full recalibration, copy the bill's text instead:
+
 When each SDG&E/SDCP bill arrives, copy its text (the "Electric Service – Solar Billing Plan" page **and** the CCA generation page) and run:
 
 ```bash
@@ -121,7 +127,7 @@ franklinwh bill-record --from-text -      # paste the text, then press Ctrl-D
 franklinwh bill-record --from-text bill.txt --dry-run   # preview only
 ```
 
-It reads the billing period, next meter-read date, SDCP generation rates, export credits, fixed charge and the SDG&E delivery charge, then recalibrates: the actual-bill comparison (delivery + net generation, **excluding** the Climate Credit), the effective export $/kWh, the summer/winter generation rates, the fixed charge, the delivery residual (PCIA etc.) and the **real billing-cycle dates** — so cycles follow the meter read instead of a fixed day of the month. Estimates lag by at most one bill. A cycle that straddles the summer/winter change teaches both seasons' rates, and rates for a season are kept when a later bill covers the other one. If the bill's `Export Pricing:` line names a different vintage than the bundled schedule, it warns and points at the rebuild steps below. If it says "Couldn't find …", paste the missing page; the old `--amount` form still works.
+It first prints your bill against the app's own numbers for the cycle (kWh in and out, import charges, export credits, fixed fee) with a note on likely causes, and warns "Rate change:" where the bill's rates differ from the ones the app was using (generation rates, fixed charge, PCIA residual, export scale), then it reads the billing period, next meter-read date, SDCP generation rates, export credits, fixed charge and the SDG&E delivery charge, then recalibrates: the actual-bill comparison (delivery + net generation, **excluding** the Climate Credit), the effective export $/kWh, the summer/winter generation rates, the fixed charge, the delivery residual (PCIA etc.) and the **real billing-cycle dates** — so cycles follow the meter read instead of a fixed day of the month. Estimates lag by at most one bill. A cycle that straddles the summer/winter change teaches both seasons' rates, and rates for a season are kept when a later bill covers the other one. If the bill's `Export Pricing:` line names a different vintage than the bundled schedule, it warns and points at the rebuild steps below. If it says "Couldn't find …", paste the missing page; the old `--amount` form still works.
 
 ## Export credit pricing (hourly schedule)
 

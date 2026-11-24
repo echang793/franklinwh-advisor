@@ -5595,7 +5595,7 @@ def _alert_bill_pace(state: dict, today: str, now: datetime, store, cfg: Config)
 
 
 def _alert_bill_projection(
-    state: dict, today: str, now: datetime, store, cfg: Config,
+    state: dict, today: str, now: datetime, store, cfg: Config, out: Path | None = None,
 ) -> str | None:
     """5th of each month: project full-cycle bill from partial billing cycle data."""
     if store is None or now.day != 5 or now.hour not in (8, 9):
@@ -5636,6 +5636,11 @@ def _alert_bill_projection(
     _mark_alerted(state, "bill_projection_date", today)
     logger.info("Bill projection alert: %d days, net $%.2f/day → $%.2f projected",
                 days_so_far, daily_net, projected_net)
+    expect = ""
+    if out is not None:
+        from . import billledger
+        line = billledger.expected_line(billledger.load(out), projected_net)
+        expect = f"\n\n{line}" if line else ""
     return (
         f"💡 FranklinWH: Billing cycle projection\n"
         f"Cycle so far ({cycle_label}, {days_so_far} days):\n"
@@ -5648,6 +5653,7 @@ def _alert_bill_projection(
         f"Export:  ${projected_exp:.2f}\n"
         f"Base:    ${projected_base:.2f}\n"
         f"Net:     ${projected_net:.2f}  (${daily_net:.2f}/day avg)</code>"
+        f"{expect}"
     )
 
 
@@ -5695,15 +5701,49 @@ def _last_closed_cycle(cfg: Config, today: date) -> tuple[date, date]:
     return cycle_bounds(cur_start - timedelta(days=1), start_day)
 
 
+def _ledger_estimate(out: Path, cfg: Config, end: date, store) -> float | None:
+    """The app's estimate for the cycle ending `end`, for the bill ledger (None: no readings to price)."""
+    from .history import HistoryStore
+    start, _ = cycle_bounds(end, getattr(cfg, "billing_cycle_start_day", 20))
+    if store is not None:
+        return bill_estimate(store, cfg, start, end)
+    db = Path(out) / "history.db"
+    if not db.exists():
+        return None
+    with HistoryStore(db) as s:
+        return bill_estimate(s, cfg, start, end)
+
+
+def _write_ledger_row(out: Path, cfg: Config, end: date, amount: float, today: date, store,
+                      due: float | None, credit: float | None, source: str) -> None:
+    """Best effort: the permanent ledger must never cost the user the recording itself."""
+    try:
+        from . import billledger
+        row: dict = {"end": end.isoformat(), "actual": amount, "source": source,
+                     "recorded": today.isoformat(), "estimate": _ledger_estimate(out, cfg, end, store)}
+        if due is None and credit is not None:
+            due = max(0.0, amount - credit)
+        if due is not None:
+            row["due"] = round(due, 2)
+            applied = round(amount - due, 2)
+            if applied > 0:
+                row["credit_applied"] = applied
+        billledger.upsert(out, row)
+    except Exception:
+        logger.warning("bill ledger write failed", exc_info=True)
+
+
 def record_actual_bill(out: Path, cfg: Config, amount: float, cycle_end: date | None = None,
-                       today: date | None = None, mark_reported: bool = False) -> date:
+                       today: date | None = None, mark_reported: bool = False, store=None,
+                       due: float | None = None, credit: float | None = None, source: str = "reply") -> date:
     """Save the real bill for a cycle (default: the most recently closed one) and return its end date.
 
     One definition for `franklinwh bill-record --amount` and the Telegram reply. Raises ValueError
     when the cycle is too old to keep: _prune_old_state drops actual_bill_* entries after 30 days
     the moment the state is saved, so saving anyway would silently discard it.
     `mark_reported` also files the morning "Bill reconciliation" as already sent, for callers
-    that answer with the comparison themselves."""
+    that answer with the comparison themselves. `due`/`credit` (what was owed after account
+    credit, or the credit applied) go to the permanent bill ledger alongside the estimate."""
     today = today or datetime.now().date()
     _load_peak_state(out)    # installs the real bill cycles so "most recently closed" matches the utility
     end = cycle_end or _last_closed_cycle(cfg, today)[1]
@@ -5717,6 +5757,7 @@ def record_actual_bill(out: Path, cfg: Config, amount: float, cycle_end: date | 
         if mark_reported:
             state[f"bill_reconcile_reported_{end.isoformat()}"] = today.isoformat()
         _save_peak_state(out, state)
+    _write_ledger_row(out, cfg, end, amount, today, store, due, credit, source)
     return end
 
 
@@ -6497,7 +6538,7 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("peak_streak",          lambda: _alert_peak_streak(state, today, now)),
             ("peak_streak_good",     lambda: _alert_peak_streak_good(state, today, now)),
             ("self_sufficiency_streak", lambda: _alert_self_sufficiency_streak(state, today, now, store)),
-            ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store, cfg)),
+            ("bill_projection",      lambda: _alert_bill_projection(state, today, now, store, cfg, out)),
             ("bill_pace",            lambda: _alert_bill_pace(state, today, now, store, cfg)),
             ("away_mode",            lambda: _alert_away_mode(state, today, now, store)),
             ("pattern_question",     lambda: _alert_pattern_question(state, today, now, store)),

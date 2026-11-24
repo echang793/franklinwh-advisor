@@ -1168,6 +1168,31 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool, trust_gener
               "fee/PCIA residual would be computed against rates that weren't yet in effect, so it "
               "wasn't saved. Generation rates and cycle dates were still recorded.")
 
+    # Compare with the app's own numbers for the cycle, and check the bill's rates against the ones
+    # in use. Both BEFORE anything below learns this bill's values (nothing left to differ from after).
+    from . import billcompare
+    prior_state = _load_peak_state(outdir)       # installs the rates the app has actually been using
+    comparison = None
+    try:
+        if (outdir / "history.db").exists():
+            with HistoryStore(outdir / "history.db") as h:
+                ivs = integrate_intervals(h.weekly_readings(bill.period_start.isoformat(), end.isoformat()))
+            if ivs:
+                comparison = billcompare.compare(bill, billcompare.model_side(ivs, bill.days))
+    except Exception as e:  # noqa: BLE001 — the comparison is a bonus; never block recording the bill
+        _warn(f"Couldn't compare with the app's numbers ({e}).")
+    if comparison is not None:
+        _header("This bill vs the app's own numbers")
+        for ln in billcompare.format_comparison(comparison).splitlines():
+            click.echo("  " + ln)
+        for finding in comparison.findings:
+            _info(finding)
+    rate_changes = billcompare.rate_changes(bill, new_scale=scale_entry,
+                                            prior_scale=prior_state.get("learned_export_scale"),
+                                            check_delivery=not predates_tariff)
+    for change in rate_changes:
+        _warn("Rate change: " + change)
+
     if dry_run:
         _warn("Dry run — nothing saved.")
         return
@@ -1211,6 +1236,20 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool, trust_gener
             state["next_read_date"] = bill.next_read.isoformat()
         _save_peak_state(outdir, state)
 
+    try:    # the permanent ledger (state's actual_bill_* entries expire after 30 days)
+        from . import billledger
+        row: dict = {"end": end.isoformat(), "start": bill.period_start.isoformat(), "actual": bill.comparable_amount,
+                     "source": "bill-text", "recorded": datetime.now().date().isoformat(),
+                     "estimate": comparison.model_total if comparison is not None else None,
+                     "import_kwh": round(bill.import_kwh, 2), "export_kwh": round(bill.export_kwh, 2),
+                     "sbp_credited": bill.sbp_credited, "sbp_balance": bill.sbp_balance,
+                     "rate_changes": rate_changes or None}
+        if comparison is not None:
+            row["lines"] = {ln.key: {"bill": round(ln.bill, 2), "model": round(ln.model, 2)} for ln in comparison.lines}
+        billledger.upsert(outdir, row)
+    except Exception as e:  # noqa: BLE001
+        _warn(f"Couldn't update the bill ledger ({e}).")
+
     _ok("Recalibrated export rate, import rates, fixed charge and billing cycle from this bill")
     if keep_amount:
         _ok(f"Recorded ${bill.comparable_amount:.2f} for the cycle ending {end:%b %-d, %Y}")
@@ -1238,10 +1277,14 @@ def _record_bill_from_text(outdir: Path, source: str, dry_run: bool, trust_gener
                    "--export-kwh, teaches the app your real export $/kWh.")
 @click.option("--export-kwh", type=float, default=None,
               help="Total kWh exported on the bill (see --export-credit).")
+@click.option("--due", type=float, default=None,
+              help="What you actually owed after any account credit (e.g. charges $53.63, due $31.70).")
+@click.option("--credit", type=float, default=None,
+              help="Account credit applied against the charges (instead of --due).")
 @click.pass_context
 def bill_record(ctx: click.Context, amount: float | None, from_text: str | None, dry_run: bool,
                 trust_generation_rates: bool, cycle_end: str, export_credit: float | None,
-                export_kwh: float | None) -> None:
+                export_kwh: float | None, due: float | None, credit: float | None) -> None:
     """Record your real utility bill to compare against the app's projection.
 
     The app estimates your bill from grid import/export at published TOU
@@ -1261,6 +1304,8 @@ def bill_record(ctx: click.Context, amount: float | None, from_text: str | None,
         return
     if dry_run:
         raise click.ClickException("--dry-run only applies to --from-text.")
+    if due is not None and credit is not None:
+        raise click.ClickException("Give either --due or --credit (not both): each implies the other.")
 
     if (export_credit is None) != (export_kwh is None):
         raise click.ClickException("--export-credit and --export-kwh must be given together.")
@@ -1281,7 +1326,7 @@ def bill_record(ctx: click.Context, amount: float | None, from_text: str | None,
     # (_prune_old_state would drop the entry the moment it is saved).
     from .alerts import record_actual_bill
     try:
-        end = record_actual_bill(outdir, cfg, amount, cycle_end_date)
+        end = record_actual_bill(outdir, cfg, amount, cycle_end_date, due=due, credit=credit, source="cli")
     except ValueError as e:
         raise click.ClickException(str(e))
     if learned_rate is not None:
@@ -1298,6 +1343,30 @@ def bill_record(ctx: click.Context, amount: float | None, from_text: str | None,
         _ok(f"Export credit rate now ${learned_rate:.4f}/kWh "
             f"(${export_credit:.2f} / {export_kwh:g} kWh) — used for cost estimates going forward")
     click.echo("  Check the dashboard's billing card or `franklinwh doctor` for the projection diff.")
+
+
+@cli.command("bill-ledger")
+@click.option("--backfill", is_flag=True,
+              help="First recover past cycles from the 'Bill reconciliation' messages in alerts_log.jsonl.")
+@click.pass_context
+def bill_ledger_cmd(ctx: click.Context, backfill: bool) -> None:
+    """Your real bills against the app's estimates, and how accurate the estimate has been."""
+    import re
+
+    from . import billledger
+    cfg = ctx.obj["config"]
+    outdir = Path(cfg.output_dir)
+    if not outdir.is_absolute():
+        outdir = Path(__file__).parent.parent / outdir
+    if backfill:
+        added = billledger.seed_from_alert_log(outdir)
+        click.echo(f"  Recovered {added} past cycle{'s' if added != 1 else ''} from the alert log.")
+    rows = billledger.load(outdir)
+    if not rows:
+        click.echo("  No bills recorded yet. Reply /bill 53.63 to the Telegram bot, "
+                   "or run: franklinwh bill-record --amount 53.63")
+        return
+    click.echo(re.sub(r"</?code>", "", billledger.format_summary(rows)))
 
 
 # ── VPP events ───────────────────────────────────────────────────────

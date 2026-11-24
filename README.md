@@ -250,7 +250,9 @@ Enable it by running `python3 scrape.py setup` again and picking a chatbot backe
 | `/status` | Live battery, solar, grid snapshot — includes charge rate and estimated time to empty/full |
 | `/forecast` | Today's and tomorrow's solar outlook with irradiance bar chart |
 | `/history` | 7-day energy and TOU cost summary |
-| `/bill` | Current billing cycle cost and projected full-cycle total |
+| `/bill` | Current billing cycle cost and projected full-cycle total, plus "Expect on the real bill" (the projection corrected for how the estimate has run against your past real bills) once three bills are on file |
+| `/bill 53.63` | Record your real bill: the cycle's total **charges** (before any account credit). Add `due 31.70` (or `credit 21.93`) to note what credit covered. Answers with how far the app's estimate was. After the "Log your real bill?" reminder a bare `$53.63` works too |
+| `/bills` | Your real bills against the app's estimates, the Solar Billing Plan credit bank, and how accurate the estimate has been |
 | `/tip` | Best action right now based on current SoC, rate, and solar |
 | `/modes` | Explanation of Self-Consumption, Emergency Backup, and Time-of-Use modes |
 | `/until N` | Estimated time to reach N% SoC at the current charge or discharge rate — e.g. `/until 20`, `/until 80` |

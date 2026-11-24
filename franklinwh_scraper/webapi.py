@@ -1070,6 +1070,12 @@ def api_bill():
     actual_prior = _find_actual_bill(state, prior_end)
     diff_prior = round(actual_prior - prior["net"], 2) if isinstance(actual_prior, (int, float)) else None
 
+    # What to expect on the real bill: the projection corrected for how the estimate has run
+    # against past real bills (bill ledger). None until there are enough cycles to say.
+    from . import billledger
+    stats = billledger.accuracy(billledger.load(_OUT))
+    expected = billledger.expected(projected, stats)
+
     return {
         "cycle_start": start.isoformat(), "cycle_end": end.isoformat(),
         "day": day_n, "days": total_days,
@@ -1077,6 +1083,7 @@ def api_bill():
         "prior_net": prior["net"], "saved_mtd": cur["saved"],
         "prior_cycle_end": prior_end.isoformat(),
         "actual_prior": actual_prior, "diff_prior": diff_prior,
+        "expected": expected, "accuracy": stats,
     }
 
 

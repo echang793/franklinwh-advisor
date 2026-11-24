@@ -59,6 +59,9 @@ class ParsedBill:
     export_pricing_year: int | None = None       # "Export Pricing: Legacy 2024 Pricing" -> 2024
     gen_tier: str | None = None                  # "PowerBase" | "PowerOn" | "Power100" from the CCA line; None if unnamed
     notes: list[str] = field(default_factory=list)
+    generation_charge: float = 0.0               # positive $ SDCP billed for imported kWh (before export credits)
+    sbp_credited: float | None = None            # $ credited to the Solar Billing Plan bank this cycle
+    sbp_balance: float | None = None             # cumulative SBP credit bank after this bill
 
     @property
     def comparable_amount(self) -> float:
@@ -187,6 +190,8 @@ def parse_bill_text(text: str) -> ParsedBill:
     vint = re.search(r"(\d{4})\s+Vintage", text, re.I)
     export_year = re.search(r"Export Pricing:\s*Legacy\s+(\d{4})", text, re.I)
     climate = re.search(rf"California Climate Credit\s+({_NUM})", text, re.I)
+    sbp_c = re.search(rf"Credited to SBP Balance\s+({_NUM})", text, re.I)
+    sbp_b = re.search(rf"cumulative SBP Balance credit is now\s+({_NUM})", text, re.I)
 
     return ParsedBill(
         period_start=_mdy(per.group(1)), period_end=_mdy(per.group(2)), days=int(days_m.group(1)),
@@ -200,4 +205,7 @@ def parse_bill_text(text: str) -> ParsedBill:
         gen_export_credit=round(gen_export, 2), generation_net=round(generation_net, 2),
         gen_export_adder_rate=adder_rate, gen_export_adder_credit=round(adder_credit, 2),
         climate_credit=abs(_num(climate.group(1))) if climate else 0.0,
+        generation_charge=round(gen_charge, 2),
+        sbp_credited=_num(sbp_c.group(1)) if sbp_c else None,
+        sbp_balance=_num(sbp_b.group(1)) if sbp_b else None,
     )
