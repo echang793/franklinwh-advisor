@@ -1202,7 +1202,7 @@ def test_send_sundown_omits_export_line_when_battery_never_fills(tmp_path):
 
 
 def test_send_ebtarget_works_any_time_any_sky(tmp_path):
-    """/ebtarget is the on-demand version of _alert_cloudy_eb_target (which
+    """/ebtarget is the on-demand version of the morning alert's cloudy-day EB target (which
     only fires once, 7-8am, cloudy days only) — added 2026-09-09 after the
     user asked for this ad hoc mid-day and missed the morning alert
     entirely once. Must work regardless of hour or sky, unlike the alert."""
@@ -6450,7 +6450,8 @@ def test_alert_cold_snap_prep_silent_without_outlook():
     assert alerts._alert_cold_snap_prep({}, "2026-01-15", now, c, None) is None
 
 
-def test_alert_cloudy_eb_target_fires_with_median_and_p75():
+def test_cloudy_eb_section_gives_median_and_p75_targets():
+    """The old standalone "Cloudy day — EB charge target" alert is now a section of the morning alert."""
     import types
     now = datetime(2026, 9, 7, 7, 30)  # a Monday — not a _HEAVY_LOAD_WEEKDAYS day
     state = {"solar_cal_samples": [3.5, 3.6, 3.4]}  # >=3 -> _get_system_peak_kw bootstrap path
@@ -6459,52 +6460,43 @@ def test_alert_cloudy_eb_target_fires_with_median_and_p75():
     c = types.SimpleNamespace(battery_soc_pct=51.0)
     cfg = Config(battery_capacity_kwh=13.6)
 
-    body = alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, cfg, outlook, store)
-    assert body is not None
-    assert "Cloudy day" in body
+    body = alerts._cloudy_eb_section(state, now, c, cfg, outlook, store)
+    assert body.startswith("\n") and "EB target" in body
     # load_med = 17*1.0=17.0, load_p75 = 17*2.0=34.0, remaining_solar=5.0, cap=13.6
     # target_med = (17-5)/13.6*100 = 88.2% -> ~88%; target_p75 capped at 100%
     assert "~88%" in body
     assert "~100%" in body
-    assert state["cloudy_eb_alert_date"] == "2026-09-07"
-    # Dedup: no re-fire same day.
-    assert alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, cfg, outlook, store) is None
+    # No SoC bar, remaining-solar line or header: the morning alert already shows those.
+    assert "Cloudy day" not in body and "Remaining solar" not in body and "█" not in body
+    # A section is stateless: the morning alert owns the once-a-day dedup.
+    assert "cloudy_eb_alert_date" not in state
 
 
-def test_alert_cloudy_eb_target_silent_when_not_cloudy():
+def test_cloudy_eb_section_empty_when_not_cloudy():
     import types
     now = datetime(2026, 9, 7, 7, 30)
     state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
     outlook = _eb_target_outlook(cloudy=False)
     store = _EbTargetFakeStore()
     c = types.SimpleNamespace(battery_soc_pct=51.0)
-    assert alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, Config(), outlook, store) is None
+    assert alerts._cloudy_eb_section(state, now, c, Config(), outlook, store) == ""
 
 
-def test_alert_cloudy_eb_target_silent_outside_morning_window():
-    import types
-    now = datetime(2026, 9, 7, 11, 0)
-    state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
-    outlook = _eb_target_outlook(cloudy=True)
-    store = _EbTargetFakeStore()
-    c = types.SimpleNamespace(battery_soc_pct=51.0)
-    assert alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, Config(), outlook, store) is None
-
-
-def test_alert_cloudy_eb_target_silent_without_calibration_or_store():
+def test_cloudy_eb_section_empty_without_calibration_store_or_outlook():
     import types
     now = datetime(2026, 9, 7, 7, 30)
     outlook = _eb_target_outlook(cloudy=True)
     c = types.SimpleNamespace(battery_soc_pct=51.0)
     # No system-peak calibration yet.
-    assert alerts._alert_cloudy_eb_target({}, "2026-09-07", now, c, Config(),
-                                          outlook, _EbTargetFakeStore()) is None
+    assert alerts._cloudy_eb_section({}, now, c, Config(), outlook, _EbTargetFakeStore()) == ""
     # No store at all.
     state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
-    assert alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, Config(), outlook, None) is None
+    assert alerts._cloudy_eb_section(state, now, c, Config(), outlook, None) == ""
+    # No forecast at all.
+    assert alerts._cloudy_eb_section(state, now, c, Config(), None, _EbTargetFakeStore()) == ""
 
 
-def test_alert_cloudy_eb_target_sunday_uses_p75_as_typical():
+def test_cloudy_eb_section_sunday_uses_p75_as_typical():
     """User confirmed 2026-09-06 the dryer runs most Sundays — P75, not
     median, is Sunday's realistic baseline, so Sunday must lead with P75 as
     the primary target/switch-time and label it as the dryer-day default."""
@@ -6516,8 +6508,7 @@ def test_alert_cloudy_eb_target_sunday_uses_p75_as_typical():
     c = types.SimpleNamespace(battery_soc_pct=51.0)
     cfg = Config(battery_capacity_kwh=13.6)
 
-    body = alerts._alert_cloudy_eb_target(state, "2026-09-06", now, c, cfg, outlook, store)
-    assert body is not None
+    body = alerts._cloudy_eb_section(state, now, c, cfg, outlook, store)
     assert "~100%</b> for a typical dryer-day Sunday" in body
     assert "~88% if no dryer today" in body
 
@@ -6533,15 +6524,15 @@ def test_eb_switch_time_str_computes_from_deficit_and_charge_rate():
 
 
 def test_eb_switch_time_str_clamps_to_now_when_deadline_too_close():
-    """Mathematically unreachable through _alert_cloudy_eb_target's own
-    7-8am gate (see the function's own docstring) — tested directly here."""
+    """Mathematically unreachable through the morning alert's own window
+    (see _cloudy_eb_section's docstring) — tested directly here."""
     now = datetime(2026, 9, 6, 15, 55)
     deadline = datetime(2026, 9, 6, 16, 0)  # only 5 min left
     result = alerts._eb_switch_time_str(now, 0.0, 100.0, 13.6, deadline)
     assert result is not None and result.startswith("now")
 
 
-def test_alert_cloudy_eb_target_includes_switch_time():
+def test_cloudy_eb_section_includes_switch_time():
     import types
     now = datetime(2026, 9, 7, 7, 30)  # a Monday — not a _HEAVY_LOAD_WEEKDAYS day
     state = {"solar_cal_samples": [3.5, 3.6, 3.4]}
@@ -6551,7 +6542,7 @@ def test_alert_cloudy_eb_target_includes_switch_time():
 
     # soc=10%: below both targets (med 88%, p75 100% capped) -> both switch times shown.
     c = types.SimpleNamespace(battery_soc_pct=10.0)
-    body = alerts._alert_cloudy_eb_target(state, "2026-09-07", now, c, cfg, outlook, store)
+    body = alerts._cloudy_eb_section(state, now, c, cfg, outlook, store)
     assert "Reach 88% by 4:00 PM" in body
     assert "switch to EB at 1:52 PM" in body
     assert "Heavier day: 1:33 PM" in body
@@ -6559,9 +6550,43 @@ def test_alert_cloudy_eb_target_includes_switch_time():
     # soc=90%: above median target, below p75 -> "already at target" + heavier-day contingency.
     state2 = {"solar_cal_samples": [3.5, 3.6, 3.4]}
     c2 = types.SimpleNamespace(battery_soc_pct=90.0)
-    body2 = alerts._alert_cloudy_eb_target(state2, "2026-09-07", now, c2, cfg, outlook, store)
+    body2 = alerts._cloudy_eb_section(state2, now, c2, cfg, outlook, store)
     assert "Already at target — no EB needed for a typical Monday" in body2
     assert "Heavier day: switch to EB at 3:43 PM" in body2
+
+
+def test_cloudy_day_info_rides_in_the_morning_alert_not_a_separate_one(monkeypatch):
+    """Regression 2026-11-25: a cloudy morning sent the morning alert AND a second "Cloudy day — EB charge
+    target" alert. The target and switch time now live in the morning alert; nothing else is sent."""
+    import types
+    assert "cloudy_eb_target" not in alerts.known_alert_names()
+    assert not hasattr(alerts, "_alert_cloudy_eb_target")
+    monkeypatch.setattr(alerts, "_cloudy_eb_section", lambda *a, **k: "\n🌥️ EB target: MARKER")
+    now = datetime(2026, 11, 25, 7, 0)
+    c = types.SimpleNamespace(battery_soc_pct=11.0, solar_production_kw=0.2)
+    msg = alerts._alert_morning_preview({}, "2026-11-25", now, c, None, None, None, Config())
+    assert msg is not None and "EB target: MARKER" in msg and msg.count("FranklinWH") == 1
+
+
+def test_morning_alert_is_unchanged_on_a_clear_day(monkeypatch):
+    import types
+    monkeypatch.setattr(alerts, "_cloudy_eb_section", lambda *a, **k: "")
+    now = datetime(2026, 11, 25, 7, 0)
+    c = types.SimpleNamespace(battery_soc_pct=60.0, solar_production_kw=0.2)
+    msg = alerts._alert_morning_preview({}, "2026-11-25", now, c, None, None, None, Config())
+    assert msg is not None and "EB target" not in msg
+
+
+def test_a_failure_in_the_cloudy_section_never_costs_you_the_morning_alert(monkeypatch):
+    import types
+
+    def boom(*_a, **_k):
+        raise RuntimeError("kaboom")
+    monkeypatch.setattr(alerts, "_cloudy_eb_section", boom)
+    now = datetime(2026, 11, 25, 7, 0)
+    c = types.SimpleNamespace(battery_soc_pct=60.0, solar_production_kw=0.2)
+    msg = alerts._alert_morning_preview({}, "2026-11-25", now, c, None, None, None, Config())
+    assert msg is not None and "FranklinWH" in msg and "EB target" not in msg
 
 
 def test_alert_round_trip_efficiency_fires_on_sustained_drop():

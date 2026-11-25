@@ -2284,7 +2284,7 @@ class TelegramChatBot:
             self._send(chat_id, f"Error: {e}")
 
     def _send_ebtarget(self, chat_id: str) -> None:
-        """Respond to /ebtarget — on-demand version of _alert_cloudy_eb_target
+        """Respond to /ebtarget — on-demand version of the morning alert's cloudy-day EB target (_cloudy_eb_section)
         (alerts.py), which only fires once, 7-8am, cloudy days only. Added
         2026-09-09 after the user asked for this number ad hoc mid-day twice
         and missed the alert entirely the day it first shipped — same calc

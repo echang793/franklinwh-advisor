@@ -2797,13 +2797,18 @@ def _alert_morning_preview(
         peak_window_str = ""
 
     plan_str = _daily_plan(state, today, now, c, cfg, outlook, usage_forecast, store)
+    try:    # cloudy mornings only: the EB charge target and switch time (was a separate alert)
+        cloudy_eb_str = _cloudy_eb_section(state, now, c, cfg, outlook, store)
+    except Exception:
+        logger.exception("Cloudy EB target failed; morning alert sent without it")
+        cloudy_eb_str = ""
     score_str = _plan_scorecard(state, store, today, now)
     _mark_alerted(state, "morning_preview_date", today)
     logger.info("Morning preview alert sent for %s", today)
     return (
         f"☀️ <b>FranklinWH: {_morning_greeting(now)}</b>\n"
         f"🔋 {_soc_bar(soc)}  ·  Solar: <b>{solar_kw:.2f} kW</b>\n"
-        f"{solar_est}{peak_window_str}{plan_str}{soc_7am_acc_str}{score_str}"
+        f"{solar_est}{peak_window_str}{plan_str}{cloudy_eb_str}{soc_7am_acc_str}{score_str}"
     )
 
 
@@ -3015,7 +3020,7 @@ def _alert_drain_target_reached(
 
 
 # datetime.weekday(): Monday=0 .. Sunday=6. Days where P75 (not median) is
-# the realistic "typical" baseline — see _alert_cloudy_eb_target's docstring.
+# the realistic "typical" baseline — see _cloudy_eb_section's docstring.
 _HEAVY_LOAD_WEEKDAYS = {6}  # Sunday: recurring dryer day, confirmed 2026-09-06
 
 
@@ -3024,7 +3029,7 @@ def _eb_switch_time_str(
 ) -> str | None:
     """When to flip to Emergency Backup to reach target_pct by `deadline`, at
     the conservative advisor._EB_CHARGE_KW AC charge rate — or None if
-    already there. Module-level (not nested in _alert_cloudy_eb_target) so
+    already there. Module-level (not nested in _cloudy_eb_section) so
     the clamp-to-"now" branch is directly testable: it's mathematically
     unreachable through that alert's own 7-8am firing window given a 13.6
     kWh-class battery (max possible deficit only needs ~2.7h of EB, and
@@ -3045,13 +3050,13 @@ def _compute_eb_target(
     now: datetime, soc: float, cfg: Config, outlook, store, state: dict,
 ) -> dict | None:
     """Pure calc for the day's Emergency-Backup charge target — no gating,
-    no state mutation, no message text. Shared by _alert_cloudy_eb_target
+    no state mutation, no message text. Shared by _cloudy_eb_section
     (gated: 7-8am, cloudy only, once/day) and the chatbot's on-demand
     /ebtarget command (anytime, any sky — see chatbot.py's _send_ebtarget).
     Returns None if there isn't enough data yet (no system-peak calibration,
     no store, or no load history for this weekday/hour range).
 
-    See _alert_cloudy_eb_target's docstring for the full methodology
+    See _cloudy_eb_section's docstring for the full methodology
     (day-of-week load profile, median vs P75, the Sunday dryer-day
     override, and the known EV-metering caveat) — this function is just
     the numbers, not the explanation.
@@ -3098,10 +3103,8 @@ def _compute_eb_target(
     }
 
 
-def _alert_cloudy_eb_target(
-    state: dict, today: str, now: datetime, c, cfg: Config, outlook, store,
-) -> str | None:
-    """Morning guidance on a cloudy day: what SoC to charge to via Emergency
+def _cloudy_eb_section(state: dict, now: datetime, c, cfg: Config, outlook, store) -> str:
+    """The cloudy-day paragraph of the morning alert: what SoC to charge to via Emergency
     Backup to cover the rest of the day, for a user whose habit is charging
     the EV separately from the grid at super-off-peak on cloudy days (so EB
     only needs to cover home load, not EV) rather than relying on solar/
@@ -3131,15 +3134,18 @@ def _alert_cloudy_eb_target(
     undershoot on the day it matters most. Hardcoded per-weekday override
     rather than a general habit-detection feature; revisit if other
     days/appliances turn out to need the same treatment.
+
+    This used to be its own "Cloudy day — EB charge target" alert, sent beside the morning
+    alert (2026-09-06). Folded into the morning alert 2026-11-25 on request: two messages every
+    cloudy morning, one of them repeating the battery level and remaining sun the morning alert
+    already shows. Returns "" when it has nothing to say (not a cloudy day, no calibration,
+    store or forecast), else a "\n"-prefixed paragraph ready to append.
     """
-    if now.hour not in (7, 8) or _already_alerted(state, "cloudy_eb_alert_date", today):
-        return None
     soc = c.battery_soc_pct
     calc = _compute_eb_target(now, soc, cfg, outlook, store, state)
     if calc is None or not calc["cloudy"]:
-        return None
+        return ""
 
-    remaining_solar_kwh = calc["remaining_solar_kwh"]
     load_med, load_p75  = calc["load_med"], calc["load_p75"]
     target_med, target_p75 = calc["target_med"], calc["target_p75"]
     switch_med, switch_p75 = calc["switch_med"], calc["switch_p75"]
@@ -3155,29 +3161,25 @@ def _alert_cloudy_eb_target(
     secondary_switch_label = "no dryer today" if is_dryer_day else "heavier day"
 
     if primary_switch is None:
-        timing_str = f"\n⏰ Already at target — no EB needed for a {typical_label}."
+        timing_str = f"Already at target — no EB needed for a {typical_label}."
         if secondary_switch is not None:
             timing_str += f" ({secondary_switch_label.capitalize()}: switch to EB at {secondary_switch}.)"
     else:
-        timing_str = f"\n⏰ Reach {primary_target:.0f}% by {peak_start.strftime('%-I:%M %p')} — switch to EB at {primary_switch}."
+        timing_str = f"Reach {primary_target:.0f}% by {peak_start.strftime('%-I:%M %p')} — switch to EB at {primary_switch}."
         if secondary_switch is not None:
             timing_str += f" ({secondary_switch_label.capitalize()}: {secondary_switch}.)"
 
-    _mark_alerted(state, "cloudy_eb_alert_date", today)
     logger.info(
-        "Cloudy EB target alert sent for %s: soc=%.0f%% target_med=%.0f%% target_p75=%.0f%% "
+        "Cloudy EB target for %s: soc=%.0f%% target_med=%.0f%% target_p75=%.0f%% "
         "dryer_day=%s remaining_solar=%.1fkWh load_med=%.1fkWh load_p75=%.1fkWh "
         "switch_med=%s switch_p75=%s",
-        today, soc, target_med, target_p75, is_dryer_day, remaining_solar_kwh, load_med, load_p75,
-        switch_med, switch_p75,
+        now.strftime("%Y-%m-%d"), soc, target_med, target_p75, is_dryer_day, calc["remaining_solar_kwh"],
+        load_med, load_p75, switch_med, switch_p75,
     )
     return (
-        f"🌥️ <b>FranklinWH: Cloudy day — EB charge target</b>\n"
-        f"🔋 {_soc_bar(soc)}  ·  Remaining solar today: ~{remaining_solar_kwh:.1f} kWh\n"
-        f"Charge to <b>~{primary_target:.0f}%</b> for a {typical_label} "
-        f"(~{secondary_target:.0f}% {secondary_label})\n"
-        f"Based on {now.strftime('%A')} home-load history from {now.strftime('%-I%p').lower()} to midnight."
-        f"{timing_str}"
+        f"\n🌥️ EB target: <b>~{primary_target:.0f}%</b> for a {typical_label} "
+        f"(~{secondary_target:.0f}% {secondary_label}), from {now.strftime('%A')} load history.\n"
+        f"⏰ {timing_str}"
     )
 
 
@@ -6517,7 +6519,6 @@ def _check_peak_alerts(stats, cfg: Config, out: Path, outlook=None, usage_foreca
             ("low_morning_solar", lambda: _alert_low_morning_solar(state, today, now, c)),
             ("solar_stopped",     lambda: _alert_solar_stopped(state, today, now, c)),
             ("low_noon_soc",      lambda: _alert_low_noon_soc(state, today, now, c, cfg, outlook, usage_forecast, store)),
-            ("cloudy_eb_target",  lambda: _alert_cloudy_eb_target(state, today, now, c, cfg, outlook, store)),
             ("drain_target",      lambda: _alert_drain_target_reached(state, today, now, c, cfg, outlook)),
             ("export_arbitrage",  lambda: _alert_export_arbitrage(state, today, now, c, cfg, usage_forecast)),
             ("eod_digest",        lambda: _alert_eod_digest(state, today, now, stats, cfg, outlook, usage_forecast, store)),
