@@ -366,11 +366,16 @@ def _habit_loads(cfg, now: datetime, state: dict | None = None, store=None) -> l
 
 
 _PLAN_RE = re.compile(r"/plan(?:@\w+)?(?:\s+(.*))?$", re.I)
+_NO_CAR_RE = re.compile(r"\bno\s*car\b")
+_CAR_RE = re.compile(
+    r"\bcar\b(?:\s+(?:at\s+)?" + _HOUR + r"(?!\s*(?:h|hr|hrs|m|min)\b))?"
+    r"(?:\s+(?:for\s+)?(\d+(?:\.\d+)?)\s*(h|hr|hrs|m|min)\b)?")
 
 
 def _parse_plan(text: str) -> dict | None:
     """Parse '/plan dryer 4pm, oven 5pm for 90m' -> {"loads": [...]}, '/plan clear' -> {"clear": True},
-    a bare '/plan' -> {} (show it). None when it is not a valid /plan command."""
+    a bare '/plan' -> {} (show it). '/plan car [3pm] [for 90m]' -> {"car": {"start", "hours"}} (None =
+    your usual), '/plan no car' -> {"car": False}. None when it is not a valid /plan command."""
     m = _PLAN_RE.match(text.strip())
     if not m:
         return None
@@ -379,6 +384,17 @@ def _parse_plan(text: str) -> dict | None:
         return {"clear": True}
     if not rest:
         return {}
+    car: dict | bool | None = None
+    if _NO_CAR_RE.search(rest):
+        car, rest = False, _NO_CAR_RE.sub(" ", rest)
+    elif (cm := _CAR_RE.search(rest)) is not None:
+        start = _hour24(cm.group(1), cm.group(2)) if cm.group(1) else None
+        if cm.group(1) and start is None:
+            return None
+        hours = None
+        if cm.group(3):
+            hours = float(cm.group(3)) / (60.0 if cm.group(4).startswith("m") else 1.0)
+        car, rest = {"start": start, "hours": hours}, _CAR_RE.sub(" ", rest, count=1)
     loads = []
     for mm in _LOAD_RE.finditer(rest):
         d_start, d_hours, d_kw = _LOAD_DEFAULTS[mm.group(1)]
@@ -390,9 +406,12 @@ def _parse_plan(text: str) -> dict | None:
             hours = float(mm.group(4)) / (60.0 if mm.group(5).startswith("m") else 1.0)
         loads.append({"name": mm.group(1), "start": float(start), "hours": hours, "kw": d_kw})
     leftover = _LOAD_RE.sub(" ", rest).replace(",", " ").replace("and", " ").split()
-    if not loads or leftover:
+    if (not loads and car is None) or leftover:
         return None
-    return {"loads": loads}
+    out: dict = {"loads": loads} if loads else {}
+    if car is not None:
+        out["car"] = car
+    return out
 
 
 def _parse_ebplan(text: str) -> dict | None:
@@ -628,6 +647,7 @@ class TelegramChatBot:
                             "/week dryer|dishwasher|oven — best time each day this week, with the Delay End to set\n"
                             "/habits  — the big loads (dryer, oven) your history says you run, by weekday\n"
                             "/plan dryer 4pm, oven 5pm — tell me what you'll run today; /sundown, /evening and /ebplan count it (/plan clear)\n"
+                            "/plan car 3pm, /plan no car — whether the car charges today (sundown shows both until you say)\n"
                             "/cardays  — label which recent afternoons were the car\n"
                             "/ebplan [kWh] [load kW] [dryer|oven|ac [H] [Nh]] [from H] [to H|midnight] — EB charge needed for a grid-free window\n"
                             "/ebtarget — Emergency Backup charge target for today\n"
@@ -1251,6 +1271,9 @@ class TelegramChatBot:
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
         out = self._outdir or Path(getattr(self._cfg, "output_dir", "output"))
+        if what in ("car", "nocar"):
+            self._send_plan(chat_id, {"car": {"start": None, "hours": None} if what == "car" else False})
+            return
         if what == "none":
             with _state_lock(out):
                 state = _load_peak_state(out)
@@ -1407,7 +1430,7 @@ class TelegramChatBot:
             from pathlib import Path
 
             from . import planned
-            from .alerts import (_afternoon_profile, _effective_reserve_pct, _live_anchored_forecast,
+            from .alerts import (_afternoon_profile, _car_load_for, _effective_reserve_pct, _live_anchored_forecast,
                                  _load_peak_state, _planned_sundown, _save_peak_state, _state_lock,
                                  _sunset_today)
             args = args or {}
@@ -1424,7 +1447,22 @@ class TelegramChatBot:
                 if args.get("loads"):
                     planned.set_plan(state, today, args["loads"])
                     _save_peak_state(out, state)
-            loads = planned.get_plan(state, today)
+                car_arg = args.get("car")
+                if car_arg is not None:
+                    load = None
+                    if car_arg is not False:
+                        profile = _afternoon_profile(self._hist_store, now.date(), state.get("car_day_labels"))
+                        load = _car_load_for(profile, now.hour + now.minute / 60.0,
+                                             car_arg.get("start"), car_arg.get("hours"))
+                    planned.set_car(state, today, load)
+                    _save_peak_state(out, state)
+            loads = planned.with_car(state, today, planned.get_plan(state, today))
+            if not loads and args.get("car") is False:
+                from .alerts import _nav_buttons, _plan_prompt_rows
+                self._send(chat_id, "🚗 Noted: no car today. /plan clear resets it.",
+                           reply_markup={"inline_keyboard": _plan_prompt_rows(state, self._hist_store, now)
+                                         + [_nav_buttons(("plan",))]})
+                return
             if not loads:
                 from .alerts import _nav_buttons, _plan_prompt_rows
                 rows = _plan_prompt_rows(state, self._hist_store, now)
@@ -1743,7 +1781,21 @@ class TelegramChatBot:
                 return f" ({_pct(rng[1]):.0f}–{_pct(rng[0]):.0f}%)" if rng else ""
 
             car_str = ""
-            if profile is not None and sc["with_car"] is not None:
+            from . import planned
+            car_day = now.strftime("%Y-%m-%d")
+            car_answer, car_load = planned.car_answer(state, car_day), planned.car_load(state, car_day)
+            if car_load is not None:                          # you said it charges: that is the outcome
+                _b, with_car_pct, _dt = _planned_sundown(
+                    live_forecast, now, soc, cap, profile,
+                    planned.with_car(state, car_day, planned.get_plan(state, car_day)),
+                    _effective_reserve_pct(self._cfg, store, now), _sunset_today(outlook, now))
+                if with_car_pct is not None:
+                    extra = " and your plan" if planned.get_plan(state, car_day) else ""
+                    car_str += (f"\n🚗 With the car{extra} ({planned.span(car_load)}): "
+                                f"~<b>{_pct(with_car_pct):.0f}%</b>")
+            if car_answer is not None:
+                pass                                           # answered: no "if you charge" what-ifs
+            elif profile is not None and sc["with_car"] is not None:
                 odds = (f"{profile.weekday_name}s you've charged {profile.k_weekday} of {profile.n_weekday}"
                         if profile.n_weekday else "Overall you charge on ~"
                         f"{profile.n_sessions / max(1, profile.n_days):.0%} of days")
@@ -1754,7 +1806,7 @@ class TelegramChatBot:
                             f"~<b>{_pct(sc['with_car'][0]):.0f}%</b>{_spread(sc['with_car_range'])}")
             elif profile is not None and sc["car_now"]:
                 car_str += "\n🚗 The car looks like it's charging now; this assumes it stops within the hour."
-            if sc["with_morning"] is not None and morning is not None:
+            if car_answer is None and sc["with_morning"] is not None and morning is not None:
                 msize = f"typical {morning.kwh:.1f} kWh, usually {morning.kwh_lo:.1f}–{morning.kwh_hi:.1f}"
                 car_str += (f"\n🌅 If you top off this morning ({morning.weekday_name}s {morning.k_weekday} of "
                             f"{morning.n_weekday}; {msize}): ~<b>{_pct(sc['with_morning'][0]):.0f}%</b>"
@@ -1765,7 +1817,7 @@ class TelegramChatBot:
             try:
                 from . import planned
                 told = planned.get_plan(state, now.strftime("%Y-%m-%d"))
-                if told:
+                if told and car_load is None:                  # with a car, the line above already includes it
                     _b, with_plan, _dt = _planned_sundown(live_forecast, now, soc, cap, profile, told,
                                                           _effective_reserve_pct(self._cfg, store, now),
                                                           _sunset_today(outlook, now))
@@ -1802,6 +1854,8 @@ class TelegramChatBot:
                             f"{eb_profile.n_days} days like this{wd}; {size}): "
                             f"~<b>{_pct(sc['with_eb'][0]):.0f}%</b>{_spread(sc['with_eb_range'])}")
             label = " (quiet afternoon)" if profile is not None else ""
+            if car_load is not None:
+                label = " (before the car)"
             # Grid charging (Emergency Backup) isn't in the solar-minus-load walk.
             # Say so while it's happening, with what an hour of it is worth.
             eb_str = ""
@@ -1865,8 +1919,9 @@ class TelegramChatBot:
                 return evening.target_pct(kwh, cap, floor, margin)
 
             from . import planned
-            plan = planned.get_plan(state, now.strftime("%Y-%m-%d"))
-            plan_kwh = planned.evening_kwh(plan)
+            day = now.strftime("%Y-%m-%d")
+            plan = planned.get_plan(state, day)
+            plan_kwh = planned.evening_kwh(planned.with_car(state, day, plan))
             typ, hvy = level(me.median_kwh + plan_kwh), level(me.heavy_kwh + plan_kwh)
             a, b, c3 = me.segments
             lines = [f"🌆 <b>{me.name} evening, 4 PM–midnight</b>",
@@ -2567,6 +2622,7 @@ class TelegramChatBot:
                 if r.get("day") == day:
                     r["cause"] = cause
                     r["explained"] = cause == "car"
+                    r.pop("car", None)             # regraded from your answer on the next advisor cycle
             if cause == "car":
                 cars = state.get("car_day_labels", {})
                 cars[day] = True
@@ -2591,6 +2647,9 @@ class TelegramChatBot:
             labels = state.get("car_day_labels", {})
             labels[day] = was_car
             state["car_day_labels"] = {d: labels[d] for d in sorted(labels)[-180:]}
+            for r in state.get("sundown_resid", []):
+                if r.get("day") == day:
+                    r.pop("car", None)             # regraded from your answer on the next advisor cycle
             _mark_question_answered(state, "car", day)
             _save_peak_state(out, state)
         return True, (f"🚗 Counted {day} as a car day." if was_car

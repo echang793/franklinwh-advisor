@@ -8,6 +8,7 @@ hours, kw}, the same shape as Config.habit_loads gives /ebplan.
 
 EVENING_START_HOUR = 16        # evening.py's window: 4 PM to midnight
 _KEY = "planned_loads_"
+_CAR_KEY = "car_today_"
 
 
 def _valid(ld) -> bool:
@@ -39,6 +40,36 @@ def set_plan(state: dict, today: str, loads: list[dict]) -> list[dict]:
 
 def clear_plan(state: dict, today: str) -> None:
     state.pop(_KEY + today, None)
+    state.pop(_CAR_KEY + today, None)
+
+
+def set_car(state: dict, today: str, load: dict | None) -> None:
+    """Your answer to "charging the car today?": a {start, hours, kw} load, or None for no. Kept apart
+    from the load plan, so answering it says nothing about your other loads."""
+    state[_CAR_KEY + today] = ({"on": False} if load is None else
+                               {"on": True, "start": float(load["start"]), "hours": float(load["hours"]),
+                                "kw": float(load["kw"])})
+
+
+def car_answer(state: dict, today: str) -> bool | None:
+    """True / False once answered for today, None until then."""
+    raw = state.get(_CAR_KEY + today)
+    return bool(raw.get("on")) if isinstance(raw, dict) else None
+
+
+def car_load(state: dict, today: str) -> dict | None:
+    """The car as a planned load, when you said it charges today."""
+    raw = state.get(_CAR_KEY + today)
+    if not isinstance(raw, dict) or not raw.get("on"):
+        return None
+    load = {"name": "car", **{k: raw.get(k) for k in ("start", "hours", "kw")}}
+    return load if _valid(load) else None
+
+
+def with_car(state: dict, today: str, loads: list[dict]) -> list[dict]:
+    """`loads` plus today's car charge, if you said there is one."""
+    car = car_load(state, today)
+    return list(loads) if car is None else [ld for ld in loads if ld["name"] != "car"] + [car]
 
 
 def set_none(state: dict, today: str) -> None:

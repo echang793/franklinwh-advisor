@@ -61,6 +61,7 @@ _NOWCAST_MODEL_MIN_KW = 0.5           # only compare readings where the model ex
 _NOWCAST_MIN_READINGS = 12            # ~1h of polling before having any opinion
 _NOWCAST_FULL_WEIGHT_READINGS = 36    # ~3h of daytime data = full trust
 _NOWCAST_CLAMP = (0.5, 1.5)           # one bad stretch can't zero (or double) the day
+_NOWCAST_START_HOUR = 12              # the morning's ratio misleads (see solar_nowcast_factor)
 
 
 def solar_nowcast_factor(
@@ -73,6 +74,11 @@ def solar_nowcast_factor(
     Forecast GHI can be wrong for a whole day (2026-09-20: a marine-layer day
     forecast ~20 kWh delivered ~17). Once there's real production, that gap
     is far better evidence about the afternoon than yesterday's calibration.
+    Only from noon (_NOWCAST_START_HOUR). Replayed over 117 days (2026-11-26), scaling from the
+    morning's production made the remaining-solar forecast far worse (9 AM error 2.70 kWh vs 1.08
+    without; 11 AM 1.87 vs 1.26) while from noon it helped (12:30 0.95 vs 1.04, 3:30 PM 0.24 vs
+    0.31), the same in both halves of the period. Before noon it returns 1.0.
+
     Uses the same model as predict() (GHI x system peak x perf_ratio x hourly
     bias) over today's readings where the model expected meaningful sun.
     The ratio is clamped to _NOWCAST_CLAMP and shrunk toward 1.0 until about
@@ -82,6 +88,8 @@ def solar_nowcast_factor(
     if outlook is None or system_peak_kw is None:
         return 1.0
     now = now or datetime.now()
+    if now.hour < _NOWCAST_START_HOUR:
+        return 1.0
     try:
         rows = store.readings_between(
             now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(), now.isoformat())

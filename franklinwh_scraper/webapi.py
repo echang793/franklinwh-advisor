@@ -1321,7 +1321,7 @@ def _plan_payload(state: dict, now: datetime) -> dict:
              if h["weekday"] == now.weekday() and h["usual"] and h["start"] + h["hours"] > now_h]
     return {"date": today, "declared": planned.declared(state, today),
             "loads": [dict(ld, span=planned.span(ld)) for ld in loads],
-            "evening_kwh": round(planned.evening_kwh(loads), 2),
+            "evening_kwh": round(planned.evening_kwh(planned.with_car(state, today, loads)), 2),
             "usual": usual, "presets": _PLAN_PRESETS, "away_since": state.get("away_since")}
 
 

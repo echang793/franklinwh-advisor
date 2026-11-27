@@ -7536,6 +7536,21 @@ def test_nowcast_fails_open_without_readings():
                                           now=datetime(2026, 9, 25, 12, 0)) == 1.0
 
 
+@pytest.mark.parametrize("hour, minute", [(8, 0), (9, 0), (11, 0), (11, 59)])
+def test_nowcast_has_no_opinion_before_noon(hour, minute):
+    """Regression 2026-11-26: replaying 117 days, scaling the day from the morning's production made the
+    remaining-solar forecast far worse (9 AM error 2.70 kWh with it vs 1.08 without; 11 AM 1.87 vs 1.26),
+    while from noon on it helped (12:30 0.95 vs 1.04; 3:30 PM 0.24 vs 0.31). Morning shade, haze and low
+    sun say little about the afternoon."""
+    assert predictor.solar_nowcast_factor(_NowcastStore(2.0, 48), _NowcastOutlook(), 5.0,
+                                          now=datetime(2026, 9, 25, hour, minute)) == 1.0
+
+
+def test_nowcast_applies_from_noon_on():
+    assert predictor.solar_nowcast_factor(_NowcastStore(2.0, 48), _NowcastOutlook(), 5.0,
+                                          now=datetime(2026, 9, 25, 12, 0)) == pytest.approx(0.5)
+
+
 def test_predict_applies_nowcast_to_todays_remaining_hours_only(tmp_path, monkeypatch):
     fixed_now = datetime(2026, 9, 25, 20, 0)
 
@@ -10669,7 +10684,7 @@ def test_sundown_tracker_grades_a_finished_day(monkeypatch):
     monkeypatch.setattr(alerts, "predict", lambda *a, **kw: _sundown_forecast(now))
     state = _shadow_state()
     alerts._alert_sundown_tracker(state, "2026-10-25", now, _tracker_c(), None, None, _graded_store(act=74.0))
-    assert state["sundown_resid"] == [{"day": "2026-10-25", "slot": "12:30", "err": -6.0, "grid": False}]
+    assert state["sundown_resid"] == [{"day": "2026-10-25", "slot": "12:30", "err": -6.0, "grid": False, "car": False}]
     alerts._alert_sundown_tracker(state, "2026-10-25", now, _tracker_c(), None, None, _graded_store(act=10.0))
     assert len(state["sundown_resid"]) == 1                      # graded once, never re-graded
 
@@ -13566,6 +13581,7 @@ def test_plan_prompt_is_gone_once_you_have_answered(tmp_path):
     st: dict = {}
     from franklinwh_scraper import planned
     planned.set_none(st, "2026-11-15")
+    planned.set_car(st, "2026-11-15", None)          # the car is its own question, answered separately
     assert alerts._plan_prompt_rows(st, _strong_sundays(tmp_path), datetime(2026, 11, 15, 8, 0)) == []
 
 

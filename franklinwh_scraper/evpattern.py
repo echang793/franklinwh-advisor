@@ -56,6 +56,7 @@ class AfternoonEvProfile:
     n_sessions: int
     session_kwh_lo: float | None = None   # 25th / 75th percentile of a car day's kWh (the rate varies a lot)
     session_kwh_hi: float | None = None
+    session_start: float | None = None    # median clock hour a detected session starts
 
 
 def is_night(t: datetime) -> bool:
@@ -216,6 +217,7 @@ def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS,
         session_hours, session_kwh = 0.0, 0.0
         kwh_lo = kwh_hi = None
 
+    session_start = float(statistics.median(sessions[d]["start_hour"] for d in measured)) if measured else None
     wd = today.weekday()
     same = [d for d in usable if date.fromisoformat(d).weekday() == wd]
     k = sum(is_car[d] for d in same)
@@ -227,7 +229,7 @@ def build_profile(store, today: date, lookback_days: int = _LOOKBACK_DAYS,
         session_hours=session_hours, session_kwh=session_kwh,
         p_today=p_today, k_weekday=k, n_weekday=len(same), weekday_name=_WEEKDAYS[wd],
         n_days=len(usable), n_sessions=len(car_days),
-        session_kwh_lo=kwh_lo, session_kwh_hi=kwh_hi,
+        session_kwh_lo=kwh_lo, session_kwh_hi=kwh_hi, session_start=session_start,
     )
 
 

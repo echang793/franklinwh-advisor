@@ -303,7 +303,8 @@ def live_hours(c: Any, state: dict, outlook: Any, forecast: Any, store: Any, now
                 quiet = profile.quiet_by_hour.get(h.dt.hour)
                 if quiet is not None:
                     hours[i] = dataclasses.replace(h, predicted_load_kw=quiet)
-    return _lay(hours, planned.get_plan(state, now.strftime("%Y-%m-%d")), now.date())
+    day = now.strftime("%Y-%m-%d")
+    return _lay(hours, planned.with_car(state, day, planned.get_plan(state, day)), now.date())
 
 
 def for_snapshot(c: Any, state: dict, cfg: Any, outlook: Any, forecast: Any, store: Any, now: datetime,

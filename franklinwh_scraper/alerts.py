@@ -273,6 +273,34 @@ def _current_sundown_resid(state: dict) -> list[dict]:
     return state.get("sundown_resid", [])
 
 
+def _car_charged_between(store, start: str, end: str, labels: dict) -> bool:
+    """Did the car charge between `start` and `end` (iso times on one day)? Your "was that the car?"
+    answer wins: "no" means no; "yes" counts any draw at charging level in the window (a short
+    top-off the detector would skip). Unanswered, it takes a steady block like evpattern's. Reads
+    as False when the history can't answer, so older stores keep grading as before."""
+    from .evpattern import find_afternoon_session
+    answer = labels.get(start[:10])
+    if answer is False:
+        return False
+    try:
+        readings = [(r[0], r[2]) for r in store.readings_between(start, end)]
+    except Exception:
+        return False
+    if answer is True:
+        return max((kw for _ts, kw in readings), default=0.0) >= _NO_EV_LOAD_SPIKE_KW
+    return find_afternoon_session(readings) is not None
+
+
+def _backfill_sundown_car(state: dict, store) -> None:
+    """Give graded projections that predate the car flag (or whose day was just labelled) theirs."""
+    labels = state.get("car_day_labels", {})
+    for r in state.get("sundown_resid", []):
+        if "car" not in r and r.get("day") and r.get("slot"):
+            shot = state.get(f"sundown_shadow_{r['day']}", {}).get(r["slot"], {})
+            r["car"] = _car_charged_between(store, shot.get("at") or f"{r['day']}T{r['slot']}",
+                                            shot.get("dt") or f"{r['day']}T19:00", labels)
+
+
 def _record_sundown_resid(state: dict, entry: dict) -> None:
     resid = list(_current_sundown_resid(state))
     resid.append(entry)
@@ -331,7 +359,9 @@ def _grade_sundown_snapshots(state: dict, now: datetime, store) -> None:
             except Exception:
                 grid = False
             _record_sundown_resid(state, {"day": day, "slot": slot,
-                                          "err": round(actual - shot["pct"], 1), "grid": grid})
+                                          "err": round(actual - shot["pct"], 1), "grid": grid,
+                                          "car": _car_charged_between(store, shot.get("at", dt.isoformat()), shot["dt"],
+                                                                      state.get("car_day_labels", {}))})
 
 
 def _alert_sundown_tracker(state: dict, today: str, now: datetime, c, outlook, usage_forecast, store,
@@ -342,13 +372,16 @@ def _alert_sundown_tracker(state: dict, today: str, now: datetime, c, outlook, u
     cap = cap or _BATTERY_CAPACITY_KWH
     _snapshot_sundown(state, today, now, c, outlook, usage_forecast, store, cap, floor_pct)
     _grade_sundown_snapshots(state, now, store)
+    if store is not None:
+        _backfill_sundown_car(state, store)
     return None
 
 
 def _sundown_band(state: dict, now: datetime, early_ok: bool = False) -> tuple[float, float, int] | None:
     """(low, high, n): the 10th and 90th percentile of past misses (actual - raw
     projection, in points) for the latest snapshot slot at or before `now`, or None
-    until there is enough history. Grid-charged days are excluded."""
+    until there is enough history. Quiet days only: grid-charged days are excluded, and so are
+    days the car charged after the projection (it assumes no charging, so that miss is the car)."""
     chosen = None
     for h, m in _SUNDOWN_SLOTS:
         if now.replace(hour=h, minute=m, second=0, microsecond=0) <= now:
@@ -358,7 +391,7 @@ def _sundown_band(state: dict, now: datetime, early_ok: bool = False) -> tuple[f
             return None
         chosen = _slot_key(*_SUNDOWN_SLOTS[0])      # before the first snapshot time: the earliest record is the best proxy
     errs = [r["err"] for r in _current_sundown_resid(state)
-            if r.get("slot") == chosen and not r.get("grid") and not r.get("explained")]
+            if r.get("slot") == chosen and not r.get("grid") and not r.get("explained") and not r.get("car")]
     if len(errs) < _SUNDOWN_BAND_MIN:
         return None
     q = statistics.quantiles(errs, n=10, method="inclusive")
@@ -392,7 +425,7 @@ def _alert_sundown_drift(state: dict, today: str, now: datetime) -> str | None:
     cutoff = (now.date() - timedelta(days=14)).isoformat()
     errs = [r["err"] for r in _current_sundown_resid(state)
             if r.get("slot") in ("14:00", "15:30") and not r.get("grid") and not r.get("explained")
-            and r.get("day", "") >= cutoff]
+            and not r.get("car") and r.get("day", "") >= cutoff]
     if len(errs) < _DRIFT_MIN_SAMPLES:
         return None
     med = statistics.median(errs)
@@ -422,20 +455,30 @@ def _accuracy_report(state: dict, now: datetime) -> str:
         lines.append("No graded /sundown snapshots yet. They are taken at 9:00, 11:00, 12:30, 2:00 and 3:30 "
                      "each day and graded after sundown.")
     else:
-        rows = []
-        for h, m in _SUNDOWN_SLOTS:
-            key = _slot_key(h, m)
-            errs = [r["err"] for r in clean if r.get("slot") == key]
-            if not errs:
-                continue
-            label = datetime(2000, 1, 1, h, m).strftime("%-I:%M %p")
-            mae = sum(abs(e) for e in errs) / len(errs)
-            w5 = sum(abs(e) <= 5 for e in errs) / len(errs) * 100
-            w10 = sum(abs(e) <= 10 for e in errs) / len(errs) * 100
-            rows.append(f"{label:<8} n={len(errs):<3} miss {mae:4.1f} pts  ±5: {w5:3.0f}%  ±10: {w10:3.0f}%")
+        def table(group: list[dict]) -> str:
+            rows = []
+            for h, m in _SUNDOWN_SLOTS:
+                key = _slot_key(h, m)
+                errs = [r["err"] for r in group if r.get("slot") == key]
+                if not errs:
+                    continue
+                label = datetime(2000, 1, 1, h, m).strftime("%-I:%M %p")
+                mae = sum(abs(e) for e in errs) / len(errs)
+                w5 = sum(abs(e) <= 5 for e in errs) / len(errs) * 100
+                w10 = sum(abs(e) <= 10 for e in errs) / len(errs) * 100
+                rows.append(f"{label:<8} n={len(errs):<3} miss {mae:4.1f} pts  ±5: {w5:3.0f}%  ±10: {w10:3.0f}%")
+            return "<code>" + "\n".join(rows) + "</code>"
+
+        quiet = [r for r in clean if not r.get("car")]
+        cars = [r for r in clean if r.get("car")]
         first = min(r["day"] for r in clean)
         lines.append(f"🌇 Battery % at sundown, since {first} (projection made at each time of day):")
-        lines.append("<code>" + "\n".join(rows) + "</code>")
+        if quiet:
+            lines.append("Quiet days (no charging after the projection):")
+            lines.append(table(quiet))
+        if cars:
+            lines.append("Car days (the number assumes no charging, so this is mostly the car):")
+            lines.append(table(cars))
         lines.append("<i>Later in the day is tighter: the unknowns left are your own loads.</i>")
     cutoff = (now.date() - timedelta(days=14)).isoformat()
     ratios = [r for k, v in state.items()
@@ -1476,7 +1519,7 @@ _DATE_KEYED_PREFIXES = (
     "predicted_kwh_", "predicted_avg_ghi_", "predicted_cloudy_", "daily_import_cost_",
     "outages_", "sundown_pred_", "savings_daily_", "soc_7am_pred_",
     "actual_bill_", "perf_ratio_used_", "sundown_shadow_", "daily_plan_", "reserve_plan_", "eb_gate_",
-    "eb_timer_", "evening_short_", "sundown_watch_", "sunrise_watch_", "planned_loads_",
+    "eb_timer_", "evening_short_", "sundown_watch_", "sunrise_watch_", "planned_loads_", "car_today_",
 )
 
 
@@ -2059,7 +2102,7 @@ def _daily_plan(state: dict, today: str, now: datetime, c, cfg, outlook, usage_f
         sunset = _sunset_today(outlook, now)
         quiet = _afternoon_scenarios(live, now, c.battery_soc_pct, cap, profile, getattr(c, "home_load_kw", None),
                                      floor_pct=reserve, sunset=sunset)["quiet"]
-        from . import typicalload
+        from . import planned, typicalload
         typical = typicalload.typical_hourly_load(store, now.date(), state.get("car_day_labels"))
         lines: list[str] = []
         record: dict = {"window": list(_PLAN_WINDOW)}
@@ -2074,6 +2117,21 @@ def _daily_plan(state: dict, today: str, now: datetime, c, cfg, outlook, usage_f
                          f"{max(0.0, min(100.0, raw_pct + band[1])):.0f}%)")
             lines.append(line)
             record["sundown_pct"] = round(end_pct, 1)
+
+            # The car: what you said, or both outcomes until you say. Never guessed.
+            answer, car = planned.car_answer(state, today), planned.car_load(state, today)
+            usual_car = answer is None and profile is not None and profile.n_sessions >= 3
+            if car is not None or usual_car:
+                load = car or {"name": "car", **_car_load_for(profile, now.hour + now.minute / 60.0)}
+                _b, with_car, _dt = _planned_sundown(live, now, c.battery_soc_pct, cap, profile, [load], reserve, sunset)
+                if with_car is not None:
+                    car_pct = max(0.0, min(100.0, with_car + _get_sundown_bias(state)))
+                    if car is not None:
+                        lines.append(f"🚗 With the car ({planned.span(car)}): ~{car_pct:.0f}% at sundown.")
+                        record["sundown_pct"] = round(car_pct, 1)       # what tomorrow's scorecard grades
+                    else:
+                        lines.append(f"🚗 If you charge the car ({planned.span(load)}): ~{car_pct:.0f}%. "
+                                     "Tap below to tell me.")
 
         if typical is not None:
             lines.append(f"📊 Counting a typical {typical.weekday_name} evening (~{typical.evening_kwh:.1f} kWh from 2 PM "
@@ -2262,7 +2320,7 @@ def _alert_evening_short(state: dict, today: str, now: datetime, c, cfg, outlook
             if with_usual is not None:
                 proj = max(0.0, min(100.0, with_usual + _get_sundown_bias(state)))
                 usual_note = f" (counting your usual {now.strftime('%A')} load)"
-    plan_kwh = planned.evening_kwh(plan)                    # what you said you will run, on top of a usual night
+    plan_kwh = planned.evening_kwh(planned.with_car(state, today, plan))   # your plan and car, on top of a usual night
     typ = evening.target_pct(me.median_kwh + plan_kwh, cap, floor, margin)
     hvy = evening.target_pct(me.heavy_kwh + plan_kwh, cap, floor, margin)
     if proj >= hvy + _EVENING_ALERT_CUSHION_PTS:
@@ -2392,11 +2450,11 @@ def _sundown_report(state: dict, now: datetime, c, cfg, outlook, usage_forecast,
     weekday = now.strftime("%A")
     now_h = now.hour + now.minute / 60.0
     scenarios: list[dict] = []
-    if profile is not None and sc["with_car"] is not None:
+    if profile is not None and sc["with_car"] is not None and planned.car_answer(state, today) is None:
         scenarios.append({"key": "car", "label": "If you charge the car this afternoon", "pct": pct(sc["with_car"][0])})
     if typical is not None and sc["typical"] is not None and abs(sc["typical"][0] - raw_pct) >= 1.5:
         scenarios.append({"key": "typical", "label": f"A typical {weekday} afternoon", "pct": pct(sc["typical"][0])})
-    plan = planned.get_plan(state, today)
+    plan = planned.with_car(state, today, planned.get_plan(state, today))
     reserve = floor
     if plan:
         _b, with_plan, _dt = _planned_sundown(live, now, soc, cap, profile, plan, reserve, sunset)
@@ -3589,6 +3647,18 @@ def _afternoon_profile(store, today, labels=None):
     except Exception:
         logger.debug("afternoon car-session profile unavailable", exc_info=True)
         return None
+
+
+def _car_load_for(profile, now_hour: float, start: float | None = None, hours: float | None = None) -> dict:
+    """{start, hours, kw} for "the car charges today": your own typical session (when learned), from
+    its usual start, or from now if that has passed. `start`/`hours` you gave win."""
+    kw = round(profile.session_kw, 2) if profile is not None and profile.session_kw >= 1.0 else 3.0
+    if hours is None:
+        hours = round(profile.session_hours, 2) if profile is not None and profile.session_hours > 0 else 2.5
+    if start is None:
+        usual = getattr(profile, "session_start", None)
+        start = max(float(now_hour), float(usual if usual is not None else 15.0))
+    return {"start": float(start), "hours": float(hours), "kw": float(kw)}
 
 
 def _car_question_buttons(day: str) -> list[dict]:
@@ -5458,20 +5528,28 @@ def _nav_buttons(exclude: tuple = ()) -> list[dict]:
 
 def _plan_prompt_rows(state: dict, store, now: datetime) -> list[list[dict]]:
     """Buttons for "what will you run today?": your learned usual day (when there is one), no big loads,
-    or a quick dryer / oven. [] once you have answered for today."""
+    or a quick dryer / oven, until you have answered. A separate row asks about the car until you
+    answer that, in a house whose history shows car charging."""
     from . import loadevents, planned
-    if planned.declared(state, now.strftime("%Y-%m-%d")):
-        return []
-    first = [{"text": "🚫 No big loads", "callback_data": "plan:none"}]
-    try:
-        usual = [e for e in loadevents.learn(store, now.date(), state.get("car_day_labels")).get(now.weekday(), [])
-                 if e.share >= loadevents.USUAL_SHARE]
-    except Exception:
-        usual = []
-    if usual:
-        names = " + ".join(loadevents.name_for(state.get("pattern_names"), e) for e in usual)
-        first.insert(0, {"text": f"📌 Usual {now.strftime('%A')} ({names})", "callback_data": "plan:usual"})
-    return [first, [{"text": "➕ Dryer", "callback_data": "plan:dryer"}, {"text": "➕ Oven", "callback_data": "plan:oven"}]]
+    today = now.strftime("%Y-%m-%d")
+    rows: list[list[dict]] = []
+    if not planned.declared(state, today):
+        first = [{"text": "🚫 No big loads", "callback_data": "plan:none"}]
+        try:
+            usual = [e for e in loadevents.learn(store, now.date(), state.get("car_day_labels")).get(now.weekday(), [])
+                     if e.share >= loadevents.USUAL_SHARE]
+        except Exception:
+            usual = []
+        if usual:
+            names = " + ".join(loadevents.name_for(state.get("pattern_names"), e) for e in usual)
+            first.insert(0, {"text": f"📌 Usual {now.strftime('%A')} ({names})", "callback_data": "plan:usual"})
+        rows += [first, [{"text": "➕ Dryer", "callback_data": "plan:dryer"}, {"text": "➕ Oven", "callback_data": "plan:oven"}]]
+    if planned.car_answer(state, today) is None:
+        profile = _afternoon_profile(store, now.date(), state.get("car_day_labels"))
+        if profile is not None and profile.n_sessions >= 3:
+            rows.append([{"text": "🚗 Charging the car today", "callback_data": "plan:car"},
+                         {"text": "No car today", "callback_data": "plan:nocar"}])
+    return rows
 
 
 def _pattern_question_buttons(key: str) -> list[dict]:
